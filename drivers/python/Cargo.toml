@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "primusdb_py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "primusdb_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+anyhow = "1.0"
