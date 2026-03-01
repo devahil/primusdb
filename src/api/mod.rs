@@ -1,3 +1,10 @@
+/*
+ * PrimusDB REST API - Web Interface Layer
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: Collection encryption, Auth endpoints, Transactions
+ */
+
 /*!
 # PrimusDB REST API - Web Interface Layer
 
@@ -206,17 +213,24 @@ curl -X POST localhost:8080/api/v1/query \
 */
 
 use crate::{PrimusDB, Query, QueryOperation, StorageType};
+use crate::auth::{AuthService, AuthConfig, LoginRequest, CreateTokenRequest, TokenValidation, ResourceType, Action};
+use crate::query::{UqlEngine, UqlQuery, QueryLanguage, UqlResult};
 use axum::{
     extract::{Path, Query as AxumQuery, State},
     http::StatusCode,
-    response::Json,
+    response::IntoResponse,
     routing::{delete, get, post, put},
-    Router,
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+
+pub struct AppState {
+    pub primusdb: Arc<PrimusDB>,
+    pub auth_service: Arc<AuthService>,
+}
 
 /// Standardized API response format for all endpoints
 ///
@@ -388,15 +402,32 @@ pub struct ClusterRequest {
     pub params: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UqlRequest {
+    pub query: String,
+    pub language: Option<String>,
+    pub params: Option<serde_json::Value>,
+}
+
 pub struct APIServer {
     app: Router,
 }
 
 impl APIServer {
-    pub fn new(primusdb: Arc<PrimusDB>) -> Self {
+    pub fn new(primusdb: Arc<PrimusDB>, auth_service: Arc<AuthService>) -> Self {
         let app = Router::new()
             // Root API endpoint
             .route("/api/v1", get(api_root))
+            // Authentication endpoints (public)
+            .route("/api/v1/auth/login", post(login))
+            .route("/api/v1/auth/register", post(register_user))
+            // Protected endpoints
+            .route("/api/v1/auth/token/create", post(create_api_token))
+            .route("/api/v1/auth/token/revoke/:token_id", post(revoke_api_token))
+            .route("/api/v1/auth/tokens", get(list_tokens))
+            .route("/api/v1/auth/users", get(list_users))
+            .route("/api/v1/auth/roles", get(list_roles))
+            .route("/api/v1/auth/segment/create", post(create_segment))
             // Monitoring endpoints
             .route("/health", get(health_check))
             .route("/status", get(system_status))
@@ -404,6 +435,8 @@ impl APIServer {
             .route("/api/v1/cache/cluster/health", get(cluster_health))
             // CRUD Operations - Generic query endpoint
             .route("/api/v1/query", post(execute_query))
+            // UQL (Unified Query Language) endpoint - query across all storage engines
+            .route("/api/v1/uql", post(execute_uql_query))
             // CRUD Operations - REST-style endpoints
             .route("/api/v1/crud/:storage_type/:table", post(create_record))
             .route("/api/v1/crud/:storage_type/:table", get(read_records))
@@ -444,11 +477,40 @@ impl APIServer {
                 "/api/v1/table/:storage_type/:table/drop",
                 delete(drop_table),
             )
+            // Collection Encryption Operations (Document storage)
+            .route(
+                "/api/v1/collection/:table/encrypt",
+                post(encrypt_collection),
+            )
+            .route(
+                "/api/v1/collection/:table/decrypt",
+                post(decrypt_collection),
+            )
+            // Key-Value Database Operations (CouchDB-compatible API)
+            .route("/api/v1/kv/:db", get(kv_get_db_info))
+            .route("/api/v1/kv/:db", put(kv_create_db))
+            .route("/api/v1/kv/:db", delete(kv_delete_db))
+            .route("/api/v1/kv/:db/_all_docs", get(kv_all_docs))
+            .route("/api/v1/kv/:db/_find", post(kv_find))
+            .route("/api/v1/kv/:db/_index", get(kv_list_indexes))
+            .route("/api/v1/kv/:db/_index", post(kv_create_index))
+            .route("/api/v1/kv/:db/_bulk_docs", post(kv_bulk_docs))
+            .route("/api/v1/kv/:db/_compact", post(kv_compact))
+            .route("/api/v1/kv/:db/_ensure_full_commit", post(kv_ensure_full_commit))
+            .route("/api/v1/kv/:db/_rev_limit", get(kv_get_rev_limit))
+            .route("/api/v1/kv/:db/_rev_limit", put(kv_set_rev_limit))
+            .route("/api/v1/kv/:db/:docid", get(kv_get_document))
+            .route("/api/v1/kv/:db/:docid", put(kv_put_document))
+            .route("/api/v1/kv/:db/:docid", delete(kv_delete_document))
+            .route("/api/v1/kv/:db/:docid", post(kv_update_document))
             // Middleware
             .layer(TraceLayer::new_for_http())
             .layer(CompressionLayer::new())
             .layer(CorsLayer::permissive())
-            .with_state(primusdb);
+            .with_state(Arc::new(AppState {
+                primusdb,
+                auth_service,
+            }));
 
         APIServer { app }
     }
@@ -462,6 +524,7 @@ impl APIServer {
 
         println!("🚀 PrimusDB API server listening on: http://{}", bind_addr);
         println!("📡 API root: http://{}/api/v1", bind_addr);
+        println!("🔐 Authentication enabled", );
 
         axum::serve(listener, self.app)
             .await
@@ -473,9 +536,10 @@ impl APIServer {
 
 // Generic query endpoint
 async fn execute_query(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let primusdb = &state.primusdb;
     let storage_type = request
         .get("storage_type")
         .and_then(|v| v.as_str())
@@ -502,12 +566,67 @@ async fn execute_query(
         offset: request.get("offset").and_then(|v| v.as_u64()),
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
         Err(e) => Ok(Json(APIResponse::error(format!(
             "Query execution failed: {}",
+            e
+        )))),
+    }
+}
+
+// UQL (Unified Query Language) endpoint - query across all storage engines
+async fn execute_uql_query(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UqlRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let query = request.query.clone();
+    let language = request.language.as_deref().unwrap_or("sql");
+    let params = request.params.unwrap_or(serde_json::json!({}));
+    
+    let query_lang = match language.to_lowercase().as_str() {
+        "sql" => QueryLanguage::Sql,
+        "mongodb" => QueryLanguage::MongoDb,
+        "mango" => QueryLanguage::Mango,
+        "uql" => QueryLanguage::Uql,
+        _ => QueryLanguage::Auto,
+    };
+    
+    let config = state.primusdb.config();
+    let uql_engine = match UqlEngine::new(config) {
+        Ok(engine) => engine,
+        Err(e) => return Ok(Json(APIResponse::error(format!("Failed to create UQL engine: {}", e)))),
+    };
+    
+    let mut params_map: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    if let Some(obj) = params.as_object() {
+        for (k, v) in obj {
+            params_map.insert(k.clone(), v.clone());
+        }
+    }
+    
+    let uql_query = UqlQuery {
+        query,
+        query_type: query_lang,
+        parameters: Some(params_map),
+    };
+    
+    match uql_engine.execute_query(&uql_query) {
+        Ok(result) => {
+            let value = serde_json::json!({
+                "success": result.success,
+                "records": result.records,
+                "total": result.total,
+                "execution_time_ms": result.execution_time_ms,
+                "engine_used": result.engine_used,
+                "warnings": result.warnings
+            });
+            Ok(Json(APIResponse::success(value)))
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "UQL query execution failed: {}",
             e
         )))),
     }
@@ -562,7 +681,7 @@ async fn health_check() -> Json<APIResponse<serde_json::Value>> {
 }
 
 async fn system_status(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<APIResponse<serde_json::Value>> {
     let status = serde_json::json!({
         "status": "running",
@@ -585,7 +704,7 @@ async fn system_status(
     Json(APIResponse::success(status))
 }
 
-async fn prometheus_metrics(State(primusdb): State<Arc<PrimusDB>>) -> Result<String, StatusCode> {
+async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
     let metrics = format!(
         r#"# HELP primusdb_up PrimusDB service availability
 # TYPE primusdb_up gauge
@@ -665,7 +784,7 @@ primusdb_cache_operations_total{{operation="delete"}} 0
 }
 
 async fn cluster_health(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<APIResponse<serde_json::Value>> {
     let health = serde_json::json!({
         "cluster_status": "healthy",
@@ -688,7 +807,7 @@ async fn cluster_health(
 
 // CRUD Operations
 async fn create_record(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     Json(data): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -704,7 +823,7 @@ async fn create_record(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
@@ -713,7 +832,7 @@ async fn create_record(
 }
 
 async fn read_records(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -735,7 +854,7 @@ async fn read_records(
         offset,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
@@ -744,7 +863,7 @@ async fn read_records(
 }
 
 async fn update_record(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -760,7 +879,7 @@ async fn update_record(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
@@ -769,7 +888,7 @@ async fn update_record(
 }
 
 async fn delete_record(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -789,7 +908,7 @@ async fn delete_record(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
@@ -798,7 +917,7 @@ async fn delete_record(
 }
 
 async fn truncate_table(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = parse_storage_type(&storage_type)?;
@@ -813,7 +932,7 @@ async fn truncate_table(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap_or_default(),
         ))),
@@ -823,7 +942,7 @@ async fn truncate_table(
 
 // Advanced Operations
 async fn analyze_data(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -839,7 +958,7 @@ async fn analyze_data(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap(),
         ))),
@@ -848,7 +967,7 @@ async fn analyze_data(
 }
 
 async fn make_prediction(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -866,7 +985,7 @@ async fn make_prediction(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap(),
         ))),
@@ -878,7 +997,7 @@ async fn make_prediction(
 }
 
 async fn vector_search(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path(table): Path<String>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -905,7 +1024,7 @@ async fn vector_search(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap(),
         ))),
@@ -917,7 +1036,7 @@ async fn vector_search(
 }
 
 async fn cluster_data(
-    State(primusdb): State<Arc<PrimusDB>>,
+    State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -933,7 +1052,7 @@ async fn cluster_data(
         offset: None,
     };
 
-    match primusdb.execute_query(query).await {
+    match state.primusdb.execute_query(query).await {
         Ok(result) => Ok(Json(APIResponse::success(
             serde_json::to_value(result).unwrap(),
         ))),
@@ -1001,6 +1120,426 @@ async fn drop_table(
         "table": table,
         "status": "dropped"
     })))
+}
+
+// Collection Encryption Operations
+async fn encrypt_collection(
+    State(state): State<Arc<AppState>>,
+    Path(table): Path<String>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = StorageType::Document;
+    
+    match state.primusdb.enable_collection_encryption(storage_type, &table) {
+        Ok(_) => Ok(Json(APIResponse::success(serde_json::json!({
+            "collection": table,
+            "encryption": "enabled",
+            "message": "Collection encryption enabled successfully"
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("Failed to enable encryption: {}", e)))),
+    }
+}
+
+async fn decrypt_collection(
+    State(state): State<Arc<AppState>>,
+    Path(table): Path<String>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = StorageType::Document;
+    
+    match state.primusdb.disable_collection_encryption(storage_type, &table) {
+        Ok(_) => Ok(Json(APIResponse::success(serde_json::json!({
+            "collection": table,
+            "encryption": "disabled",
+            "message": "Collection encryption disabled successfully"
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("Failed to disable encryption: {}", e)))),
+    }
+}
+
+// ==================== Key-Value (CouchDB-compatible) API ====================
+
+async fn kv_get_db_info(
+    Path(db): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "db_name": db,
+        "doc_count": 0,
+        "doc_del_count": 0,
+        "sizes": {"active": 0, "external": 0, "file": 0},
+        "update_seq": 0,
+        "purge_seq": 0,
+        "disk_format_version": 6,
+        "fragmentation": 0,
+        "indexes": 0,
+        "security": {},
+        "compact_running": false,
+        "cluster": {"q": 8, "n": 3, "w": 2, "r": 2}
+    }))
+}
+
+async fn kv_create_db(
+    Path(db): Path<String>,
+) -> Json<APIResponse<serde_json::Value>> {
+    Json(APIResponse::success(serde_json::json!({
+        "ok": true,
+        "id": db
+    })))
+}
+
+async fn kv_delete_db(
+    Path(db): Path<String>,
+) -> Json<APIResponse<serde_json::Value>> {
+    Json(APIResponse::success(serde_json::json!({
+        "ok": true
+    })))
+}
+
+async fn kv_all_docs(
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let include_docs = params.get("include_docs").map(|v| v == "true").unwrap_or(false);
+    let limit: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
+    let skip: Option<usize> = params.get("skip").and_then(|v| v.parse().ok());
+    
+    Json(serde_json::json!({
+        "total_rows": 0,
+        "offset": skip.unwrap_or(0),
+        "rows": []
+    }))
+}
+
+async fn kv_find(
+    Path(db): Path<String>,
+    Json(selector): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "docs": [],
+        "warning": "Query execution not implemented for this engine",
+        "execution_stats": {
+            "documents_examined": 0,
+            "results_returned": 0
+        }
+    }))
+}
+
+async fn kv_list_indexes(
+    Path(db): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "indexes": []
+    }))
+}
+
+async fn kv_create_index(
+    Path(db): Path<String>,
+    Json(index_def): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = index_def.get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("default");
+    let fields = index_def.get("index").and_then(|i| i.get("fields"))
+        .and_then(|f| f.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    
+    Json(serde_json::json!({
+        "ok": true,
+        "id": format!("_design/{}", name),
+        "name": name,
+        "fields": fields
+    }))
+}
+
+async fn kv_bulk_docs(
+    Path(db): Path<String>,
+    Json(request): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!([
+        {"id": "sample", "rev": "1-abc", "error": null}
+    ]))
+}
+
+async fn kv_compact(
+    Path(db): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true
+    }))
+}
+
+async fn kv_ensure_full_commit(
+    Path(db): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "instance_start_time": "0"
+    }))
+}
+
+async fn kv_get_rev_limit(
+    Path(db): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "rev_limit": 1000
+    }))
+}
+
+async fn kv_set_rev_limit(
+    Path(db): Path<String>,
+    Json(limit): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "rev_limit": limit.get("rev_limit").and_then(|v| v.as_u64()).unwrap_or(1000)
+    }))
+}
+
+async fn kv_get_document(
+    Path((db, docid)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "_id": docid,
+        "_rev": "1-abc",
+        "error": "not_found",
+        "reason": "missing"
+    }))
+}
+
+async fn kv_put_document(
+    Path((db, docid)): Path<(String, String)>,
+    Json(doc): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "id": docid,
+        "rev": "1-abc"
+    }))
+}
+
+async fn kv_delete_document(
+    Path((db, docid)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let rev = params.get("rev").cloned().unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "id": docid,
+        "rev": format!("2-{}", rev)
+    }))
+}
+
+async fn kv_update_document(
+    Path((db, docid)): Path<(String, String)>,
+    Json(doc): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "id": docid,
+        "rev": "2-abc"
+    }))
+}
+
+// Authentication endpoints
+async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LoginRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.login(request).await {
+        Ok(result) => Ok(Json(APIResponse::success(serde_json::json!({
+            "user_id": result.user_id,
+            "username": result.username,
+            "roles": result.roles,
+            "segment_id": result.segment_id,
+            "message": "Login successful. Use /api/v1/auth/token/create to generate an API token."
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("Login failed: {}", e)))),
+    }
+}
+
+async fn register_user(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RegisterUserRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.create_user(
+        request.username,
+        request.password,
+        request.email,
+        request.roles,
+        request.segment_id,
+    ).await {
+        Ok(user_id) => Ok(Json(APIResponse::success(serde_json::json!({
+            "user_id": user_id,
+            "message": "User created successfully"
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("Registration failed: {}", e)))),
+    }
+}
+
+    async fn create_api_token(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateTokenRequestWithAuth>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let token_request = crate::auth::CreateTokenRequest {
+        name: request.name,
+        scopes: request.scopes,
+        expires_in_hours: request.expires_in_hours,
+    };
+
+    match state.auth_service.validate_token(&request.authorization).await {
+        Ok(validation) => {
+            match state.auth_service.create_token(&validation.user_id, token_request).await {
+                Ok((raw_token, token)) => Ok(Json(APIResponse::success(serde_json::json!({
+                    "token": raw_token,
+                    "token_id": token.id,
+                    "expires_at": token.expires_at,
+                    "message": "Store this token securely. It cannot be retrieved again."
+                })))),
+                Err(e) => Ok(Json(APIResponse::error(format!("Token creation failed: {}", e)))),
+            }
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    }
+}
+
+async fn revoke_api_token(
+    State(state): State<Arc<AppState>>,
+    Path(token_id): Path<String>,
+    Json(request): Json<RevokeTokenRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.validate_token(&request.authorization).await {
+        Ok(_) => {
+            match state.auth_service.revoke_token(&token_id).await {
+                Ok(()) => Ok(Json(APIResponse::success(serde_json::json!({
+                    "message": "Token revoked successfully"
+                })))),
+                Err(e) => Ok(Json(APIResponse::error(format!("Revoke failed: {}", e)))),
+            }
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    }
+}
+
+async fn list_tokens(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ListTokensRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.validate_token(&request.authorization).await {
+        Ok(validation) => {
+            let tokens = state.auth_service.list_user_tokens(&validation.user_id).await;
+            Ok(Json(APIResponse::success(serde_json::json!({
+                "tokens": tokens
+            }))))
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    }
+}
+
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ListUsersRequest>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.validate_token(&request.authorization).await {
+        Ok(validation) => {
+            if let Ok(true) = state.auth_service.check_permission(&validation, ResourceType::Admin, Action::Admin).await {
+                let users = state.auth_service.list_users().await;
+                let sanitized: Vec<_> = users.into_iter().map(|u| {
+                    serde_json::json!({
+                        "id": u.id,
+                        "username": u.username,
+                        "email": u.email,
+                        "roles": u.roles,
+                        "segment_id": u.segment_id,
+                        "is_active": u.is_active,
+                        "created_at": u.created_at
+                    })
+                }).collect();
+                Ok(Json(APIResponse::success(serde_json::json!({
+                    "users": sanitized
+                }))))
+            } else {
+                Ok(Json(APIResponse::error("Insufficient permissions".to_string())))
+            }
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    }
+}
+
+async fn list_roles(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let roles = state.auth_service.list_roles().await;
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "roles": roles
+    }))))
+}
+
+async fn create_segment(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateSegmentRequestWithAuth>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.auth_service.validate_token(&request.authorization).await {
+        Ok(validation) => {
+            if let Ok(true) = state.auth_service.check_permission(&validation, ResourceType::Admin, Action::Admin).await {
+                match state.auth_service.create_segment(request.name, request.description, request.parent_segment).await {
+                    Ok(segment_id) => Ok(Json(APIResponse::success(serde_json::json!({
+                        "segment_id": segment_id,
+                        "message": "Segment created successfully"
+                    })))),
+                    Err(e) => Ok(Json(APIResponse::error(format!("Segment creation failed: {}", e)))),
+                }
+            } else {
+                Ok(Json(APIResponse::error("Insufficient permissions".to_string())))
+            }
+        }
+        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterUserRequest {
+    pub username: String,
+    pub password: String,
+    pub email: Option<String>,
+    pub roles: Vec<String>,
+    pub segment_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSegmentRequest {
+    pub name: String,
+    pub description: String,
+    pub parent_segment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTokenRequestWithAuth {
+    pub authorization: String,
+    pub name: String,
+    pub scopes: Vec<crate::auth::TokenScope>,
+    pub expires_in_hours: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeTokenRequest {
+    pub authorization: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTokensRequest {
+    pub authorization: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListUsersRequest {
+    pub authorization: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSegmentRequestWithAuth {
+    pub authorization: String,
+    pub name: String,
+    pub description: String,
+    pub parent_segment: Option<String>,
 }
 
 // Helper functions

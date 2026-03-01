@@ -1,3 +1,10 @@
+/*
+ * PrimusDB - Hybrid Database Engine
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha
+ */
+
 /*!
 # PrimusDB - Hybrid Database Engine
 
@@ -162,6 +169,7 @@ use std::sync::Arc;
 /// Core modules for PrimusDB functionality
 pub mod ai;
 pub mod api;
+pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod cluster;
@@ -171,6 +179,7 @@ pub mod drivers;
 pub mod error;
 // pub mod protocol; // Temporarily disabled for compilation
 pub mod storage;
+pub mod query;
 pub mod transaction;
 
 /// Re-export error types for convenience
@@ -381,6 +390,10 @@ pub enum StorageType {
     /// Best for: Traditional applications, complex relationships, reporting
     /// Features: Foreign keys, joins, constraints, ACID compliance
     Relational,
+    /// Key-Value storage (CouchDB-compatible API)
+    /// Best for: Document stores, caching, session management
+    /// Features: _id, _rev, bulk operations, views, Mango queries
+    KeyValue,
 }
 
 /// Result types returned by database operations
@@ -491,34 +504,40 @@ pub enum QueryOperation {
 
 impl PrimusDB {
     pub fn new(config: PrimusDBConfig) -> Result<Self> {
+        let config_clone = config.clone();
+        
         let mut storage_engines: HashMap<StorageType, Arc<dyn storage::StorageEngine>> =
             HashMap::new();
 
         // Initialize storage engines
         storage_engines.insert(
             StorageType::Columnar,
-            Arc::new(storage::columnar::ColumnarEngine::new(&config)?),
+            Arc::new(storage::columnar::ColumnarEngine::new(&config_clone)?),
         );
         storage_engines.insert(
             StorageType::Vector,
-            Arc::new(storage::vector::VectorEngine::new(&config)?),
+            Arc::new(storage::vector::VectorEngine::new(&config_clone)?),
         );
         storage_engines.insert(
             StorageType::Document,
-            Arc::new(storage::document::DocumentEngine::new(&config)?),
+            Arc::new(storage::document::DocumentEngine::new(&config_clone)?),
         );
         storage_engines.insert(
             StorageType::Relational,
-            Arc::new(storage::relational::RelationalEngine::new(&config)?),
+            Arc::new(storage::relational::RelationalEngine::new(&config_clone)?),
+        );
+        storage_engines.insert(
+            StorageType::KeyValue,
+            Arc::new(storage::keyvalue::KeyValueEngine::new(&config_clone)?),
         );
 
-        let crypto_manager = Arc::new(crypto::CryptoManager::new(&config.security)?);
-        let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(&config)?);
+        let crypto_manager = Arc::new(crypto::CryptoManager::new(&config_clone.security)?);
+        let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(&config_clone)?);
         let transaction_manager = Arc::new(transaction::TransactionManager::new(
-            &config,
+            &config_clone,
             consensus_engine.clone(),
         )?);
-        let ai_engine = Arc::new(ai::AIEngine::new(&config)?);
+        let ai_engine = Arc::new(ai::AIEngine::new(&config_clone)?);
 
         Ok(PrimusDB {
             config,
@@ -528,6 +547,10 @@ impl PrimusDB {
             transaction_manager,
             ai_engine,
         })
+    }
+
+    pub fn config(&self) -> &PrimusDBConfig {
+        &self.config
     }
 
     pub async fn execute_query(&self, query: Query) -> Result<QueryResult> {
@@ -679,5 +702,57 @@ impl PrimusDB {
     pub fn get_cluster_status(&self) -> Result<cluster::ClusterStatus> {
         // TODO: Implement cluster status
         Ok(cluster::ClusterStatus::default())
+    }
+
+    pub fn enable_collection_encryption(&self, storage_type: StorageType, collection: &str) -> Result<()> {
+        let engine = self.storage_engines.get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        
+        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+            doc_engine.enable_collection_encryption(collection)
+        } else {
+            Err(crate::Error::ValidationError(
+                "Collection encryption only supported for Document storage".to_string()
+            ))
+        }
+    }
+
+    pub fn disable_collection_encryption(&self, storage_type: StorageType, collection: &str) -> Result<()> {
+        let engine = self.storage_engines.get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        
+        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+            doc_engine.disable_collection_encryption(collection)
+        } else {
+            Err(crate::Error::ValidationError(
+                "Collection encryption only supported for Document storage".to_string()
+            ))
+        }
+    }
+
+    pub fn is_collection_encrypted(&self, storage_type: StorageType, collection: &str) -> Result<bool> {
+        let engine = self.storage_engines.get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        
+        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+            doc_engine.is_collection_encrypted(collection)
+        } else {
+            Err(crate::Error::ValidationError(
+                "Collection encryption only supported for Document storage".to_string()
+            ))
+        }
+    }
+
+    pub fn get_encrypted_collections(&self, storage_type: StorageType) -> Result<Vec<String>> {
+        let engine = self.storage_engines.get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        
+        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+            doc_engine.get_encrypted_collections()
+        } else {
+            Err(crate::Error::ValidationError(
+                "Collection encryption only supported for Document storage".to_string()
+            ))
+        }
     }
 }

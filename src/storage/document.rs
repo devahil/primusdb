@@ -1,16 +1,20 @@
+/*
+ * PrimusDB Document Storage Engine
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: Collection-level encryption methods
+ */
+
 use crate::{
     storage::{Schema, StorageEngine, TableInfo},
     PrimusDBConfig, Record, Result,
 };
 use async_trait::async_trait;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-
-pub struct DocumentEngine {
-    config: PrimusDBConfig,
-    collections: Arc<RwLock<HashMap<String, DocumentCollection>>>,
-}
+use crate::crypto::FileEncryptionManager;
 
 #[derive(Debug)]
 struct DocumentCollection {
@@ -33,7 +37,7 @@ struct Document {
 struct DocumentIndex {
     field: String,
     index_type: DocumentIndexType,
-    data: HashMap<String, Vec<String>>, // field_value -> document_ids
+    data: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -44,12 +48,60 @@ enum DocumentIndexType {
     GeoSpatial,
 }
 
+#[derive(Clone)]
+pub struct DocumentEngine {
+    config: PrimusDBConfig,
+    collections: Arc<RwLock<HashMap<String, DocumentCollection>>>,
+    /// File encryption manager for optional data-at-rest security
+    /// Document encryption is OPTIONAL - by default JSON is stored plaintext
+    /// for human readability. Users can enable encryption per collection.
+    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
+    /// Track which collections have encryption enabled
+    encrypted_collections: Arc<RwLock<HashMap<String, bool>>>,
+}
+
 impl DocumentEngine {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
+        let file_encryption = if config.security.encryption_enabled {
+            Some(FileEncryptionManager::new())
+        } else {
+            None
+        };
+        
         Ok(DocumentEngine {
             config: config.clone(),
             collections: Arc::new(RwLock::new(HashMap::new())),
+            file_encryption: Arc::new(RwLock::new(file_encryption)),
+            encrypted_collections: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    pub fn enable_collection_encryption(&self, collection: &str) -> Result<()> {
+        let mut encrypted = self.encrypted_collections.write().unwrap();
+        encrypted.insert(collection.to_string(), true);
+        println!("Encryption enabled for collection: {}", collection);
+        Ok(())
+    }
+
+    pub fn disable_collection_encryption(&self, collection: &str) -> Result<()> {
+        let mut encrypted = self.encrypted_collections.write().unwrap();
+        encrypted.insert(collection.to_string(), false);
+        println!("Encryption disabled for collection: {}", collection);
+        Ok(())
+    }
+
+    pub fn is_collection_encrypted(&self, collection: &str) -> Result<bool> {
+        let encrypted = self.encrypted_collections.read().unwrap();
+        Ok(*encrypted.get(collection).unwrap_or(&false))
+    }
+
+    pub fn get_encrypted_collections(&self) -> Result<Vec<String>> {
+        let encrypted = self.encrypted_collections.read().unwrap();
+        Ok(encrypted
+            .iter()
+            .filter(|(_, v)| **v)
+            .map(|(k, _)| k.clone())
+            .collect())
     }
 
     fn match_document(document: &Document, conditions: &serde_json::Value) -> bool {
@@ -133,6 +185,10 @@ impl StorageEngine for DocumentEngine {
         collection.documents.insert(id, document);
 
         Ok(1)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     async fn select(

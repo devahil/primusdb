@@ -1,3 +1,10 @@
+/*
+ * PrimusDB Vector Storage Engine
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: as_any() method for engine-specific features
+ */
+
 /*!
 # Vector Storage Engine - Similarity Search Database
 
@@ -263,7 +270,12 @@ use crate::{
 use async_trait::async_trait;
 
 use sled::Db;
+use std::any::Any;
 use std::collections::HashMap;
+use crate::crypto::FileEncryptionManager;
+
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Vector storage engine for high-performance similarity search
 ///
@@ -296,6 +308,10 @@ pub struct VectorEngine {
     config: PrimusDBConfig,
     /// Embedded database for persistent vector storage
     db: Db,
+    /// File encryption manager for data-at-rest security
+    /// Vector files are encrypted with AES-256-GCM to prevent
+    /// unauthorized reading with hexadecimal editors
+    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
 }
 
 /// Internal representation of a vector collection
@@ -338,9 +354,17 @@ impl VectorEngine {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/vector", config.storage.data_dir);
         let db = sled::open(&db_path)?;
+        
+        let file_encryption = if config.security.encryption_enabled {
+            Some(FileEncryptionManager::new())
+        } else {
+            None
+        };
+        
         Ok(VectorEngine {
             config: config.clone(),
             db,
+            file_encryption: Arc::new(RwLock::new(file_encryption)),
         })
     }
 
@@ -362,6 +386,10 @@ impl VectorEngine {
 
 #[async_trait]
 impl StorageEngine for VectorEngine {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn insert(
         &self,
         table: &str,

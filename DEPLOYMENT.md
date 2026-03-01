@@ -1,6 +1,7 @@
 # PrimusDB Deployment Guide
+=========================
 
-This guide covers deploying PrimusDB in various environments, from single-node installations to large-scale distributed clusters.
+This guide covers deploying PrimusDB v1.2.0-alpha in various environments, from single-node installations to large-scale distributed clusters.
 
 ## Quick Start Deployment
 
@@ -662,15 +663,50 @@ key_rotation_interval = 86400
 auth_required = true
 
 [security.tls]
-certificate_path = "/etc/ssl/primusdb/cert.pem"
-key_path = "/etc/ssl/primusdb/key.pem"
+certificate_path = "/etc/primusdb/cert.pem"
+key_path = "/etc/primusdb/key.pem"
 min_tls_version = "1.2"
 
 [security.auth]
-provider = "jwt"
-secret_key = "your-secret-key-here"
-token_expiry_hours = 24
-rate_limit_requests_per_minute = 1000
+require_auth = true
+min_password_length = 8
+password_expiry_days = 90
+max_login_attempts = 5
+lockout_duration_minutes = 30
+token_expiry_hours = 8760
+session_timeout_minutes = 60
+```
+
+### Production Authentication Setup
+```bash
+# 1. Change default admin password
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+
+# 2. Create admin token
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{"authorization": "session_token", "name": "admin-prod", "scopes": [{"resource": "All", "actions": ["Read", "Write", "Delete", "Create", "Admin"]}], "expires_in_hours": 8760}'
+
+# 3. Create application tokens
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{"authorization": "admin_token", "name": "app-readonly", "scopes": [{"resource": "All", "actions": ["Read"]}], "expires_in_hours": 720}'
+
+# 4. List users (admin only)
+curl -X GET http://localhost:8080/api/v1/auth/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer admin_token"
+```
+
+### Multi-Tenancy Setup
+```bash
+# Create data segments
+curl -X POST http://localhost:8080/api/v1/auth/segment/create \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer admin_token" \
+  -d '{"name": "customer-a", "description": "Customer A data", "parent_segment": null}'
 ```
 
 ## Performance Optimization

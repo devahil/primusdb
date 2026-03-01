@@ -1,9 +1,9 @@
 [package]
 name = "primusdb"
-version = "1.0.0"
+version = "1.2.0-alpha"
 edition = "2021"
 authors = ["Devahil Leivzieük <devahil@gmail.com>", "PrimusDB Team"]
-description = "A hybrid database engine combining columnar, vector, document, and relational storage"
+description = "A hybrid database engine combining columnar, vector, document, and relational storage with encryption"
 license = "GPL-3.0"
 repository = "https://github.com/devahil/primusdb.git"
 
@@ -90,6 +90,9 @@ siphasher = "1.0"
 hex = "0.4"
 hex-literal = "0.4"
 secp256k1 = "0.28"
+
+# Base64 encoding
+base64 = "0.21"
 
 # Secure Protocol
 ring = "0.17"

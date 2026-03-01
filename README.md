@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.2.0--alpha-blue.svg)]()
 
 PrimusDB is a high-performance, hybrid database engine written in Rust that combines multiple storage paradigms (columnar, vector, document, and relational) into a unified system. Designed for modern applications requiring analytics, AI/ML integration, and flexible data management.
 
@@ -16,16 +16,29 @@ PrimusDB is a high-performance, hybrid database engine written in Rust that comb
 - **Vector Engine**: Advanced similarity search with cosine similarity, Euclidean distance, and optimized indexing
 - **Document Engine**: Flexible JSON document storage with dynamic indexing and complex queries
 - **Relational Engine**: Full relational storage with ACID transactions, foreign keys, and complex joins
+- **Key-Value Engine**: CouchDB-compatible API with _id/_rev versioning, Mango queries, bulk operations, and collection encryption
 
 ### Core Capabilities
 - **CRUD Operations**: Complete create, read, update, delete across all storage types with advanced filtering
 - **Transaction Support**: Full transaction management with ACID compliance, rollback, and commit
 - **AI/ML Integration**: Advanced predictive analytics, anomaly detection, pattern analysis, and forecasting
 - **Consensus Mechanism**: Hyperledger-style consensus with corruption detection and integrity validation
+- **Distributed Sync**: Enterprise-grade cluster synchronization with Raft-style consensus, vector clocks, and cross-node reconciliation
 - **Encryption**: Enterprise-grade encryption for data at rest, in transit, in memory, and buffers
 - **Clustering**: Production-ready distributed clustering with node discovery, load balancing, and automatic failover
 - **Compression**: LZ4 and Zstd algorithms with adaptive compression and advanced indexing
 - **Advanced Analytics**: Complex joins, aggregations, and analytical queries
+
+### Security & Authentication
+- **User Authentication**: Secure login with Argon2 password hashing
+- **API Tokens**: Cryptographically secure tokens with SHA-256 hashing
+- **RBAC**: Role-based access control (admin, developer, analyst, readonly)
+- **Multi-tenancy**: Segment-based data isolation
+- **Account Protection**: Brute-force protection with account lockout
+- **Cluster Security**: Hyperledger-style genesis keys for node authentication
+- **Data-at-Rest Encryption**: AES-256-GCM for all binary data files
+  - Columnar, Vector, Relational: Always encrypted
+  - Documents: Optional encryption (JSON plaintext by default)
 
 ### API & Interfaces
 - **REST API**: Complete HTTP interface for all operations
@@ -53,6 +66,25 @@ docker run -p 8080:8080 primusdb
 ### Start the Server
 ```bash
 ./target/release/primusdb-server --host 0.0.0.0 --port 8080
+```
+
+### Authentication (v1.1.0+)
+```bash
+# 1. Login with default credentials (admin/admin123)
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+
+# 2. Create API token (use token from login response)
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{"authorization": "TOKEN", "name": "my-token", "scopes": [{"resource": "All", "actions": ["Read", "Write"]}]}'
+
+# 3. Use token in requests
+curl -X POST http://localhost:8080/api/v1/crud/columnar/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -d '{"name": "Jane", "age": 25}'
 ```
 
 ### Basic Operations with CLI
@@ -179,6 +211,31 @@ discovery_servers = []
 
 ### Cluster Operations
 - `GET /api/v1/cache/cluster/health` - Cluster health check
+
+### Key-Value Operations (CouchDB-compatible)
+- `GET /api/v1/kv` - List all Key-Value databases
+- `POST /api/v1/kv` - Create Key-Value database
+- `DELETE /api/v1/kv/{db}` - Delete Key-Value database
+- `GET /api/v1/kv/{db}/{id}` - Get document by ID
+- `PUT /api/v1/kv/{db}/{id}` - Create/update document
+- `DELETE /api/v1/kv/{db}/{id}` - Delete document (with _rev)
+- `GET /api/v1/kv/{db}/_all_docs` - List all documents with pagination
+- `POST /api/v1/kv/{db}/_find` - Mango query (selector-based)
+- `PUT /api/v1/kv/{db}/_index` - Create index
+- `POST /api/v1/kv/{db}/_bulk_docs` - Bulk document operations
+- `POST /api/v1/kv/{db}/_compact` - Compact database
+- `POST /api/v1/kv/{db}/_encrypt` - Encrypt collection
+- `POST /api/v1/kv/{db}/_decrypt` - Decrypt collection
+
+### Authentication
+- `POST /api/v1/auth/login` - User login (returns session info)
+- `POST /api/v1/auth/register` - User registration
+- `POST /api/v1/auth/token/create` - Create API token
+- `POST /api/v1/auth/token/revoke/:token_id` - Revoke API token
+- `GET /api/v1/auth/tokens` - List user tokens
+- `GET /api/v1/auth/users` - List users (admin only)
+- `GET /api/v1/auth/roles` - List available roles
+- `POST /api/v1/auth/segment/create` - Create data segment (admin only)
 
 ## Language Drivers
 
@@ -310,6 +367,24 @@ High-performance similarity search and vector operations.
 - Configurable vector dimensions
 - Batch processing and real-time search
 
+### Key-Value Engine
+CouchDB-compatible document storage with MVCC versioning.
+
+**Use Cases:**
+- Session storage
+- User profiles
+- Caching layer
+- Configuration management
+- Real-time applications
+
+**Features:**
+- _id/_rev versioning (MVCC)
+- Mango queries (selector-based)
+- Bulk document operations
+- Collection-level encryption
+- Index creation and management
+- Tombstone deletion for replication support
+
 ## Docker Deployment
 
 ### Build Image
@@ -418,15 +493,24 @@ PrimusDB Architecture
 
 ## Security
 
+### Authentication & Authorization
+- **User Authentication**: Secure login with Argon2 password hashing
+- **API Tokens**: Cryptographically secure tokens with SHA-256 hashing
+- **RBAC**: Role-based access control with predefined roles (admin, developer, analyst, readonly)
+- **Multi-tenancy**: Segment-based data isolation
+- **Account Lockout**: Protection against brute-force attacks
+
 ### Encryption
-- Data at rest: AES-256 encryption
+- Data at rest: AES-256-GCM encryption
 - Data in transit: TLS support
 - Key rotation: Configurable intervals
+- Token encryption: AES-256-GCM
 
-### Authentication
-- Basic auth framework (configurable)
-- API key support
-- User management basics
+### Cluster Security (Hyperledger-style)
+- Genesis key system for trust establishment
+- Node identity certificates
+- Mutual authentication between nodes
+- Trust chain validation
 
 ## Monitoring
 
@@ -497,3 +581,4 @@ PrimusDB is fully implemented with all planned features completed:
 ## Acknowledgments
 
 Built with Rust, inspired by modern database architectures combining the best of multiple paradigms.
+ 

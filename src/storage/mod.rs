@@ -1,3 +1,10 @@
+/*
+ * PrimusDB Storage Engine Architecture
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: as_any() method for engine-specific features
+ */
+
 /*!
 # PrimusDB Storage Engine Architecture
 
@@ -126,6 +133,7 @@ let updated_count = storage_engine.update("users", Some(&conditions), &update_da
 use crate::{Record, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 /// Core trait defining the interface for all storage engines
 ///
@@ -141,6 +149,9 @@ use serde::{Deserialize, Serialize};
 /// violations, and transaction conflicts.
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
+    /// Get a reference to self as Any for downcasting
+    fn as_any(&self) -> &dyn Any;
+
     /// Insert a new record into the specified table
     ///
     /// # Arguments
@@ -580,9 +591,15 @@ pub mod relational;
 /// SIMD operations, and multiple distance metrics.
 pub mod vector;
 
+/// Key-Value storage engine implementation (CouchDB-compatible)
+///
+/// Document-oriented key-value storage with _id, _rev support,
+/// bulk operations, views, and Mango query syntax.
+pub mod keyvalue;
+
 /*
 Storage Module Hierarchy:
-═══════════════════════════
+══════════════════════════
 
 storage/
 ├── mod.rs              - Core traits and types
@@ -601,3 +618,48 @@ storage/
     ├── similarity.rs  - Distance metrics and search
     └── quantization.rs- Vector compression techniques
 */
+
+/// Storage engine type enumeration
+/// Used to identify which storage engine handles a particular table or operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageEngineType {
+    /// Columnar storage engine - optimized for analytics and OLAP
+    Columnar,
+    /// Vector storage engine - optimized for similarity search and ML
+    Vector,
+    /// Document storage engine - optimized for JSON documents
+    Document,
+    /// Relational storage engine - optimized for SQL and transactions
+    Relational,
+    /// Key-Value storage engine - optimized for high-speed access
+    KeyValue,
+}
+
+impl StorageEngineType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageEngineType::Columnar => "columnar",
+            StorageEngineType::Vector => "vector",
+            StorageEngineType::Document => "document",
+            StorageEngineType::Relational => "relational",
+            StorageEngineType::KeyValue => "keyvalue",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "columnar" => Some(StorageEngineType::Columnar),
+            "vector" => Some(StorageEngineType::Vector),
+            "document" => Some(StorageEngineType::Document),
+            "relational" => Some(StorageEngineType::Relational),
+            "keyvalue" | "kv" => Some(StorageEngineType::KeyValue),
+            _ => None,
+        }
+    }
+}
+
+impl Default for StorageEngineType {
+    fn default() -> Self {
+        StorageEngineType::Relational
+    }
+}

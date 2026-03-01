@@ -1,3 +1,10 @@
+/**
+ * PrimusDB Node.js Driver
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: MIT - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: Auth, Token, Encryption, Transaction methods
+ */
+
 import axios, { AxiosInstance } from 'axios';
 
 /**
@@ -784,6 +791,626 @@ export class PrimusDB {
     if (!this.connected) {
       throw new Error('Not connected to PrimusDB server. Call connect() first.');
     }
+  }
+
+  // ==================== Authentication Methods ====================
+
+  /**
+   * Login with username and password
+   *
+   * @param username - User's username
+   * @param password - User's password
+   * @returns Login result with user info and token
+   */
+  async login(username: string, password: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/auth/login', {
+        username,
+        password
+      });
+
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Login failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Login failed: ${error}`);
+    }
+  }
+
+  /**
+   * Register a new user
+   *
+   * @param username - New user's username
+   * @param password - New user's password
+   * @param email - User's email (optional)
+   * @param roles - User roles (default: ['readonly'])
+   * @returns Registration result
+   */
+  async register(username: string, password: string, email?: string, roles?: string[]): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/auth/register', {
+        username,
+        password,
+        email,
+        roles: roles || ['readonly']
+      });
+
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Registration failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Registration failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create an API token
+   *
+   * @param authorization - Login token or credentials
+   * @param name - Token name
+   * @param scopes - Token permissions
+   * @param expiresInHours - Token expiration time
+   * @returns Created token info
+   */
+  async createToken(authorization: string, name: string, scopes: any[], expiresInHours: number = 8760): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/auth/token/create', {
+        authorization,
+        name,
+        scopes,
+        expires_in_hours: expiresInHours
+      });
+
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Token creation failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Token creation failed: ${error}`);
+    }
+  }
+
+  /**
+   * Revoke an API token
+   *
+   * @param tokenId - Token ID to revoke
+   */
+  async revokeToken(tokenId: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/auth/token/revoke/${tokenId}`);
+      if (response.status !== 200) {
+        throw new Error(`Token revocation failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Token revocation failed: ${error}`);
+    }
+  }
+
+  /**
+   * List user's API tokens
+   *
+   * @returns List of user's tokens
+   */
+  async listTokens(): Promise<any[]> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.get('/api/v1/auth/tokens');
+      if (response.status === 200) {
+        return response.data.tokens || [];
+      } else {
+        throw new Error(`List tokens failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`List tokens failed: ${error}`);
+    }
+  }
+
+  /**
+   * List available roles
+   *
+   * @returns List of available roles
+   */
+  async listRoles(): Promise<any[]> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.get('/api/v1/auth/roles');
+      if (response.status === 200) {
+        return response.data.roles || [];
+      } else {
+        throw new Error(`List roles failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`List roles failed: ${error}`);
+    }
+  }
+
+  /**
+   * List all users (admin only)
+   *
+   * @returns List of users
+   */
+  async listUsers(): Promise<any[]> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.get('/api/v1/auth/users');
+      if (response.status === 200) {
+        return response.data.users || [];
+      } else {
+        throw new Error(`List users failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`List users failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create a data segment for multi-tenancy
+   *
+   * @param name - Segment name
+   * @param description - Segment description
+   * @param parentSegment - Parent segment ID (optional)
+   * @returns Created segment info
+   */
+  async createSegment(name: string, description: string, parentSegment?: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/auth/segment/create', {
+        name,
+        description,
+        parent_segment: parentSegment
+      });
+
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Create segment failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Create segment failed: ${error}`);
+    }
+  }
+
+  // ==================== Collection Encryption Methods ====================
+
+  /**
+   * Enable encryption for a document collection
+   *
+   * @param collection - Collection name
+   * @returns Encryption status
+   */
+  async enableCollectionEncryption(collection: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/collection/${collection}/encrypt`);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Enable encryption failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Enable encryption failed: ${error}`);
+    }
+  }
+
+  /**
+   * Disable encryption for a document collection
+   *
+   * @param collection - Collection name
+   * @returns Encryption status
+   */
+  async disableCollectionEncryption(collection: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/collection/${collection}/decrypt`);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Disable encryption failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Disable encryption failed: ${error}`);
+    }
+  }
+
+  // ==================== Transaction Methods ====================
+
+  /**
+   * Begin a new transaction
+   *
+   * @param isolationLevel - Transaction isolation level
+   * @returns Transaction ID
+   */
+  async beginTransaction(isolationLevel: string = 'read_committed'): Promise<string> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/transaction/begin', {
+        isolation_level: isolationLevel
+      });
+
+      if (response.status === 200) {
+        return response.data.transaction_id;
+      } else {
+        throw new Error(`Begin transaction failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Begin transaction failed: ${error}`);
+    }
+  }
+
+  /**
+   * Commit a transaction
+   *
+   * @param transactionId - Transaction ID to commit
+   */
+  async commitTransaction(transactionId: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/transaction/${transactionId}/commit`);
+      if (response.status !== 200) {
+        throw new Error(`Commit transaction failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Commit transaction failed: ${error}`);
+    }
+  }
+
+  /**
+   * Rollback a transaction
+   *
+   * @param transactionId - Transaction ID to rollback
+   */
+  async rollbackTransaction(transactionId: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/transaction/${transactionId}/rollback`);
+      if (response.status !== 200) {
+        throw new Error(`Rollback transaction failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Rollback transaction failed: ${error}`);
+    }
+  }
+
+  // ==================== Key-Value (CouchDB-compatible) Methods ====================
+
+  /**
+   * Get database information
+   *
+   * @param db - Database name
+   * @returns Database info
+   */
+  async kvGetDbInfo(db: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.get(`/api/v1/kv/${db}`);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Get DB info failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Get DB info failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create a Key-Value database
+   *
+   * @param db - Database name
+   */
+  async kvCreateDatabase(db: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.put(`/api/v1/kv/${db}`);
+      if (response.status !== 200) {
+        throw new Error(`Create database failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Create database failed: ${error}`);
+    }
+  }
+
+  /**
+   * Delete a Key-Value database
+   *
+   * @param db - Database name
+   */
+  async kvDeleteDatabase(db: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.delete(`/api/v1/kv/${db}`);
+      if (response.status !== 200) {
+        throw new Error(`Delete database failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Delete database failed: ${error}`);
+    }
+  }
+
+  /**
+   * Get all documents from a Key-Value database
+   *
+   * @param db - Database name
+   * @param includeDocs - Include document content
+   * @param limit - Maximum results
+   * @param skip - Number of results to skip
+   * @returns All documents
+   */
+  async kvAllDocs(db: string, includeDocs: boolean = false, limit?: number, skip?: number): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const params: any = {};
+      if (includeDocs) params.include_docs = 'true';
+      if (limit) params.limit = limit.toString();
+      if (skip) params.skip = skip.toString();
+
+      const response = await this.httpClient.get(`/api/v1/kv/${db}/_all_docs`, { params });
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Get all docs failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Get all docs failed: ${error}`);
+    }
+  }
+
+  /**
+   * Find documents using Mango query syntax
+   *
+   * @param db - Database name
+   * @param selector - MongoDB-style selector
+   * @param limit - Maximum results
+   * @param skip - Number of results to skip
+   * @returns Matching documents
+   */
+  async kvFind(db: string, selector: any, limit?: number, skip?: number): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/kv/${db}/_find`, {
+        selector,
+        limit,
+        skip
+      });
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Find failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Find failed: ${error}`);
+    }
+  }
+
+  /**
+   * Get a document by ID
+   *
+   * @param db - Database name
+   * @param docId - Document ID
+   * @returns Document
+   */
+  async kvGetDocument(db: string, docId: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.get(`/api/v1/kv/${db}/${docId}`);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Get document failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Get document failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create or update a document
+   *
+   * @param db - Database name
+   * @param docId - Document ID
+   * @param data - Document data
+   * @returns Result with revision
+   */
+  async kvPutDocument(db: string, docId: string, data: any): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.put(`/api/v1/kv/${db}/${docId}`, data);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Put document failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Put document failed: ${error}`);
+    }
+  }
+
+  /**
+   * Delete a document
+   *
+   * @param db - Database name
+   * @param docId - Document ID
+   * @param rev - Revision to delete
+   */
+  async kvDeleteDocument(db: string, docId: string, rev: string): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.delete(`/api/v1/kv/${db}/${docId}?rev=${rev}`);
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Delete document failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Delete document failed: ${error}`);
+    }
+  }
+
+  /**
+   * Bulk document operations
+   *
+   * @param db - Database name
+   * @param docs - Array of documents
+   * @param allOrNothing - All or nothing mode
+   * @returns Bulk operation results
+   */
+  async kvBulkDocs(db: string, docs: any[], allOrNothing: boolean = false): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/kv/${db}/_bulk_docs`, {
+        docs,
+        all_or_nothing: allOrNothing
+      });
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Bulk docs failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Bulk docs failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create an index
+   *
+   * @param db - Database name
+   * @param name - Index name
+   * @param fields - Fields to index
+   * @returns Index creation result
+   */
+  async kvCreateIndex(db: string, name: string, fields: string[]): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/kv/${db}/_index`, {
+        index: { fields },
+        name
+      });
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`Create index failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Create index failed: ${error}`);
+    }
+  }
+
+  /**
+   * Compact a database
+   *
+   * @param db - Database name
+   */
+  async kvCompact(db: string): Promise<void> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post(`/api/v1/kv/${db}/_compact`);
+      if (response.status !== 200) {
+        throw new Error(`Compact failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`Compact failed: ${error}`);
+    }
+  }
+
+  // ==================== UQL (Unified Query Language) Methods ====================
+
+  /**
+   * Execute a UQL query across multiple storage engines
+   *
+   * @param query - UQL query string
+   * @param language - Query language: 'sql', 'mongodb', 'mango', 'uql' (default: 'sql')
+   * @param params - Optional query parameters
+   * @returns Query results
+   */
+  async executeUql(
+    query: string,
+    language: string = 'sql',
+    params?: Record<string, any>
+  ): Promise<any> {
+    this.checkConnection();
+
+    try {
+      const response = await this.httpClient.post('/api/v1/uql', {
+        query,
+        language,
+        params
+      });
+
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`UQL query failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      throw new Error(`UQL query failed: ${error}`);
+    }
+  }
+
+  /**
+   * Execute a SQL query using UQL
+   *
+   * @param sql - SQL query string
+   * @param params - Optional query parameters
+   * @returns Query results
+   */
+  async executeSql(sql: string, params?: Record<string, any>): Promise<any> {
+    return this.executeUql(sql, 'sql', params);
+  }
+
+  /**
+   * Execute a MongoDB-style query using UQL
+   *
+   * @param query - MongoDB-style query
+   * @param params - Optional query parameters
+   * @returns Query results
+   */
+  async executeMongoDb(query: any, params?: Record<string, any>): Promise<any> {
+    return this.executeUql(JSON.stringify(query), 'mongodb', params);
+  }
+
+  /**
+   * Execute a Mango query (CouchDB-style) using UQL
+   *
+   * @param selector - Mango selector
+   * @param params - Optional query parameters
+   * @returns Query results
+   */
+  async executeMango(selector: any, params?: Record<string, any>): Promise<any> {
+    return this.executeUql(JSON.stringify(selector), 'mango', params);
   }
 }
 

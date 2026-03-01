@@ -579,3 +579,9 @@ pub enum KeyStatus {
     ExpiringSoon,
     Expired,
 }
+
+pub mod file_encryption;
+
+pub use file_encryption::{
+    EncryptedFileHeader, FileEncryptionFlags, FileEncryptionManager, FILE_MAGIC, FILE_VERSION,
+};

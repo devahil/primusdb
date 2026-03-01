@@ -1,6 +1,7 @@
 # PrimusDB Administration Manual
+===============================
 
-This manual covers system administration tasks for PrimusDB deployments.
+This manual covers system administration tasks for PrimusDB v1.1.0+ deployments.
 
 ## System Requirements
 
@@ -170,6 +171,55 @@ systemctl start primusdb
 ```
 
 ## Security Configuration
+
+### Authentication & Authorization
+PrimusDB v1.1.0+ includes comprehensive RBAC with user/password authentication and API tokens.
+
+```toml
+[security.auth]
+enabled = true
+require_auth = true
+min_password_length = 8
+password_expiry_days = 90
+max_login_attempts = 5
+lockout_duration_minutes = 30
+token_expiry_hours = 8760
+session_timeout_minutes = 60
+```
+
+### Default Users
+After installation, a default admin user is created:
+- **Username**: `admin`
+- **Password**: `admin123`
+
+**Important**: Change the default password immediately in production!
+
+### User Management
+```bash
+# Login to get session info
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+
+# Create a new user
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "developer", "password": "securepass", "roles": ["developer"]}'
+
+# Create API token
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{"authorization": "token", "name": "dev-token", "scopes": [{"resource": "All", "actions": ["Read", "Write"]}]}'
+```
+
+### Role-Based Access Control
+| Role | Description |
+|------|-------------|
+| `admin` | Full system access |
+| `developer` | Read/Write on all storage engines |
+| `analyst` | Read-only on all engines |
+| `readonly` | Read on all resources |
+| `cluster_node` | Cluster operations |
 
 ### Encryption Setup
 ```toml

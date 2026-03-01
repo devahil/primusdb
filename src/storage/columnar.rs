@@ -1,3 +1,10 @@
+/*
+ * PrimusDB Columnar Storage Engine
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Added: as_any() method for engine-specific features
+ */
+
 /*!
 # Columnar Storage Engine - Analytics-Optimized Database
 
@@ -195,7 +202,12 @@ use crate::{
 use async_trait::async_trait;
 
 use sled::Db;
+use std::any::Any;
 use std::collections::HashMap;
+use crate::crypto::FileEncryptionManager;
+
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Columnar storage engine implementation
 ///
@@ -222,6 +234,9 @@ pub struct ColumnarEngine {
     /// Embedded Sled database for persistent storage
     /// Uses separate trees for each table to enable concurrent access
     db: Db,
+    /// File encryption manager for data-at-rest security
+    /// All binary data files are encrypted with AES-256-GCM
+    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
 }
 
 impl ColumnarEngine {
@@ -250,15 +265,27 @@ impl ColumnarEngine {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/columnar", config.storage.data_dir);
         let db = sled::open(&db_path)?;
+        
+        let file_encryption = if config.security.encryption_enabled {
+            Some(FileEncryptionManager::new())
+        } else {
+            None
+        };
+        
         Ok(ColumnarEngine {
             config: config.clone(),
             db,
+            file_encryption: Arc::new(RwLock::new(file_encryption)),
         })
     }
 }
 
 #[async_trait]
 impl StorageEngine for ColumnarEngine {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     /// Insert a new record into the columnar storage
     ///
     /// Stores data in columnar format, generating a unique ID and distributing

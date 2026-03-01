@@ -1,5 +1,12 @@
 package com.primusdb.jdbc;
 
+/*
+ * PrimusDB JDBC Driver
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Full JDBC implementation with OkHttp client
+ */
+
 import java.sql.*;
 import java.util.Properties;
 import java.util.logging.Logger;

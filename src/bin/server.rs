@@ -295,6 +295,7 @@ use primusdb::{
     ClusterConfig, CompressionType, NetworkConfig, PrimusDB, PrimusDBConfig, SecurityConfig,
     StorageConfig,
 };
+use primusdb::auth::{AuthService, AuthConfig};
 use std::sync::Arc;
 use tower::limit::RateLimitLayer;
 
@@ -330,13 +331,26 @@ async fn main() -> primusdb::Result<()> {
     let config = create_config(&args);
     let primusdb = Arc::new(PrimusDB::new(config)?);
 
-    let api_server = primusdb::api::APIServer::new(primusdb.clone());
+    let auth_config = AuthConfig {
+        require_auth: true,
+        min_password_length: 8,
+        password_expiry_days: 90,
+        max_login_attempts: 5,
+        lockout_duration_minutes: 30,
+        token_expiry_hours: 8760,
+        session_timeout_minutes: 60,
+        mfa_required_for_roles: vec!["admin".to_string()],
+    };
+    let auth_service = Arc::new(AuthService::new(auth_config)?);
+
+    let api_server = primusdb::api::APIServer::new(primusdb.clone(), auth_service);
     let bind_addr = format!("{}:{}", args.host, args.port);
 
-    println!("🚀 Starting PrimusDB Server v0.1.0");
+    println!("🚀 Starting PrimusDB Server v1.1.0");
     println!("📡 Listening on: {}", bind_addr);
     println!("💾 Data directory: {:?}", args.data_dir);
     println!("🌐 Cluster mode: {}", args.cluster);
+    println!("🔐 Authentication: enabled");
 
     api_server.run(&bind_addr).await?;
 

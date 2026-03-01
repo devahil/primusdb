@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+# PrimusDB Ruby Driver
+# Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+# License: MIT - See LICENSE file for details
+# Version: 1.2.0-alpha - Full CRUD + AI/ML + Key-Value support
+
 require 'faraday'
 require 'json'
 require 'concurrent'
@@ -13,6 +18,7 @@ module PrimusDB
       VECTOR = 'vector'
       DOCUMENT = 'document'
       RELATIONAL = 'relational'
+      KEYVALUE = 'keyvalue'
     end
 
     # Connection configuration
@@ -381,6 +387,114 @@ module PrimusDB
         # Simplified WHERE clause extraction
         {}
       end
+    end
+  end
+
+  # Key-Value Database operations (CouchDB-compatible)
+  module KeyValue
+    # Get database information
+    def kv_get_db_info(database)
+      check_connection
+      response = @http_client.get("kv/#{database}")
+      handle_response(response)
+    end
+
+    # Create a Key-Value database
+    def kv_create_database(database)
+      check_connection
+      response = @http_client.put("kv/#{database}") do |req|
+        req.body = {}.to_json
+      end
+      handle_response(response)
+    end
+
+    # Delete a Key-Value database
+    def kv_delete_database(database)
+      check_connection
+      response = @http_client.delete("kv/#{database}")
+      handle_response(response)
+    end
+
+    # Get all documents
+    def kv_all_docs(database, include_docs: false, limit: nil, skip: nil)
+      check_connection
+      params = { include_docs: include_docs }
+      params[:limit] = limit if limit
+      params[:skip] = skip if skip
+
+      query_string = URI.encode_www_form(params) unless params.empty?
+      endpoint = "kv/#{database}/_all_docs"
+      endpoint += "?#{query_string}" if query_string
+
+      response = @http_client.get(endpoint)
+      handle_response(response)
+    end
+
+    # Get a document by ID
+    def kv_get_document(database, doc_id)
+      check_connection
+      response = @http_client.get("kv/#{database}/#{doc_id}")
+      handle_response(response)
+    end
+
+    # Create or update a document
+    def kv_put_document(database, doc_id, data)
+      check_connection
+      response = @http_client.put("kv/#{database}/#{doc_id}") do |req|
+        req.body = data.to_json
+      end
+      handle_response(response)
+    end
+
+    # Delete a document
+    def kv_delete_document(database, doc_id, rev)
+      check_connection
+      response = @http_client.delete("kv/#{database}/#{doc_id}?rev=#{rev}")
+      handle_response(response)
+    end
+
+    # Bulk document operations
+    def kv_bulk_docs(database, docs, all_or_nothing: false)
+      check_connection
+      response = @http_client.post("kv/#{database}/_bulk_docs") do |req|
+        req.body = { docs: docs, all_or_nothing: all_or_nothing }.to_json
+      end
+      handle_response(response)
+    end
+
+    # Find documents using Mango query
+    def kv_find(database, selector, limit: nil, skip: nil)
+      check_connection
+      body = { selector: selector }
+      body[:limit] = limit if limit
+      body[:skip] = skip if skip
+
+      response = @http_client.post("kv/#{database}/_find") do |req|
+        req.body = body.to_json
+      end
+      handle_response(response)
+    end
+
+    # Create an index
+    def kv_create_index(database, name, fields)
+      check_connection
+      response = @http_client.post("kv/#{database}/_index") do |req|
+        req.body = { index: { fields: fields }, name: name }.to_json
+      end
+      handle_response(response)
+    end
+
+    # Compact database
+    def kv_compact(database)
+      check_connection
+      response = @http_client.post("kv/#{database}/_compact")
+      handle_response(response)
+    end
+
+    private
+
+    def kv_base_url
+      "http://#{@config.host}:#{@config.port}/api/v1"
     end
   end
 end

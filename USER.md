@@ -1,6 +1,107 @@
 # PrimusDB User Manual
+===================
 
-This manual provides comprehensive guidance for users working with PrimusDB databases.
+This manual provides comprehensive guidance for users working with PrimusDB v1.2.0-alpha databases.
+
+## Authentication
+
+### Login
+```bash
+# Login with username and password
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+```
+
+### Creating API Tokens
+```bash
+# After login, create an API token
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "authorization": "login_response_token",
+    "name": "my-app-token",
+    "scopes": [{"resource": "All", "actions": ["Read", "Write"]}],
+    "expires_in_hours": 8760
+  }'
+```
+
+### Using API Tokens
+```bash
+# Include token in requests
+curl -X POST http://localhost:8080/api/v1/crud/document/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -d '{"name": "John", "email": "john@example.com"}'
+```
+
+### User Registration
+```bash
+# Register a new user
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "newuser",
+    "password": "securepassword123",
+    "email": "user@example.com",
+    "roles": ["readonly"]
+  }'
+```
+
+### Listing Available Roles
+```bash
+# Get all available roles
+curl -X GET http://localhost:8080/api/v1/auth/roles \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+### Managing Segments (Multi-Tenant)
+```bash
+# Create a data segment for multi-tenancy
+curl -X POST http://localhost:8080/api/v1/auth/segment/create \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -d '{
+    "name": "tenant_alpha",
+    "description": "Alpha tenant data segment",
+    "parent_segment": null
+  }'
+```
+
+## Encryption
+
+### Collection Encryption (Document Storage)
+
+By default, document collections store JSON as plaintext for readability. You can enable encryption per collection:
+
+```bash
+# Enable encryption for a document collection
+curl -X POST http://localhost:8080/api/v1/collection/my_collection/encrypt \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+# Disable encryption for a document collection
+curl -X POST http://localhost:8080/api/v1/collection/my_collection/decrypt \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+### Response Examples
+```json
+// Encryption enabled
+{
+  "success": true,
+  "data": {
+    "collection": "my_collection",
+    "encryption": "enabled",
+    "message": "Collection encryption enabled successfully"
+  }
+}
+```
+
+### Security Features
+- **AES-256-GCM**: All encrypted data uses military-grade authenticated encryption
+- **Per-file keys**: Each file has its own derived encryption key
+- **Tamper detection**: SHA-256 checksums detect modified files
+- **Magic bytes**: Encrypted files identified by "PREN" header
 
 ## Getting Started
 
@@ -96,6 +197,54 @@ curl "http://localhost:8080/api/v1/crud/columnar/sales?limit=10"
 
 # With conditions
 curl "http://localhost:8080/api/v1/crud/document/users?conditions=%7B%22age%22%3A%7B%22%24gte%22%3A25%7D%7D"
+```
+
+### Unified Query Language (UQL)
+
+PrimusDB supports querying across all storage engines using the Unified Query Language (UQL). This allows you to use SQL, MongoDB, or Mango syntax to query any storage type.
+
+#### Using SQL
+```bash
+# Execute SQL query via UQL
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT * FROM users WHERE age > 25",
+    "language": "sql"
+  }'
+```
+
+#### Using MongoDB-style Queries
+```bash
+# Execute MongoDB query via UQL
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "{\"users\": {\"age\": {\"$gt\": 25}}}",
+    "language": "mongodb"
+  }'
+```
+
+#### Using Mango Queries
+```bash
+# Execute Mango query via UQL
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "{\"selector\": {\"age\": {\"$gt\": 25}}}",
+    "language": "mango"
+  }'
+```
+
+#### Cross-Engine Joins
+```bash
+# Join data from multiple storage engines
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT u.name, v.embedding_score FROM users u JOIN vectors v ON u.id = v.user_id",
+    "language": "sql"
+  }'
 ```
 
 ### Updating Data
@@ -649,6 +798,183 @@ GET /images/_search
 // PrimusDB
 primusdb-cli advanced vector-search --table images \
   --query-vector "[0.1, 0.2, 0.3]"
+```
+
+## Key-Value Database (CouchDB-Compatible API)
+
+PrimusDB includes a Key-Value storage engine with full CouchDB-compatible REST API.
+
+### Creating a Database
+
+```bash
+# Create a Key-Value database
+curl -X PUT http://localhost:8080/api/v1/kv/my_database \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Getting Database Info
+
+```bash
+# Get database information
+curl -X GET http://localhost:8080/api/v1/kv/my_database \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Response:
+# {
+#   "db_name": "my_database",
+#   "doc_count": 150,
+#   "doc_del_count": 5,
+#   "sizes": {"active": 50000, "external": 45000, "file": 60000},
+#   "update_seq": 155,
+#   "cluster": {"q": 8, "n": 3, "w": 2, "r": 2}
+# }
+```
+
+### Creating/Updating Documents
+
+```bash
+# Create or update a document
+curl -X PUT http://localhost:8080/api/v1/kv/my_database/my_doc_id \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "_id": "my_doc_id",
+    "type": "user",
+    "name": "John Doe",
+    "age": 30,
+    "tags": ["developer", "admin"]
+  }'
+
+# Response:
+# {
+#   "ok": true,
+#   "id": "my_doc_id",
+#   "rev": "1-abc123"
+# }
+```
+
+### Getting a Document
+
+```bash
+# Get document by ID
+curl -X GET http://localhost:8080/api/v1/kv/my_database/my_doc_id \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Deleting a Document
+
+```bash
+# Delete a document (requires current revision)
+curl -X DELETE "http://localhost:8080/api/v1/kv/my_database/my_doc_id?rev=1-abc123" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### All Documents (_all_docs)
+
+```bash
+# Get all documents
+curl -X GET http://localhost:8080/api/v1/kv/my_database/_all_docs \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# With document content
+curl -X GET "http://localhost:8080/api/v1/kv/my_database/_all_docs?include_docs=true" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# With pagination
+curl -X GET "http://localhost:8080/api/v1/kv/my_database/_all_docs?limit=10&skip=5" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Find Documents (Mango Query)
+
+```bash
+# Find documents using MongoDB-style selector
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_find \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "selector": {
+      "age": {"$gte": 25},
+      "type": "user"
+    },
+    "limit": 10,
+    "skip": 0,
+    "sort": [{"age": "desc"}]
+  }'
+```
+
+### Bulk Operations
+
+```bash
+# Bulk document insert/update
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_bulk_docs \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "docs": [
+      {"_id": "doc1", "value": 1},
+      {"_id": "doc2", "value": 2},
+      {"_id": "doc3", "value": 3}
+    ]
+  }'
+
+# All or nothing mode (all succeed or all fail)
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_bulk_docs \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "docs": [...],
+    "all_or_nothing": true
+  }'
+```
+
+### Indexes
+
+```bash
+# Create an index
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_index \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "index": {
+      "fields": ["type", "age"]
+    },
+    "name": "type-age-index"
+  }'
+
+# List all indexes
+curl -X GET http://localhost:8080/api/v1/kv/my_database/_index \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Database Maintenance
+
+```bash
+# Compact database
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_compact \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Ensure full commit
+curl -X POST http://localhost:8080/api/v1/kv/my_database/_ensure_full_commit \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Get revision limit
+curl -X GET http://localhost:8080/api/v1/kv/my_database/_rev_limit \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Set revision limit
+curl -X PUT http://localhost:8080/api/v1/kv/my_database/_rev_limit \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"rev_limit": 1000}'
+```
+
+### Delete Database
+
+```bash
+# Delete a Key-Value database
+curl -X DELETE http://localhost:8080/api/v1/kv/my_database \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 This user manual covers the essential operations and patterns for working with PrimusDB. For administration tasks, refer to the administration manual.

@@ -1,3 +1,10 @@
+/*
+ * PrimusDB Rust Native Driver
+ * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
+ * License: GPL-3.0 - See LICENSE file for details
+ * Version: 1.2.0-alpha - Builder pattern, Collection abstraction
+ */
+
 use primusdb::cluster::ClusterStatus;
 use primusdb::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
 use std::sync::Arc;

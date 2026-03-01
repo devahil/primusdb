@@ -198,6 +198,18 @@ pub enum Error {
     /// Recovery: Check network configuration and service availability
     #[error("Request error: {0}")]
     RequestError(#[from] reqwest::Error),
+
+    /// Authentication failed due to invalid credentials or token
+    /// Includes invalid passwords, expired tokens, and unauthorized access
+    /// Recovery: Verify credentials and obtain valid token
+    #[error("Authentication error: {0}")]
+    AuthenticationError(String),
+
+    /// Authorization failed due to insufficient permissions
+    /// User is authenticated but lacks required privileges
+    /// Recovery: Request elevated privileges from administrator
+    #[error("Authorization error: {0}")]
+    AuthorizationError(String),
 }
 
 /// Convenient type alias for Results containing PrimusDB errors

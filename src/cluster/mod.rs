@@ -692,3 +692,7 @@ fn get_total_storage_gb() -> u64 {
     // For now, return a reasonable default
     1000
 }
+
+// Distributed data synchronization module
+pub mod sync;
+pub use sync::*;

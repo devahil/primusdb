@@ -1,6 +1,7 @@
 # PrimusDB API Reference
+=====================
 
-This document provides comprehensive reference for PrimusDB's REST API, including all endpoints, request/response formats, error codes, and usage examples.
+This document provides comprehensive reference for PrimusDB's REST API (v1.1.0), including all endpoints, request/response formats, error codes, and usage examples.
 
 ## API Overview
 
@@ -60,6 +61,60 @@ curl "http://localhost:8080/api/v1/query?api_key=YOUR_API_KEY"
 }
 ```
 
+## Authentication
+
+PrimusDB provides a comprehensive authentication system with user/password login, API tokens, and role-based access control (RBAC).
+
+### Authentication Flow
+
+1. **Login**: Authenticate with username/password to get user info
+2. **Get Token**: Create an API token using your credentials
+3. **Use Token**: Include the token in subsequent requests
+
+```bash
+# Step 1: Login
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+
+# Step 2: Create API Token
+curl -X POST http://localhost:8080/api/v1/auth/token/create \
+  -H "Content-Type: application/json" \
+  -d '{"authorization": "YOUR_TOKEN", "name": "my-token", "scopes": [{"resource": "All", "actions": ["Read", "Write"]}], "expires_in_hours": 8760}'
+
+# Step 3: Use the API Token
+curl -X POST http://localhost:8080/api/v1/crud/document/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_NEW_TOKEN" \
+  -d '{"name": "John", "email": "john@example.com"}'
+```
+
+### User Roles
+
+| Role | Description | Permissions |
+|------|-------------|-------------|
+| `admin` | Full system access | All operations on all resources |
+| `developer` | Full data access | Read, Write, Create, Delete on all resources |
+| `analyst` | Read-only access | Read on columnar, vector, document, relational |
+| `readonly` | Minimal read | Read on all resources |
+| `cluster_node` | Node authentication | Cluster operations |
+
+### Token Scopes
+
+Tokens can be scoped to specific resources and actions:
+
+```json
+{
+  "scopes": [
+    {"resource": "Document", "actions": ["Read", "Write"]},
+    {"resource": "Columnar", "actions": ["Read"]}
+  ]
+}
+```
+
+Resource types: `Columnar`, `Vector`, `Document`, `Relational`, `Cluster`, `Admin`, `All`
+Actions: `Read`, `Write`, `Delete`, `Create`, `Admin`
+
 ## Health & Monitoring Endpoints
 
 ### GET /health
@@ -71,7 +126,7 @@ Basic health check endpoint.
    "success": true,
    "data": {
      "status": "healthy",
-     "version": "1.0.0",
+     "version": "1.1.0",
      "uptime_seconds": 3600,
      "timestamp": "2024-01-10T12:00:00Z"
    }
@@ -87,7 +142,7 @@ Detailed system status.
    "success": true,
    "data": {
      "status": "healthy",
-     "version": "1.0.0",
+     "version": "1.1.0",
      "uptime_seconds": 3600,
      "engines": {
       "columnar": "available",
@@ -147,6 +202,121 @@ Cluster health status.
     "replication_factor": 3,
     "last_heartbeat": "2024-01-10T12:00:00Z"
   }
+}
+```
+
+## Authentication Endpoints
+
+### POST /api/v1/auth/login
+Authenticate a user and get session information.
+
+**Request:**
+```json
+{
+  "username": "admin",
+  "password": "admin123"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "user_id": "user_123",
+    "username": "admin",
+    "roles": ["admin"],
+    "segment_id": null,
+    "message": "Login successful. Use /api/v1/auth/token/create to generate an API token."
+  }
+}
+```
+
+### POST /api/v1/auth/register
+Register a new user.
+
+**Request:**
+```json
+{
+  "username": "newuser",
+  "password": "securepassword",
+  "email": "user@example.com",
+  "roles": ["developer"],
+  "segment_id": null
+}
+```
+
+### POST /api/v1/auth/token/create
+Create an API token for programmatic access.
+
+**Request:**
+```json
+{
+  "authorization": "existing_token",
+  "name": "my-api-token",
+  "scopes": [
+    {"resource": "All", "actions": ["Read", "Write"]}
+  ],
+  "expires_in_hours": 8760
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "token": "a1b2c3d4e5f6...",
+    "token_id": "token_456",
+    "expires_at": "2027-02-16T00:00:00Z",
+    "message": "Store this token securely. It cannot be retrieved again."
+  }
+}
+```
+
+### POST /api/v1/auth/token/revoke/:token_id
+Revoke an API token.
+
+**Request:**
+```json
+{
+  "authorization": "admin_token"
+}
+```
+
+### GET /api/v1/auth/tokens
+List all tokens for the authenticated user.
+
+**Request:**
+```json
+{
+  "authorization": "user_token"
+}
+```
+
+### GET /api/v1/auth/users
+List all users (admin only).
+
+**Request:**
+```json
+{
+  "authorization": "admin_token"
+}
+```
+
+### GET /api/v1/auth/roles
+List all available roles.
+
+### POST /api/v1/auth/segment/create
+Create a data segment for multi-tenancy (admin only).
+
+**Request:**
+```json
+{
+  "authorization": "admin_token",
+  "name": "tenant-1",
+  "description": "Data segment for tenant 1",
+  "parent_segment": null
 }
 ```
 
