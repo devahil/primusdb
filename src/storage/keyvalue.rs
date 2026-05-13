@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use crate::crypto::FileEncryptionManager;
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvDocument {
@@ -76,103 +76,176 @@ pub struct KvIndex {
 
 #[derive(Clone)]
 pub struct KeyValueEngine {
+    #[allow(dead_code)]
     config: PrimusDBConfig,
+    db: sled::Db,
     databases: Arc<RwLock<HashMap<String, KvDatabase>>>,
-    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
     encrypted_databases: Arc<RwLock<HashMap<String, bool>>>,
 }
 
 #[derive(Clone)]
 pub struct KvDatabase {
+    #[allow(dead_code)]
     name: String,
     documents: Arc<RwLock<HashMap<String, KvDocument>>>,
     indexes: Arc<RwLock<HashMap<String, KvIndex>>>,
     sequence: Arc<RwLock<u64>>,
+    #[allow(dead_code)]
     attachments: Arc<RwLock<HashMap<String, HashMap<String, KvAttachment>>>>,
 }
 
 impl KeyValueEngine {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
-        let file_encryption = if config.security.encryption_enabled {
-            Some(FileEncryptionManager::new())
-        } else {
-            None
+        let path = format!("{}/keyvalue", config.storage.data_dir);
+        let db = sled::open(&path)?;
+
+        let engine = KeyValueEngine {
+            config: config.clone(),
+            db,
+            databases: Arc::new(RwLock::new(HashMap::new())),
+            encrypted_databases: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        Ok(KeyValueEngine {
-            config: config.clone(),
-            databases: Arc::new(RwLock::new(HashMap::new())),
-            file_encryption: Arc::new(RwLock::new(file_encryption)),
-            encrypted_databases: Arc::new(RwLock::new(HashMap::new())),
-        })
+        engine.load_databases()?;
+
+        Ok(engine)
+    }
+
+    fn load_databases(&self) -> Result<()> {
+        let tree_names = self.db.tree_names();
+        let mut databases = self.databases.write().unwrap();
+
+        for name_bytes in tree_names {
+            let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| {
+                crate::Error::DatabaseError("Invalid UTF-8 in tree name".to_string())
+            })?;
+            let tree = self.db.open_tree(&name)?;
+            let mut documents = HashMap::new();
+            let mut sequence = 0u64;
+
+            for result in tree.iter() {
+                let (key, value) = result?;
+                let key_str = String::from_utf8(key.to_vec())
+                    .map_err(|_| crate::Error::DatabaseError("Invalid UTF-8 in key".to_string()))?;
+
+                if key_str == "_meta:sequence" {
+                    let seq_val: serde_json::Value = serde_json::from_slice(&value)?;
+                    sequence = seq_val.as_u64().unwrap_or(0);
+                    continue;
+                }
+
+                let doc: KvDocument = serde_json::from_slice(&value)?;
+                documents.insert(key_str, doc);
+            }
+
+            databases.insert(
+                name.clone(),
+                KvDatabase {
+                    name,
+                    documents: Arc::new(RwLock::new(documents)),
+                    indexes: Arc::new(RwLock::new(HashMap::new())),
+                    sequence: Arc::new(RwLock::new(sequence)),
+                    attachments: Arc::new(RwLock::new(HashMap::new())),
+                },
+            );
+        }
+
+        Ok(())
     }
 
     pub fn create_database(&self, name: &str) -> Result<()> {
-        let mut db = self.databases.write().unwrap();
-        if db.contains_key(name) {
-            return Err(crate::Error::ValidationError(format!("Database {} already exists", name)));
+        let mut databases = self.databases.write().unwrap();
+        if databases.contains_key(name) {
+            return Err(crate::Error::ValidationError(format!(
+                "Database {} already exists",
+                name
+            )));
         }
-        
-        db.insert(name.to_string(), KvDatabase {
-            name: name.to_string(),
-            documents: Arc::new(RwLock::new(HashMap::new())),
-            indexes: Arc::new(RwLock::new(HashMap::new())),
-            sequence: Arc::new(RwLock::new(0)),
-            attachments: Arc::new(RwLock::new(HashMap::new())),
-        });
-        
-        println!("Created Key-Value database: {}", name);
+
+        self.db.open_tree(name)?;
+
+        databases.insert(
+            name.to_string(),
+            KvDatabase {
+                name: name.to_string(),
+                documents: Arc::new(RwLock::new(HashMap::new())),
+                indexes: Arc::new(RwLock::new(HashMap::new())),
+                sequence: Arc::new(RwLock::new(0)),
+                attachments: Arc::new(RwLock::new(HashMap::new())),
+            },
+        );
+
+        info!("Created Key-Value database: {}", name);
         Ok(())
     }
 
     pub fn delete_database(&self, name: &str) -> Result<()> {
-        let mut db = self.databases.write().unwrap();
-        if !db.contains_key(name) {
-            return Err(crate::Error::ValidationError(format!("Database {} not found", name)));
+        let mut databases = self.databases.write().unwrap();
+        if !databases.contains_key(name) {
+            return Err(crate::Error::ValidationError(format!(
+                "Database {} not found",
+                name
+            )));
         }
-        
-        db.remove(name);
-        println!("Deleted Key-Value database: {}", name);
+
+        databases.remove(name);
+        self.db.drop_tree(name)?;
+
+        info!("Deleted Key-Value database: {}", name);
         Ok(())
     }
 
     pub fn list_databases(&self) -> Result<Vec<String>> {
-        let db = self.databases.read().unwrap();
-        Ok(db.keys().cloned().collect())
+        let databases = self.databases.read().unwrap();
+        Ok(databases.keys().cloned().collect())
     }
 
     pub fn get_document(&self, db_name: &str, doc_id: &str) -> Result<KvDocument> {
-        let db = self.databases.read().unwrap();
-        let database = db.get(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let docs = database.documents.read().unwrap();
-        let doc = docs.get(doc_id)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Document {} not found", doc_id)))?;
-        
+        let doc = docs.get(doc_id).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Document {} not found", doc_id))
+        })?;
+
         if doc.deleted {
-            return Err(crate::Error::ValidationError(format!("Document {} is deleted", doc_id)));
+            return Err(crate::Error::ValidationError(format!(
+                "Document {} is deleted",
+                doc_id
+            )));
         }
-        
+
         Ok(doc.clone())
     }
 
-    pub fn put_document(&self, db_name: &str, doc_id: &str, data: serde_json::Value) -> Result<KvDocument> {
-        let mut db = self.databases.write().unwrap();
-        let database = db.get_mut(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+    pub fn put_document(
+        &self,
+        db_name: &str,
+        doc_id: &str,
+        data: serde_json::Value,
+    ) -> Result<KvDocument> {
+        let mut databases = self.databases.write().unwrap();
+        let database = databases.get_mut(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let mut docs = database.documents.write().unwrap();
-        
+
         let (new_rev, is_new) = if let Some(existing) = docs.get(doc_id) {
             if existing.deleted {
                 (Self::generate_rev(), true)
             } else {
-                let current_rev = existing._rev.as_ref().ok_or_else(|| 
-                    crate::Error::ValidationError("Document has no _rev".to_string()))?;
+                let current_rev = existing._rev.as_ref().ok_or_else(|| {
+                    crate::Error::ValidationError("Document has no _rev".to_string())
+                })?;
                 let parts: Vec<&str> = current_rev.split('-').collect();
                 if parts.len() != 2 {
-                    return Err(crate::Error::ValidationError("Invalid _rev format".to_string()));
+                    return Err(crate::Error::ValidationError(
+                        "Invalid _rev format".to_string(),
+                    ));
                 }
                 let new_num: u64 = parts[0].parse().unwrap_or(0) + 1;
                 (format!("{}-{}", new_num, Self::generate_rev_hash()), false)
@@ -192,51 +265,88 @@ impl KeyValueEngine {
         };
 
         docs.insert(doc_id.to_string(), document.clone());
-        
+
         let mut seq = database.sequence.write().unwrap();
         *seq += 1;
+        let current_seq = *seq;
+        drop(seq);
+        drop(docs);
+        drop(databases);
+
+        let tree = self.db.open_tree(db_name)?;
+        let doc_bytes = serde_json::to_vec(&document)?;
+        tree.insert(doc_id.as_bytes(), doc_bytes)?;
+        let seq_bytes = serde_json::to_vec(&serde_json::json!(current_seq))?;
+        tree.insert("_meta:sequence".as_bytes(), seq_bytes)?;
+        tree.flush()?;
 
         Ok(document)
     }
 
     pub fn delete_document(&self, db_name: &str, doc_id: &str, rev: &str) -> Result<KvDocument> {
-        let mut db = self.databases.write().unwrap();
-        let database = db.get_mut(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+        let mut databases = self.databases.write().unwrap();
+        let database = databases.get_mut(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let mut docs = database.documents.write().unwrap();
-        
-        let existing = docs.get_mut(doc_id)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Document {} not found", doc_id)))?;
-        
+
+        let existing = docs.get_mut(doc_id).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Document {} not found", doc_id))
+        })?;
+
         if existing._rev.as_ref() != Some(&rev.to_string()) {
-            return Err(crate::Error::ValidationError("Revision mismatch".to_string()));
+            return Err(crate::Error::ValidationError(
+                "Revision mismatch".to_string(),
+            ));
         }
-        
+
         let parts: Vec<&str> = rev.split('-').collect();
         if parts.len() != 2 {
-            return Err(crate::Error::ValidationError("Invalid _rev format".to_string()));
+            return Err(crate::Error::ValidationError(
+                "Invalid _rev format".to_string(),
+            ));
         }
         let new_num: u64 = parts[0].parse().unwrap_or(0) + 1;
         let new_rev = format!("{}-{}", new_num, Self::generate_rev_hash());
-        
+
         existing._rev = Some(new_rev);
         existing.deleted = true;
         existing.updated_at = Some(chrono::Utc::now().to_rfc3339());
-        
+
+        let result = existing.clone();
+
         let mut seq = database.sequence.write().unwrap();
         *seq += 1;
+        let current_seq = *seq;
+        drop(seq);
+        drop(docs);
+        drop(databases);
 
-        Ok(existing.clone())
+        let tree = self.db.open_tree(db_name)?;
+        let doc_bytes = serde_json::to_vec(&result)?;
+        tree.insert(doc_id.as_bytes(), doc_bytes)?;
+        let seq_bytes = serde_json::to_vec(&serde_json::json!(current_seq))?;
+        tree.insert("_meta:sequence".as_bytes(), seq_bytes)?;
+        tree.flush()?;
+
+        Ok(result)
     }
 
-    pub fn bulk_docs(&self, db_name: &str, docs: Vec<KvDocument>, all_or_nothing: bool) -> Result<Vec<KvBulkDocsResponse>> {
-        let mut db = self.databases.write().unwrap();
-        let database = db.get_mut(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+    pub fn bulk_docs(
+        &self,
+        db_name: &str,
+        docs: Vec<KvDocument>,
+        all_or_nothing: bool,
+    ) -> Result<Vec<KvBulkDocsResponse>> {
+        let mut databases = self.databases.write().unwrap();
+        let database = databases.get_mut(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let mut results = Vec::new();
         let mut docs_map = database.documents.write().unwrap();
+        let mut persisted_docs: Vec<KvDocument> = Vec::new();
 
         for mut doc in docs {
             if all_or_nothing {
@@ -250,7 +360,8 @@ impl KeyValueEngine {
                 } else {
                     let rev = format!("1-{}", Self::generate_rev_hash());
                     doc._rev = Some(rev.clone());
-                    docs_map.insert(doc_id.clone(), doc);
+                    docs_map.insert(doc_id.clone(), doc.clone());
+                    persisted_docs.push(doc);
                     KvBulkDocsResponse {
                         id: doc_id,
                         rev: Some(rev),
@@ -267,7 +378,8 @@ impl KeyValueEngine {
                         let new_rev = format!("{}-{}", new_num, Self::generate_rev_hash());
                         doc._rev = Some(new_rev.clone());
                         doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
-                        docs_map.insert(doc_id.clone(), doc);
+                        docs_map.insert(doc_id.clone(), doc.clone());
+                        persisted_docs.push(doc);
                         KvBulkDocsResponse {
                             id: doc_id,
                             rev: Some(new_rev),
@@ -285,7 +397,8 @@ impl KeyValueEngine {
                     doc._rev = Some(rev.clone());
                     doc.created_at = Some(chrono::Utc::now().to_rfc3339());
                     doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
-                    docs_map.insert(doc_id.clone(), doc);
+                    docs_map.insert(doc_id.clone(), doc.clone());
+                    persisted_docs.push(doc);
                     KvBulkDocsResponse {
                         id: doc_id,
                         rev: Some(rev),
@@ -296,22 +409,39 @@ impl KeyValueEngine {
             }
         }
 
+        drop(docs_map);
+        drop(databases);
+
+        let tree = self.db.open_tree(db_name)?;
+        for doc in &persisted_docs {
+            let doc_bytes = serde_json::to_vec(doc)?;
+            tree.insert(doc._id.as_bytes(), doc_bytes)?;
+        }
+        tree.flush()?;
+
         Ok(results)
     }
 
-    pub fn all_docs(&self, db_name: &str, include_docs: bool, limit: Option<usize>, skip: Option<usize>) -> Result<serde_json::Value> {
-        let db = self.databases.read().unwrap();
-        let database = db.get(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+    pub fn all_docs(
+        &self,
+        db_name: &str,
+        include_docs: bool,
+        limit: Option<usize>,
+        skip: Option<usize>,
+    ) -> Result<serde_json::Value> {
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let docs = database.documents.read().unwrap();
-        let seq = *database.sequence.read().unwrap();
-        
+        let _seq = *database.sequence.read().unwrap();
+
         let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(usize::MAX);
-        
+
         let mut rows: Vec<serde_json::Value> = Vec::new();
-        
+
         for (id, doc) in docs.iter().skip(skip).take(limit) {
             if !doc.deleted {
                 let row = if include_docs {
@@ -343,38 +473,51 @@ impl KeyValueEngine {
         }))
     }
 
-    pub fn create_index(&self, db_name: &str, name: &str, fields: Vec<String>, selector: Option<serde_json::Value>) -> Result<KvIndex> {
-        let mut db = self.databases.write().unwrap();
-        let database = db.get_mut(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+    pub fn create_index(
+        &self,
+        db_name: &str,
+        name: &str,
+        fields: Vec<String>,
+        selector: Option<serde_json::Value>,
+    ) -> Result<KvIndex> {
+        let mut databases = self.databases.write().unwrap();
+        let database = databases.get_mut(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let mut indexes = database.indexes.write().unwrap();
-        
+
         let index = KvIndex {
             name: name.to_string(),
             fields: fields.clone(),
             selector,
         };
-        
+
         indexes.insert(name.to_string(), index.clone());
-        
-        println!("Created index '{}' on {} in database {}", name, fields.join(", "), db_name);
-        
+
+        info!(
+            "Created index '{}' on {} in database {}",
+            name,
+            fields.join(", "),
+            db_name
+        );
+
         Ok(index)
     }
 
     pub fn find(&self, db_name: &str, request: KvFindRequest) -> Result<serde_json::Value> {
-        let db = self.databases.read().unwrap();
-        let database = db.get(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let docs = database.documents.read().unwrap();
         let limit = request.limit.unwrap_or(100);
         let skip = request.skip.unwrap_or(0);
-        
+
         let selector = &request.selector;
         let mut results: Vec<&KvDocument> = Vec::new();
-        
+
         for doc in docs.values() {
             if doc.deleted {
                 continue;
@@ -383,13 +526,13 @@ impl KeyValueEngine {
                 results.push(doc);
             }
         }
-        
+
         if let Some(sort) = &request.sort {
             results = Self::sort_results(results, sort);
         }
-        
+
         let docs_skipped: Vec<_> = results.iter().skip(skip).take(limit).collect();
-        
+
         Ok(serde_json::json!({
             "docs": docs_skipped,
             "warning": "This is a basic find implementation",
@@ -401,16 +544,17 @@ impl KeyValueEngine {
     }
 
     pub fn get_db_info(&self, db_name: &str) -> Result<serde_json::Value> {
-        let db = self.databases.read().unwrap();
-        let database = db.get(db_name)
-            .ok_or_else(|| crate::Error::ValidationError(format!("Database {} not found", db_name)))?;
-        
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+
         let docs = database.documents.read().unwrap();
         let seq = *database.sequence.read().unwrap();
         let indexes = database.indexes.read().unwrap();
-        
+
         let deleted_count = docs.values().filter(|d| d.deleted).count();
-        
+
         Ok(serde_json::json!({
             "db_name": db_name,
             "doc_count": docs.len() - deleted_count,
@@ -436,17 +580,20 @@ impl KeyValueEngine {
         }))
     }
 
-    pub fn get_revision_limit(&self, db_name: &str) -> Result<u64> {
+    pub fn get_revision_limit(&self, _db_name: &str) -> Result<u64> {
         Ok(1000)
     }
 
     pub fn set_revision_limit(&self, db_name: &str, limit: u64) -> Result<()> {
-        println!("Revision limit set to {} for database {}", limit, db_name);
+        info!("Revision limit set to {} for database {}", limit, db_name);
         Ok(())
     }
 
     pub fn ensure_full_commit(&self, db_name: &str) -> Result<serde_json::Value> {
-        println!("Full commit for database: {}", db_name);
+        if let Ok(tree) = self.db.open_tree(db_name) {
+            let _ = tree.flush();
+        }
+        info!("Full commit for database: {}", db_name);
         Ok(serde_json::json!({
             "ok": true,
             "instance_start_time": "0"
@@ -454,7 +601,7 @@ impl KeyValueEngine {
     }
 
     pub fn compact(&self, db_name: &str) -> Result<serde_json::Value> {
-        println!("Compacting database: {}", db_name);
+        info!("Compacting database: {}", db_name);
         Ok(serde_json::json!({
             "ok": true
         }))
@@ -463,14 +610,14 @@ impl KeyValueEngine {
     pub fn enable_database_encryption(&self, database: &str) -> Result<()> {
         let mut encrypted = self.encrypted_databases.write().unwrap();
         encrypted.insert(database.to_string(), true);
-        println!("Encryption enabled for Key-Value database: {}", database);
+        info!("Encryption enabled for Key-Value database: {}", database);
         Ok(())
     }
 
     pub fn disable_database_encryption(&self, database: &str) -> Result<()> {
         let mut encrypted = self.encrypted_databases.write().unwrap();
         encrypted.insert(database.to_string(), false);
-        println!("Encryption disabled for Key-Value database: {}", database);
+        info!("Encryption disabled for Key-Value database: {}", database);
         Ok(())
     }
 
@@ -518,28 +665,40 @@ impl KeyValueEngine {
                 match op.as_str() {
                     "$eq" => return actual == value,
                     "$ne" => return actual != value,
-                    "$gt" => if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
-                        return a.as_f64().unwrap_or(0.0) > b.as_f64().unwrap_or(0.0);
-                    },
-                    "$gte" => if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
-                        return a.as_f64().unwrap_or(0.0) >= b.as_f64().unwrap_or(0.0);
-                    },
-                    "$lt" => if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
-                        return a.as_f64().unwrap_or(0.0) < b.as_f64().unwrap_or(0.0);
-                    },
-                    "$lte" => if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
-                        return a.as_f64().unwrap_or(0.0) <= b.as_f64().unwrap_or(0.0);
-                    },
-                    "$in" => if let Some(arr) = value.as_array() {
-                        return arr.contains(actual);
-                    },
-                    "$nin" => if let Some(arr) = value.as_array() {
-                        return !arr.contains(actual);
-                    },
+                    "$gt" => {
+                        if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
+                            return a.as_f64().unwrap_or(0.0) > b.as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    "$gte" => {
+                        if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
+                            return a.as_f64().unwrap_or(0.0) >= b.as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    "$lt" => {
+                        if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
+                            return a.as_f64().unwrap_or(0.0) < b.as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    "$lte" => {
+                        if let (Some(a), Some(b)) = (actual.as_number(), value.as_number()) {
+                            return a.as_f64().unwrap_or(0.0) <= b.as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    "$in" => {
+                        if let Some(arr) = value.as_array() {
+                            return arr.contains(actual);
+                        }
+                    }
+                    "$nin" => {
+                        if let Some(arr) = value.as_array() {
+                            return !arr.contains(actual);
+                        }
+                    }
                     "$exists" => {
                         let exists = actual.is_null() == false;
                         return exists == value.as_bool().unwrap_or(false);
-                    },
+                    }
                     "$type" => {
                         let actual_type = match actual {
                             serde_json::Value::Null => "null",
@@ -550,7 +709,7 @@ impl KeyValueEngine {
                             serde_json::Value::Object(_) => "object",
                         };
                         return actual_type == value.as_str().unwrap_or("");
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -560,15 +719,19 @@ impl KeyValueEngine {
         }
     }
 
-    fn sort_results<'a>(mut docs: Vec<&'a KvDocument>, sort: &[serde_json::Value]) -> Vec<&'a KvDocument> {
+    fn sort_results<'a>(
+        mut docs: Vec<&'a KvDocument>,
+        sort: &[serde_json::Value],
+    ) -> Vec<&'a KvDocument> {
         if let Some(first_sort) = sort.first() {
             if let Some(field) = first_sort.get("field").or_else(|| first_sort.get("key")) {
                 let field = field.as_str().unwrap_or("_id");
-                let ascending = first_sort.get("direction")
+                let ascending = first_sort
+                    .get("direction")
                     .and_then(|d| d.as_str())
                     .map(|d| d == "asc")
                     .unwrap_or(true);
-                
+
                 docs.sort_by(|a, b| {
                     let a_val = a.value.get(field);
                     let b_val = b.value.get(field);
@@ -576,7 +739,11 @@ impl KeyValueEngine {
                         (Some(av), Some(bv)) => av.to_string().cmp(&bv.to_string()),
                         _ => a._id.cmp(&b._id),
                     };
-                    if ascending { cmp } else { cmp.reverse() }
+                    if ascending {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
                 });
             }
         }
@@ -606,11 +773,11 @@ impl StorageEngine for KeyValueEngine {
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
         if let Some(id) = data.get("_id").and_then(|v| v.as_str()) {
-            let doc = self.put_document(table, id, data.clone())?;
+            let _doc = self.put_document(table, id, data.clone())?;
             Ok(1)
         } else {
             let id = format!("{:x}", rand_u32());
-            let doc = self.put_document(table, &id, data.clone())?;
+            let _doc = self.put_document(table, &id, data.clone())?;
             Ok(1)
         }
     }
@@ -626,8 +793,8 @@ impl StorageEngine for KeyValueEngine {
         let limit = limit as usize;
         let offset = offset as usize;
 
-        let db = self.databases.read().unwrap();
-        if let Some(database) = db.get(table) {
+        let databases = self.databases.read().unwrap();
+        if let Some(database) = databases.get(table) {
             let docs = database.documents.read().unwrap();
             let mut records = Vec::new();
 
@@ -663,8 +830,8 @@ impl StorageEngine for KeyValueEngine {
         data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        let db = self.databases.read().unwrap();
-        if let Some(database) = db.get(table) {
+        let databases = self.databases.read().unwrap();
+        if let Some(database) = databases.get(table) {
             let docs = database.documents.read().unwrap();
             let mut count = 0;
 
@@ -690,14 +857,17 @@ impl StorageEngine for KeyValueEngine {
         conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        let mut db = self.databases.write().unwrap();
-        if let Some(database) = db.get_mut(table) {
+        let mut databases = self.databases.write().unwrap();
+        if let Some(database) = databases.get_mut(table) {
             let mut docs = database.documents.write().unwrap();
             let mut count = 0;
 
-            let to_delete: Vec<String> = docs.iter()
+            let to_delete: Vec<String> = docs
+                .iter()
                 .filter(|(_, doc)| {
-                    if doc.deleted { return false; }
+                    if doc.deleted {
+                        return false;
+                    }
                     if let Some(cond) = conditions {
                         return Self::matches_selector(&doc.value, cond);
                     }
@@ -706,8 +876,8 @@ impl StorageEngine for KeyValueEngine {
                 .map(|(id, _)| id.clone())
                 .collect();
 
-            for id in to_delete {
-                if let Some(doc) = docs.get_mut(&id) {
+            for id in &to_delete {
+                if let Some(doc) = docs.get_mut(id) {
                     let rev = doc._rev.clone().unwrap_or_default();
                     let parts: Vec<&str> = rev.split('-').collect();
                     let new_num: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0) + 1;
@@ -717,6 +887,22 @@ impl StorageEngine for KeyValueEngine {
                     count += 1;
                 }
             }
+
+            let deleted_docs: Vec<(String, KvDocument)> = to_delete
+                .iter()
+                .filter_map(|id| docs.get(id).map(|d| (id.clone(), d.clone())))
+                .collect();
+
+            drop(docs);
+            drop(databases);
+
+            let tree = self.db.open_tree(table)?;
+            for (id, doc) in &deleted_docs {
+                let doc_bytes = serde_json::to_vec(doc)?;
+                tree.insert(id.as_bytes(), doc_bytes)?;
+            }
+            tree.flush()?;
+
             Ok(count)
         } else {
             Ok(0)
@@ -731,7 +917,7 @@ impl StorageEngine for KeyValueEngine {
         self.delete_database(table)
     }
 
-    async fn truncate_table(&self, table: &str) -> Result<()> {
+    async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
         self.delete_database(table)?;
         self.create_database(table)
     }
@@ -746,7 +932,11 @@ impl StorageEngine for KeyValueEngine {
                 constraints: vec![],
             },
             row_count: info.get("doc_count").and_then(|v| v.as_u64()).unwrap_or(0),
-            size_bytes: info.get("sizes").and_then(|s| s.get("file")).and_then(|v| v.as_u64()).unwrap_or(0),
+            size_bytes: info
+                .get("sizes")
+                .and_then(|s| s.get("file"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         })

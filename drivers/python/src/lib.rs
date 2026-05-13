@@ -2,7 +2,7 @@
  * PrimusDB Python Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.2.0-alpha - Added: Auth, Token, Encryption, Key-Value functions
+ * Version: 1.2.3-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
  */
 
 use pyo3::exceptions::PyRuntimeError;
@@ -47,6 +47,16 @@ fn primusdb_native(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_token, m)?)?;
     m.add_function(wrap_pyfunction!(enable_collection_encryption, m)?)?;
     m.add_function(wrap_pyfunction!(disable_collection_encryption, m)?)?;
+    // UQL / SQL functions
+    m.add_function(wrap_pyfunction!(execute_sql, m)?)?;
+    // ER Model features
+    m.add_function(wrap_pyfunction!(insert_returning, m)?)?;
+    m.add_function(wrap_pyfunction!(update_returning, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_returning, m)?)?;
+    m.add_function(wrap_pyfunction!(select_grouped, m)?)?;
+    m.add_function(wrap_pyfunction!(truncate_table_cascade, m)?)?;
+    m.add_function(wrap_pyfunction!(add_foreign_key, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_foreign_key, m)?)?;
     // Key-Value functions
     m.add_function(wrap_pyfunction!(kv_get_db_info, m)?)?;
     m.add_function(wrap_pyfunction!(kv_create_database, m)?)?;
@@ -57,6 +67,26 @@ fn primusdb_native(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kv_delete_document, m)?)?;
     m.add_function(wrap_pyfunction!(kv_bulk_docs, m)?)?;
     m.add_function(wrap_pyfunction!(kv_find, m)?)?;
+    // ER/DDL functions
+    m.add_function(wrap_pyfunction!(add_column, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_column, m)?)?;
+    m.add_function(wrap_pyfunction!(modify_column, m)?)?;
+    m.add_function(wrap_pyfunction!(add_constraint, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_constraint, m)?)?;
+    m.add_function(wrap_pyfunction!(rename_table, m)?)?;
+    m.add_function(wrap_pyfunction!(create_sequence, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_sequence, m)?)?;
+    m.add_function(wrap_pyfunction!(nextval, m)?)?;
+    m.add_function(wrap_pyfunction!(currval, m)?)?;
+    m.add_function(wrap_pyfunction!(setval, m)?)?;
+    m.add_function(wrap_pyfunction!(create_view, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_view, m)?)?;
+    m.add_function(wrap_pyfunction!(refresh_view, m)?)?;
+    m.add_function(wrap_pyfunction!(create_trigger, m)?)?;
+    m.add_function(wrap_pyfunction!(drop_trigger, m)?)?;
+    m.add_function(wrap_pyfunction!(info_schema_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(info_schema_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(info_schema_constraints, m)?)?;
     Ok(())
 }
 
@@ -188,11 +218,605 @@ impl PyPrimusDBDriver {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
 
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
 
+// ==================== DDL / ER Model Operations ====================
+
+/// Add a column to a relational table
+#[pyfunction]
+fn add_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, field: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/column/add", host, port, storage_type, table);
+        
+        let field_value: serde_json::Value = serde_json::from_str(field)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON field: {}", e)))?;
+        
+        let mut request = client.post(&url).json(&field_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Drop a column from a relational table
+#[pyfunction]
+fn drop_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, column_name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/column/{}", host, port, storage_type, table, column_name);
+        
+        let mut request = client.delete(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Modify a column definition
+#[pyfunction]
+fn modify_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, field: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/column", host, port, storage_type, table);
+        
+        let field_value: serde_json::Value = serde_json::from_str(field)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON field: {}", e)))?;
+        
+        let mut request = client.put(&url).json(&field_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Add a constraint to a relational table
+#[pyfunction]
+fn add_constraint(host: &str, port: u16, token: &str, storage_type: &str, table: &str, constraint: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/constraint", host, port, storage_type, table);
+        
+        let constraint_value: serde_json::Value = serde_json::from_str(constraint)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON constraint: {}", e)))?;
+        
+        let mut request = client.post(&url).json(&constraint_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Drop a constraint from a relational table
+#[pyfunction]
+fn drop_constraint(host: &str, port: u16, token: &str, storage_type: &str, table: &str, constraint_name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/constraint/{}", host, port, storage_type, table, constraint_name);
+        
+        let mut request = client.delete(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Rename a relational table
+#[pyfunction]
+fn rename_table(host: &str, port: u16, token: &str, storage_type: &str, table: &str, new_name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/ddl/{}/{}/rename", host, port, storage_type, table);
+        
+        let body = serde_json::json!({ "new_name": new_name });
+        
+        let mut request = client.post(&url).json(&body);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Create a sequence
+#[pyfunction]
+fn create_sequence(host: &str, port: u16, token: &str, storage_type: &str, sequence: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/sequence/{}", host, port, storage_type);
+        
+        let seq_value: serde_json::Value = serde_json::from_str(sequence)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON sequence: {}", e)))?;
+        
+        let mut request = client.post(&url).json(&seq_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Drop a sequence
+#[pyfunction]
+fn drop_sequence(host: &str, port: u16, token: &str, storage_type: &str, name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/sequence/{}/{}", host, port, storage_type, name);
+        
+        let mut request = client.delete(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Get next value from a sequence
+#[pyfunction]
+fn nextval(host: &str, port: u16, token: &str, storage_type: &str, name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/sequence/{}/{}/nextval", host, port, storage_type, name);
+        
+        let mut request = client.post(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Get current value of a sequence
+#[pyfunction]
+fn currval(host: &str, port: u16, token: &str, storage_type: &str, name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/sequence/{}/{}/currval", host, port, storage_type, name);
+        
+        let mut request = client.get(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Set a sequence value
+#[pyfunction]
+fn setval(host: &str, port: u16, token: &str, storage_type: &str, name: &str, value: i64) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/sequence/{}/{}/setval", host, port, storage_type, name);
+        
+        let body = serde_json::json!({ "value": value });
+        
+        let mut request = client.post(&url).json(&body);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Create a view
+#[pyfunction]
+fn create_view(host: &str, port: u16, token: &str, storage_type: &str, view: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/view/{}", host, port, storage_type);
+        
+        let view_value: serde_json::Value = serde_json::from_str(view)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON view: {}", e)))?;
+        
+        let mut request = client.post(&url).json(&view_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Drop a view
+#[pyfunction]
+fn drop_view(host: &str, port: u16, token: &str, storage_type: &str, name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/view/{}/{}", host, port, storage_type, name);
+        
+        let mut request = client.delete(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Refresh a view's cached data
+#[pyfunction]
+fn refresh_view(host: &str, port: u16, token: &str, storage_type: &str, name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/view/{}/{}/refresh", host, port, storage_type, name);
+        
+        let mut request = client.post(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Create a trigger on a table
+#[pyfunction]
+fn create_trigger(host: &str, port: u16, token: &str, storage_type: &str, table: &str, trigger: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/trigger/{}/{}", host, port, storage_type, table);
+        
+        let trigger_value: serde_json::Value = serde_json::from_str(trigger)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON trigger: {}", e)))?;
+        
+        let mut request = client.post(&url).json(&trigger_value);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Drop a trigger from a table
+#[pyfunction]
+fn drop_trigger(host: &str, port: u16, token: &str, storage_type: &str, table: &str, trigger_name: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/trigger/{}/{}/{}", host, port, storage_type, table, trigger_name);
+        
+        let mut request = client.delete(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Get information schema tables listing
+#[pyfunction]
+fn info_schema_tables(host: &str, port: u16, token: &str, storage_type: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/info-schema/{}/tables", host, port, storage_type);
+        
+        let mut request = client.get(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Get information schema columns for a table
+#[pyfunction]
+fn info_schema_columns(host: &str, port: u16, token: &str, storage_type: &str, table: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/info-schema/{}/{}/columns", host, port, storage_type, table);
+        
+        let mut request = client.get(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Get information schema constraints for a table
+#[pyfunction]
+fn info_schema_constraints(host: &str, port: u16, token: &str, storage_type: &str, table: &str) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/info-schema/{}/{}/constraints", host, port, storage_type, table);
+        
+        let mut request = client.get(&url);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
         serde_json::to_string(&result)
             .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
     })
@@ -836,4 +1460,297 @@ fn disable_collection_encryption(host: &str, port: u16, collection: &str, token:
         serde_json::to_string(&result)
             .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
     })
+}
+
+// ==================== UQL / SQL Execution ====================
+
+/// Execute a SQL query through the UQL engine
+#[pyfunction]
+#[pyo3(signature = (host, port, token, sql, params=None))]
+fn execute_sql(host: &str, port: u16, token: &str, sql: &str, params: Option<&str>) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/uql", host, port);
+        
+        let params_value: Option<serde_json::Value> = if let Some(p) = params {
+            Some(serde_json::from_str(p).map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON params: {}", e)))?)
+        } else {
+            None
+        };
+        
+        let body = serde_json::json!({
+            "query": sql,
+            "language": "sql",
+            "params": params_value,
+        });
+        
+        let mut request = client.post(&url).json(&body);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+// ==================== ER Model Features (v1.2.2+) ====================
+
+fn value_to_sql(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("'{}'", s),
+        serde_json::Value::Null => "NULL".to_string(),
+        _ => v.to_string(),
+    }
+}
+
+fn conditions_to_where(conditions: &serde_json::Value) -> String {
+    if let Some(obj) = conditions.as_object() {
+        obj.iter()
+            .map(|(k, v)| format!("{} = {}", k, value_to_sql(v)))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    } else {
+        String::new()
+    }
+}
+
+/// Insert data and return specified columns
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, data, returning))]
+fn insert_returning(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str, data: &str, returning: &str,
+) -> PyResult<String> {
+    let data_value: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON data: {}", e)))?;
+    
+    let returning_list: Vec<&str> = returning
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    let cols: Vec<&str> = data_value.as_object()
+        .map(|obj| obj.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+    
+    let vals: Vec<String> = data_value.as_object()
+        .map(|obj| obj.values().map(value_to_sql).collect())
+        .unwrap_or_default();
+    
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+        table,
+        cols.join(", "),
+        vals.join(", "),
+        returning_list.join(", "),
+    );
+    
+    execute_sql(host, port, token, &sql, None)
+}
+
+/// Update data and return specified columns
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, conditions, data, returning))]
+fn update_returning(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str, conditions: &str, data: &str, returning: &str,
+) -> PyResult<String> {
+    let data_value: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON data: {}", e)))?;
+    
+    let conditions_value: serde_json::Value = serde_json::from_str(conditions)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e)))?;
+    
+    let returning_list: Vec<&str> = returning
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    let set_clause: Vec<String> = data_value.as_object()
+        .map(|obj| obj.iter().map(|(k, v)| format!("{} = {}", k, value_to_sql(v))).collect())
+        .unwrap_or_default();
+    
+    let where_clause = conditions_to_where(&conditions_value);
+    let where_part = if where_clause.is_empty() { String::new() } else { format!(" WHERE {}", where_clause) };
+    
+    let sql = format!(
+        "UPDATE {} SET {} {} RETURNING {}",
+        table,
+        set_clause.join(", "),
+        where_part,
+        returning_list.join(", "),
+    );
+    
+    execute_sql(host, port, token, &sql, None)
+}
+
+/// Delete data and return specified columns
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, conditions, returning))]
+fn delete_returning(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str, conditions: &str, returning: &str,
+) -> PyResult<String> {
+    let conditions_value: serde_json::Value = serde_json::from_str(conditions)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e)))?;
+    
+    let returning_list: Vec<&str> = returning
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    let where_clause = conditions_to_where(&conditions_value);
+    let where_part = if where_clause.is_empty() { String::new() } else { format!(" WHERE {}", where_clause) };
+    
+    let sql = format!(
+        "DELETE FROM {}{} RETURNING {}",
+        table,
+        where_part,
+        returning_list.join(", "),
+    );
+    
+    execute_sql(host, port, token, &sql, None)
+}
+
+/// Select data with GROUP BY, HAVING, DISTINCT, ORDER BY support
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, columns=None, conditions=None, group_by=None, having=None, distinct=false, order_by=None, limit=None, offset=None))]
+fn select_grouped(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str,
+    columns: Option<&str>, conditions: Option<&str>,
+    group_by: Option<&str>, having: Option<&str>,
+    distinct: bool, order_by: Option<&str>,
+    limit: Option<u64>, offset: Option<u64>,
+) -> PyResult<String> {
+    let cols = columns.unwrap_or("*");
+    let mut sql = String::from("SELECT ");
+    if distinct {
+        sql.push_str("DISTINCT ");
+    }
+    sql.push_str(&format!("{} FROM {}", cols, table));
+    
+    if let Some(c) = conditions {
+        let cond_value: serde_json::Value = serde_json::from_str(c)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e)))?;
+        let where_clause = conditions_to_where(&cond_value);
+        if !where_clause.is_empty() {
+            sql.push_str(&format!(" WHERE {}", where_clause));
+        }
+    }
+    
+    if let Some(gb) = group_by {
+        if !gb.trim().is_empty() {
+            sql.push_str(&format!(" GROUP BY {}", gb));
+        }
+    }
+    
+    if let Some(h) = having {
+        let having_value: serde_json::Value = serde_json::from_str(h)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON having: {}", e)))?;
+        let having_clause = conditions_to_where(&having_value);
+        if !having_clause.is_empty() {
+            sql.push_str(&format!(" HAVING {}", having_clause));
+        }
+    }
+    
+    if let Some(ob) = order_by {
+        if !ob.trim().is_empty() {
+            sql.push_str(&format!(" ORDER BY {}", ob));
+        }
+    }
+    
+    if let Some(l) = limit {
+        sql.push_str(&format!(" LIMIT {}", l));
+    }
+    
+    if let Some(o) = offset {
+        sql.push_str(&format!(" OFFSET {}", o));
+    }
+    
+    execute_sql(host, port, token, &sql, None)
+}
+
+/// Truncate a table with cascade support
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, cascade=false))]
+fn truncate_table_cascade(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str, cascade: bool,
+) -> PyResult<String> {
+    let runtime = Runtime::new()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    
+    runtime.block_on(async {
+        let client = Client::new();
+        let url = format!("http://{}:{}/api/v1/crud/{}/{}/truncate", host, port, storage_type, table);
+        
+        let body = serde_json::json!({ "cascade": cascade });
+        
+        let mut request = client.post(&url).json(&body);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+        
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+        
+        serde_json::to_string(&result)
+            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+    })
+}
+
+/// Add a foreign key constraint to a relational table
+#[pyfunction]
+#[pyo3(signature = (host, port, token, storage_type, table, name, column, references_table, references_column, on_delete="Restrict", on_update="Restrict"))]
+fn add_foreign_key(
+    host: &str, port: u16, token: &str,
+    storage_type: &str, table: &str,
+    name: &str, column: &str,
+    references_table: &str, references_column: &str,
+    on_delete: &str, on_update: &str,
+) -> PyResult<String> {
+    let constraint = serde_json::json!({
+        "name": name,
+        "constraint_type": "ForeignKey",
+        "fields": [column],
+        "definition": {
+            "references_table": references_table,
+            "references_field": references_column,
+            "on_delete": on_delete,
+            "on_update": on_update,
+        }
+    });
+    
+    add_constraint(host, port, token, storage_type, table, &constraint.to_string())
+}
+
+/// Drop a foreign key constraint from a relational table
+#[pyfunction]
+fn drop_foreign_key(host: &str, port: u16, token: &str, storage_type: &str, table: &str, constraint_name: &str) -> PyResult<String> {
+    drop_constraint(host, port, token, storage_type, table, constraint_name)
 }

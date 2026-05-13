@@ -3,7 +3,7 @@
 # PrimusDB Ruby Driver
 # Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
 # License: MIT - See LICENSE file for details
-# Version: 1.2.0-alpha - Full CRUD + AI/ML + Key-Value support
+# Version: 1.2.3-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
 
 require 'faraday'
 require 'json'
@@ -225,6 +225,230 @@ module PrimusDB
         req.body = params || { algorithm: 'kmeans', clusters: 5 }
       end
       handle_response(response)
+    end
+
+    # ==================== DDL / ER Model Operations ====================
+
+    def add_column(storage_type, table, field)
+      check_connection
+      response = @http_client.post("ddl/#{storage_type}/#{table}/column/add") do |req|
+        req.body = field
+      end
+      handle_response(response)
+    end
+
+    def drop_column(storage_type, table, column_name)
+      check_connection
+      response = @http_client.delete("ddl/#{storage_type}/#{table}/column/#{column_name}")
+      handle_response(response)
+    end
+
+    def modify_column(storage_type, table, field)
+      check_connection
+      response = @http_client.put("ddl/#{storage_type}/#{table}/column") do |req|
+        req.body = field
+      end
+      handle_response(response)
+    end
+
+    def add_constraint(storage_type, table, constraint)
+      check_connection
+      response = @http_client.post("ddl/#{storage_type}/#{table}/constraint") do |req|
+        req.body = constraint
+      end
+      handle_response(response)
+    end
+
+    def drop_constraint(storage_type, table, constraint_name)
+      check_connection
+      response = @http_client.delete("ddl/#{storage_type}/#{table}/constraint/#{constraint_name}")
+      handle_response(response)
+    end
+
+    def rename_table(storage_type, table, new_name)
+      check_connection
+      response = @http_client.post("ddl/#{storage_type}/#{table}/rename") do |req|
+        req.body = { new_name: new_name }
+      end
+      handle_response(response)
+    end
+
+    def create_sequence(storage_type, sequence)
+      check_connection
+      response = @http_client.post("sequence/#{storage_type}") do |req|
+        req.body = sequence
+      end
+      handle_response(response)
+    end
+
+    def drop_sequence(storage_type, name)
+      check_connection
+      response = @http_client.delete("sequence/#{storage_type}/#{name}")
+      handle_response(response)
+    end
+
+    def nextval(storage_type, name)
+      check_connection
+      response = @http_client.post("sequence/#{storage_type}/#{name}/nextval")
+      handle_response(response)
+    end
+
+    def currval(storage_type, name)
+      check_connection
+      response = @http_client.get("sequence/#{storage_type}/#{name}/currval")
+      handle_response(response)
+    end
+
+    def setval(storage_type, name, value)
+      check_connection
+      response = @http_client.post("sequence/#{storage_type}/#{name}/setval") do |req|
+        req.body = { value: value }
+      end
+      handle_response(response)
+    end
+
+    def create_view(storage_type, view)
+      check_connection
+      response = @http_client.post("view/#{storage_type}") do |req|
+        req.body = view
+      end
+      handle_response(response)
+    end
+
+    def drop_view(storage_type, name)
+      check_connection
+      response = @http_client.delete("view/#{storage_type}/#{name}")
+      handle_response(response)
+    end
+
+    def refresh_view(storage_type, name)
+      check_connection
+      response = @http_client.post("view/#{storage_type}/#{name}/refresh")
+      handle_response(response)
+    end
+
+    def create_trigger(storage_type, table, trigger)
+      check_connection
+      response = @http_client.post("trigger/#{storage_type}/#{table}") do |req|
+        req.body = trigger
+      end
+      handle_response(response)
+    end
+
+    def drop_trigger(storage_type, table, trigger_name)
+      check_connection
+      response = @http_client.delete("trigger/#{storage_type}/#{table}/#{trigger_name}")
+      handle_response(response)
+    end
+
+    def info_schema_tables(storage_type)
+      check_connection
+      response = @http_client.get("info-schema/#{storage_type}/tables")
+      handle_response(response)
+    end
+
+    def info_schema_columns(storage_type, table)
+      check_connection
+      response = @http_client.get("info-schema/#{storage_type}/#{table}/columns")
+      handle_response(response)
+    end
+
+    def info_schema_constraints(storage_type, table)
+      check_connection
+      response = @http_client.get("info-schema/#{storage_type}/#{table}/constraints")
+      handle_response(response)
+    end
+
+    # ==================== UQL / SQL Execution ====================
+
+    def execute_sql(sql, params = nil)
+      check_connection
+      body = { query: sql, language: 'sql' }
+      body[:params] = params if params
+      response = @http_client.post('uql') do |req|
+        req.body = body
+      end
+      handle_response(response)
+    end
+
+    # ==================== ER Model Features (v1.2.2+) ====================
+
+    def truncate_table(storage_type, table, cascade: false)
+      check_connection
+      response = @http_client.post("crud/#{storage_type}/#{table}/truncate") do |req|
+        req.body = { cascade: cascade }
+      end
+      handle_response(response)
+    end
+
+    def insert_returning(storage_type, table, data, returning)
+      cols = data.keys.join(', ')
+      vals = data.values.map { |v| v.is_a?(String) ? "'#{v}'" : v.to_s }.join(', ')
+      ret = returning.join(', ')
+      sql = "INSERT INTO #{table} (#{cols}) VALUES (#{vals}) RETURNING #{ret}"
+      result = execute_sql(sql)
+      result.is_a?(Hash) ? result['records'] || [] : []
+    end
+
+    def update_returning(storage_type, table, conditions, data, returning)
+      set_clause = data.map { |k, v| v.is_a?(String) ? "#{k} = '#{v}'" : "#{k} = #{v}" }.join(', ')
+      conds = conditions.map { |k, v| v.is_a?(String) ? "#{k} = '#{v}'" : "#{k} = #{v}" }.join(' AND ')
+      ret = returning.join(', ')
+      sql = "UPDATE #{table} SET #{set_clause} WHERE #{conds} RETURNING #{ret}"
+      result = execute_sql(sql)
+      result.is_a?(Hash) ? result['records'] || [] : []
+    end
+
+    def delete_returning(storage_type, table, conditions, returning)
+      conds = conditions.map { |k, v| v.is_a?(String) ? "#{k} = '#{v}'" : "#{k} = #{v}" }.join(' AND ')
+      ret = returning.join(', ')
+      sql = "DELETE FROM #{table} WHERE #{conds} RETURNING #{ret}"
+      result = execute_sql(sql)
+      result.is_a?(Hash) ? result['records'] || [] : []
+    end
+
+    def select_grouped(storage_type, table, columns: nil, conditions: nil,
+                       group_by: nil, having: nil, distinct: false,
+                       order_by: nil, limit: nil, offset: nil)
+      cols = columns ? columns.join(', ') : '*'
+      sql = 'SELECT '
+      sql += 'DISTINCT ' if distinct
+      sql += "#{cols} FROM #{table}"
+      if conditions
+        conds = conditions.map { |k, v| v.is_a?(String) ? "#{k} = '#{v}'" : "#{k} = #{v}" }.join(' AND ')
+        sql += " WHERE #{conds}"
+      end
+      sql += " GROUP BY #{group_by.join(', ')}" if group_by
+      if having
+        having_conds = having.map { |k, v| v.is_a?(String) ? "#{k} = '#{v}'" : "#{k} = #{v}" }.join(' AND ')
+        sql += " HAVING #{having_conds}"
+      end
+      sql += " ORDER BY #{order_by.join(', ')}" if order_by
+      sql += " LIMIT #{limit}" if limit
+      sql += " OFFSET #{offset}" if offset
+      result = execute_sql(sql)
+      result.is_a?(Hash) ? result['records'] || [] : []
+    end
+
+    def add_foreign_key(storage_type, table, name:, column:,
+                        references_table:, references_column:,
+                        on_delete: 'Restrict', on_update: 'Restrict')
+      constraint = {
+        name: name,
+        constraint_type: 'ForeignKey',
+        fields: [column],
+        definition: {
+          references_table: references_table,
+          references_field: references_column,
+          on_delete: on_delete,
+          on_update: on_update
+        }
+      }
+      add_constraint(storage_type, table, constraint)
+    end
+
+    def drop_foreign_key(storage_type, table, constraint_name)
+      drop_constraint(storage_type, table, constraint_name)
     end
 
     private

@@ -2,11 +2,13 @@
  * PrimusDB Rust Native Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.2.0-alpha - Builder pattern, Collection abstraction
+ * Version: 1.2.3-alpha - ER Model parity, cascade truncate, RETURNING, GROUP BY
  */
 
 use primusdb::cluster::ClusterStatus;
+use primusdb::query::{QueryLanguage, UqlQuery};
 use primusdb::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Native Rust driver for PrimusDB
@@ -47,6 +49,7 @@ impl NativeDriver {
             data: Some(schema),
             limit: None,
             offset: None,
+            namespace: None,
         };
         self.db.execute_query(query).await?;
         Ok(())
@@ -67,6 +70,7 @@ impl NativeDriver {
             data: Some(data),
             limit: None,
             offset: None,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -92,6 +96,7 @@ impl NativeDriver {
             data: None,
             limit,
             offset,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -118,6 +123,7 @@ impl NativeDriver {
             data: Some(data),
             limit: None,
             offset: None,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -141,6 +147,7 @@ impl NativeDriver {
             data: None,
             limit: None,
             offset: None,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -164,6 +171,7 @@ impl NativeDriver {
             data: None,
             limit: None,
             offset: None,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -193,6 +201,7 @@ impl NativeDriver {
             data: Some(predict_data),
             limit: None,
             offset: None,
+            namespace: None,
         };
 
         match self.db.execute_query(query).await? {
@@ -204,9 +213,9 @@ impl NativeDriver {
     /// Perform vector similarity search
     pub async fn vector_search(
         &self,
-        table: &str,
-        query_vector: Vec<f32>,
-        limit: usize,
+        _table: &str,
+        _query_vector: Vec<f32>,
+        _limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
         // Vector search would be implemented as a special query operation
         // For now, return empty result
@@ -216,18 +225,656 @@ impl NativeDriver {
     /// Perform data clustering
     pub async fn cluster(
         &self,
-        storage_type: StorageType,
-        table: &str,
-        params: Option<serde_json::Value>,
+        _storage_type: StorageType,
+        _table: &str,
+        _params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         // Clustering would be implemented as a special query operation
         // For now, return empty result
         Ok(serde_json::Value::Null)
     }
 
+    /// Add a column to a relational table
+    pub async fn add_column(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        field: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::AlterTableAddColumn,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(field),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Drop a column from a relational table
+    pub async fn drop_column(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        column_name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::AlterTableDropColumn,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(serde_json::Value::String(column_name.to_string())),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Modify a column definition
+    pub async fn modify_column(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        field: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::AlterTableModifyColumn,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(field),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Add a constraint to a relational table
+    pub async fn add_constraint(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        constraint: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::AlterTableAddConstraint,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(constraint),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Drop a constraint from a relational table
+    pub async fn drop_constraint(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        constraint_name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::AlterTableDropConstraint,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(serde_json::Value::String(constraint_name.to_string())),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Rename a relational table
+    pub async fn rename_table(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        new_name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::RenameTable,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(serde_json::Value::String(new_name.to_string())),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Create a sequence
+    pub async fn create_sequence(
+        &self,
+        storage_type: StorageType,
+        sequence: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::CreateSequence,
+            table: String::new(),
+            conditions: None,
+            data: Some(sequence),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Drop a sequence
+    pub async fn drop_sequence(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::DropSequence,
+            table: name.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get next value from a sequence
+    pub async fn nextval(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::NextVal,
+            table: name.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get current value from a sequence
+    pub async fn currval(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::CurrVal,
+            table: name.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Set a sequence value
+    pub async fn setval(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+        value: i64,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::SetVal,
+            table: name.to_string(),
+            conditions: None,
+            data: Some(serde_json::json!(value)),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Create a view
+    pub async fn create_view(
+        &self,
+        storage_type: StorageType,
+        view: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::CreateView,
+            table: String::new(),
+            conditions: None,
+            data: Some(view),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Drop a view
+    pub async fn drop_view(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::DropView,
+            table: name.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Refresh a view
+    pub async fn refresh_view(
+        &self,
+        storage_type: StorageType,
+        name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::RefreshView,
+            table: name.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Create a trigger on a table
+    pub async fn create_trigger(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        trigger: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::CreateTrigger,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(trigger),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Drop a trigger from a table
+    pub async fn drop_trigger(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        trigger_name: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::DropTrigger,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(serde_json::Value::String(trigger_name.to_string())),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get information schema tables
+    pub async fn info_schema_tables(&self, storage_type: StorageType) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::InformationSchemaTables,
+            table: String::new(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get information schema columns for a table
+    pub async fn info_schema_columns(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::InformationSchemaColumns,
+            table: table.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get information schema constraints for a table
+    pub async fn info_schema_constraints(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+    ) -> Result<serde_json::Value> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::InformationSchemaConstraints,
+            table: table.to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(query).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
     /// Get cluster status
     pub fn get_cluster_status(&self) -> Result<ClusterStatus> {
         self.db.get_cluster_status()
+    }
+
+    // ==================== UQL / SQL Execution ====================
+
+    /// Execute a raw SQL query through the UQL engine
+    pub fn execute_sql(&self, sql: &str, params: Option<HashMap<String, serde_json::Value>>) -> Result<primusdb::query::UqlResult> {
+        let uql_query = UqlQuery {
+            query: sql.to_string(),
+            query_type: QueryLanguage::Sql,
+            parameters: params,
+        };
+        self.db.uql_execute_query(&uql_query)
+    }
+
+    // ==================== ER Model Features (v1.2.2+) ====================
+
+    /// Truncate a table, optionally cascading to dependent tables
+    pub async fn truncate_table(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        cascade: bool,
+    ) -> Result<u64> {
+        let query = Query {
+            storage_type,
+            operation: QueryOperation::Truncate,
+            table: table.to_string(),
+            conditions: None,
+            data: Some(serde_json::json!({"cascade": cascade})),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+
+        match self.db.execute_query(query).await? {
+            primusdb::QueryResult::Truncate(count) => Ok(count),
+            _ => Ok(0),
+        }
+    }
+
+    /// Insert data and return specified columns
+    pub async fn insert_returning(
+        &self,
+        _storage_type: StorageType,
+        table: &str,
+        data: serde_json::Value,
+        returning: &[&str],
+    ) -> Result<Vec<serde_json::Value>> {
+        let obj = data.as_object().ok_or_else(|| {
+            primusdb::Error::DatabaseError("Data must be a JSON object".to_string())
+        })?;
+        let cols: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        let vals: Vec<String> = obj
+            .values()
+            .map(|v| match v {
+                serde_json::Value::String(s) => format!("'{}'", s),
+                serde_json::Value::Null => "NULL".to_string(),
+                _ => v.to_string(),
+            })
+            .collect();
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+            table,
+            cols.join(", "),
+            vals.join(", "),
+            returning.join(", ")
+        );
+        let result = self.execute_sql(&sql, None)?;
+        Ok(result.records.into_iter().map(|r| r.data).collect())
+    }
+
+    /// Update data and return specified columns
+    pub async fn update_returning(
+        &self,
+        _storage_type: StorageType,
+        table: &str,
+        conditions: serde_json::Value,
+        data: serde_json::Value,
+        returning: &[&str],
+    ) -> Result<Vec<serde_json::Value>> {
+        let data_obj = data.as_object().ok_or_else(|| {
+            primusdb::Error::DatabaseError("Data must be a JSON object".to_string())
+        })?;
+        let conds_obj = conditions.as_object().ok_or_else(|| {
+            primusdb::Error::DatabaseError("Conditions must be a JSON object".to_string())
+        })?;
+        let set_clause: Vec<String> = data_obj
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => format!("{} = '{}'", k, s),
+                serde_json::Value::Null => format!("{} = NULL", k),
+                _ => format!("{} = {}", k, v),
+            })
+            .collect();
+        let where_clause: Vec<String> = conds_obj
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => format!("{} = '{}'", k, s),
+                serde_json::Value::Null => format!("{} IS NULL", k),
+                _ => format!("{} = {}", k, v),
+            })
+            .collect();
+        let sql = format!(
+            "UPDATE {} SET {} WHERE {} RETURNING {}",
+            table,
+            set_clause.join(", "),
+            where_clause.join(" AND "),
+            returning.join(", ")
+        );
+        let result = self.execute_sql(&sql, None)?;
+        Ok(result.records.into_iter().map(|r| r.data).collect())
+    }
+
+    /// Delete data and return specified columns
+    pub async fn delete_returning(
+        &self,
+        _storage_type: StorageType,
+        table: &str,
+        conditions: serde_json::Value,
+        returning: &[&str],
+    ) -> Result<Vec<serde_json::Value>> {
+        let conds_obj = conditions.as_object().ok_or_else(|| {
+            primusdb::Error::DatabaseError("Conditions must be a JSON object".to_string())
+        })?;
+        let where_clause: Vec<String> = conds_obj
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => format!("{} = '{}'", k, s),
+                serde_json::Value::Null => format!("{} IS NULL", k),
+                _ => format!("{} = {}", k, v),
+            })
+            .collect();
+        let sql = format!(
+            "DELETE FROM {} WHERE {} RETURNING {}",
+            table,
+            where_clause.join(" AND "),
+            returning.join(", ")
+        );
+        let result = self.execute_sql(&sql, None)?;
+        Ok(result.records.into_iter().map(|r| r.data).collect())
+    }
+
+    /// Select data with GROUP BY, HAVING, DISTINCT, ORDER BY support
+    pub async fn select_grouped(
+        &self,
+        _storage_type: StorageType,
+        table: &str,
+        columns: Option<&[&str]>,
+        conditions: Option<serde_json::Value>,
+        group_by: Option<&[&str]>,
+        having: Option<serde_json::Value>,
+        distinct: bool,
+        order_by: Option<&[&str]>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut sql = String::from("SELECT ");
+        if distinct {
+            sql.push_str("DISTINCT ");
+        }
+        if let Some(cols) = columns {
+            sql.push_str(&cols.join(", "));
+        } else {
+            sql.push('*');
+        }
+        sql.push_str(&format!(" FROM {}", table));
+
+        if let Some(serde_json::Value::Object(conds)) = conditions {
+            if !conds.is_empty() {
+                let where_clause: Vec<String> = conds
+                    .iter()
+                    .map(|(k, v)| match v {
+                        serde_json::Value::String(s) => format!("{} = '{}'", k, s),
+                        serde_json::Value::Null => format!("{} IS NULL", k),
+                        _ => format!("{} = {}", k, v),
+                    })
+                    .collect();
+                sql.push_str(&format!(" WHERE {}", where_clause.join(" AND ")));
+            }
+        }
+
+        if let Some(gb) = group_by {
+            if !gb.is_empty() {
+                sql.push_str(&format!(" GROUP BY {}", gb.join(", ")));
+            }
+        }
+
+        if let Some(serde_json::Value::Object(h)) = having {
+            if !h.is_empty() {
+                let having_clause: Vec<String> = h
+                    .iter()
+                    .map(|(k, v)| match v {
+                        serde_json::Value::String(s) => format!("{} = '{}'", k, s),
+                        serde_json::Value::Null => format!("{} IS NULL", k),
+                        _ => format!("{} = {}", k, v),
+                    })
+                    .collect();
+                sql.push_str(&format!(" HAVING {}", having_clause.join(" AND ")));
+            }
+        }
+
+        if let Some(ob) = order_by {
+            if !ob.is_empty() {
+                sql.push_str(&format!(" ORDER BY {}", ob.join(", ")));
+            }
+        }
+
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {}", l));
+        }
+
+        if let Some(o) = offset {
+            sql.push_str(&format!(" OFFSET {}", o));
+        }
+
+        let result = self.execute_sql(&sql, None)?;
+        Ok(result.records.into_iter().map(|r| r.data).collect())
+    }
+
+    /// Add a foreign key constraint to a relational table
+    pub async fn add_foreign_key(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        name: &str,
+        column: &str,
+        references_table: &str,
+        references_column: &str,
+        on_delete: &str,
+        on_update: &str,
+    ) -> Result<serde_json::Value> {
+        let constraint = serde_json::json!({
+            "name": name,
+            "constraint_type": "ForeignKey",
+            "fields": [column],
+            "definition": {
+                "references_table": references_table,
+                "references_field": references_column,
+                "on_delete": on_delete,
+                "on_update": on_update,
+            }
+        });
+        self.add_constraint(storage_type, table, constraint).await
+    }
+
+    /// Drop a foreign key constraint from a relational table
+    pub async fn drop_foreign_key(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+        constraint_name: &str,
+    ) -> Result<serde_json::Value> {
+        self.drop_constraint(storage_type, table, constraint_name).await
     }
 }
 
@@ -261,6 +908,7 @@ impl NativeDriverBuilder {
                     node_id: "native-driver".to_string(),
                     discovery_servers: vec![],
                 },
+                namespaces: Default::default(),
             },
         }
     }
@@ -406,6 +1054,66 @@ impl Collection {
     ) -> Result<serde_json::Value> {
         self.driver
             .predict(self.storage_type, &self.name, data, prediction_type)
+            .await
+    }
+
+    pub async fn add_column(&self, field: serde_json::Value) -> Result<serde_json::Value> {
+        self.driver
+            .add_column(self.storage_type, &self.name, field)
+            .await
+    }
+
+    pub async fn drop_column(&self, column_name: &str) -> Result<serde_json::Value> {
+        self.driver
+            .drop_column(self.storage_type, &self.name, column_name)
+            .await
+    }
+
+    pub async fn modify_column(&self, field: serde_json::Value) -> Result<serde_json::Value> {
+        self.driver
+            .modify_column(self.storage_type, &self.name, field)
+            .await
+    }
+
+    pub async fn add_constraint(&self, constraint: serde_json::Value) -> Result<serde_json::Value> {
+        self.driver
+            .add_constraint(self.storage_type, &self.name, constraint)
+            .await
+    }
+
+    pub async fn drop_constraint(&self, constraint_name: &str) -> Result<serde_json::Value> {
+        self.driver
+            .drop_constraint(self.storage_type, &self.name, constraint_name)
+            .await
+    }
+
+    pub async fn rename_table(&self, new_name: &str) -> Result<serde_json::Value> {
+        self.driver
+            .rename_table(self.storage_type, &self.name, new_name)
+            .await
+    }
+
+    pub async fn create_trigger(&self, trigger: serde_json::Value) -> Result<serde_json::Value> {
+        self.driver
+            .create_trigger(self.storage_type, &self.name, trigger)
+            .await
+    }
+
+    pub async fn drop_trigger(&self, trigger_name: &str) -> Result<serde_json::Value> {
+        self.driver
+            .drop_trigger(self.storage_type, &self.name, trigger_name)
+            .await
+    }
+
+    pub async fn info_schema_columns(&self) -> Result<serde_json::Value> {
+        self.driver
+            .info_schema_columns(self.storage_type, &self.name)
+            .await
+    }
+
+    pub async fn info_schema_constraints(&self) -> Result<serde_json::Value> {
+        self.driver
+            .info_schema_constraints(self.storage_type, &self.name)
             .await
     }
 }

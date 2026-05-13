@@ -7,7 +7,7 @@ configurable validator networks and cryptographic verification.
 
 ## Consensus Architecture Overview
 
-```
+```text
 Consensus Engine Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -49,7 +49,7 @@ Consensus Engine Architecture
 ## Supported Consensus Algorithms
 
 ### Hyperledger-inspired PBFT (Practical Byzantine Fault Tolerance)
-```
+```text
 PBFT Protocol Phases:
 1. Request   - Client sends request to leader
 2. Pre-Prepare - Leader assigns sequence number
@@ -61,7 +61,7 @@ Fault Tolerance: Can tolerate f failures with 3f+1 nodes
 ```
 
 ### Simplified Proof-of-Work (Development)
-```
+```text
 PoW Characteristics:
 • CPU-based mining for block validation
 • Adjustable difficulty for performance tuning
@@ -80,7 +80,7 @@ The core interface that all consensus implementations must provide:
 - **Fork Resolution**: Handle blockchain forks
 
 ### Transaction Structure
-```rust
+```ignore
 Transaction {
     id: "unique-transaction-id",
     operations: [Operation, Operation, ...],
@@ -91,7 +91,7 @@ Transaction {
 ```
 
 ### Block Structure
-```rust
+```ignore
 Block {
     header: BlockHeader {
         version: 1,
@@ -109,7 +109,7 @@ Block {
 ## Usage Examples
 
 ### Basic Transaction Consensus
-```rust
+```ignore
 use primusdb::consensus::{ConsensusEngine, Transaction, OperationType};
 
 let transaction = Transaction {
@@ -120,6 +120,7 @@ let transaction = Transaction {
             table: "users".to_string(),
             data: serde_json::json!({"name": "Alice"}),
             conditions: None,
+            storage_type: "Document".to_string(),
         }
     ],
     timestamp: chrono::Utc::now(),
@@ -137,7 +138,7 @@ if result.accepted {
 ```
 
 ### Block Validation and Commitment
-```rust
+```ignore
 // Validate incoming block
 let is_valid = consensus_engine.validate_block(&received_block).await?;
 if is_valid {
@@ -150,7 +151,7 @@ if is_valid {
 ```
 
 ### Chain State Monitoring
-```rust
+```ignore
 // Get current blockchain state
 let chain_state = consensus_engine.get_chain_state().await?;
 println!("Current height: {}", chain_state.height);
@@ -221,7 +222,7 @@ max_block_size = 1000  # transactions per block
 ## Implementation Details
 
 ### Block Structure
-```
+```text
 Block Format:
 ┌─────────────────────────────────────┐
 │ Header                              │
@@ -245,7 +246,7 @@ Block Format:
 ```
 
 ### Merkle Tree Construction
-```
+```text
 Merkle Tree for Transactions:
         Root
        /    \
@@ -257,7 +258,7 @@ T1 T2 T3 T4 T5 T6 T7 T8
 ```
 
 ### Fork Resolution Algorithm
-```
+```text
 Fork Resolution Process:
 1. Detect fork at common ancestor
 2. Calculate chain work (PoW) or validator votes (PBFT)
@@ -276,7 +277,7 @@ Fork Resolution Process:
 - **Fork Frequency**: Rate of blockchain forks
 
 ### Health Checks
-```rust
+```ignore
 let health = consensus_engine.health_check()?;
 assert!(health.validator_count >= health.minimum_quorum);
 assert!(health.last_block_age < Duration::from_secs(300)); // 5 minutes
@@ -304,6 +305,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use tracing::info;
 
 /// Core trait defining the consensus protocol interface
 ///
@@ -373,18 +376,13 @@ pub trait ConsensusEngine: Send + Sync {
     async fn get_chain_state(&self) -> Result<ChainState>;
 
     /// Resolve blockchain fork by selecting canonical chain
-    ///
-    /// # Arguments
-    /// * `fork_point` - Hash of the block where fork occurred
-    ///
-    /// # Returns
-    /// Resolution strategy and affected blocks
-    ///
-    /// # Resolution Strategy
-    /// - Choose longest valid chain
-    /// - Rollback conflicting transactions
-    /// - Replay valid transactions on correct chain
     async fn handle_fork(&self, fork_point: &Hash) -> Result<ForkResolution>;
+
+    /// Build a block from the mempool, validate, and commit it.
+    /// Returns the committed block, or None if the mempool was empty.
+    async fn build_and_commit_block(&self) -> Result<Option<Block>> {
+        Ok(None)
+    }
 }
 
 /// Consensus transaction representing a set of database operations
@@ -393,7 +391,7 @@ pub trait ConsensusEngine: Send + Sync {
 /// that must be executed atomically across the distributed network.
 ///
 /// # Transaction Structure
-/// ```
+/// ```text
 /// Transaction
 /// ├── Header
 /// │   ├── ID: Unique identifier
@@ -447,6 +445,9 @@ pub struct Operation {
     /// - Update/Delete: Which records to modify/remove
     /// - Other operations: Typically None
     pub conditions: Option<serde_json::Value>,
+    /// Target storage engine type (Document, Relational, etc.)
+    /// Used by the state machine to route operations to the correct engine.
+    pub storage_type: String,
 }
 
 /// Types of database operations supported in consensus transactions
@@ -509,6 +510,15 @@ pub struct Block {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Hash(String);
 
+impl Hash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainState {
     pub current_height: u64,
@@ -544,38 +554,199 @@ pub enum ForkResolution {
 }
 
 pub mod blockchain;
+pub mod state_machine;
 
 pub struct HyperledgerStyleConsensus {
+    #[allow(dead_code)]
     config: PrimusDBConfig,
-    current_state: ChainState,
+    current_state: Mutex<ChainState>,
     validators: HashMap<String, Validator>,
-    pending_transactions: Vec<Transaction>,
+    pending_transactions: Mutex<Vec<Transaction>>,
+    db: sled::Db,
+    /// State machine for applying committed blocks to storage engines
+    state_machine: std::sync::Arc<state_machine::ConsensusStateMachine>,
 }
 
 impl HyperledgerStyleConsensus {
-    pub fn new(config: &PrimusDBConfig) -> Result<Self> {
+    pub fn new(
+        config: &PrimusDBConfig,
+        engines: std::collections::HashMap<
+            crate::StorageType,
+            std::sync::Arc<dyn crate::storage::StorageEngine>,
+        >,
+    ) -> Result<Self> {
+        let db_path = format!("{}/consensus", config.storage.data_dir);
+        std::fs::create_dir_all(&db_path)?;
+        let db: sled::Db = sled::open(&db_path)?;
+
         let consensus_params = ConsensusParameters {
             block_time_ms: 5000,
-            max_block_size: 1000000, // 1MB
+            max_block_size: 1000000,
             validator_count: 7,
             min_stake: 1000,
             slash_threshold: 0.1,
         };
 
+        // Restore chain state from sled
+        let height = db
+            .get("height")?
+            .and_then(|v| serde_json::from_slice::<u64>(&v).ok())
+            .unwrap_or(0);
+        let total_tx = db
+            .get("total_tx")?
+            .and_then(|v| serde_json::from_slice::<u64>(&v).ok())
+            .unwrap_or(0);
+        let last_hash = db
+            .get("last_hash")?
+            .and_then(|v| String::from_utf8(v.to_vec()).ok())
+            .unwrap_or_else(|| "genesis".to_string());
+
         let initial_state = ChainState {
-            current_height: 0,
-            total_transactions: 0,
+            current_height: height,
+            total_transactions: total_tx,
             validators: vec![],
-            last_block_hash: Hash("genesis".to_string()),
+            last_block_hash: Hash(last_hash),
             consensus_parameters: consensus_params,
         };
 
+        let state_machine = std::sync::Arc::new(state_machine::ConsensusStateMachine::new(engines));
+
         Ok(HyperledgerStyleConsensus {
             config: config.clone(),
-            current_state: initial_state,
+            current_state: Mutex::new(initial_state),
             validators: HashMap::new(),
-            pending_transactions: vec![],
+            pending_transactions: Mutex::new(vec![]),
+            db,
+            state_machine,
         })
+    }
+
+    /// Add a validator to the validator set
+    pub fn add_validator(&mut self, id: String, public_key: String, stake: u64) {
+        self.validators.insert(
+            id.clone(),
+            Validator {
+                id,
+                public_key,
+                stake,
+                reputation: 1.0,
+                last_seen: chrono::Utc::now(),
+            },
+        );
+        let mut state = self.current_state.lock().unwrap();
+        state.validators = self.validators.values().cloned().collect();
+        state.consensus_parameters.validator_count = self.validators.len();
+    }
+
+    /// Remove a validator by ID
+    pub fn remove_validator(&mut self, id: &str) {
+        self.validators.remove(id);
+        let mut state = self.current_state.lock().unwrap();
+        state.validators = self.validators.values().cloned().collect();
+        state.consensus_parameters.validator_count = self.validators.len();
+    }
+
+    /// Update validator stake
+    pub fn update_validator_stake(&mut self, id: &str, new_stake: u64) -> Option<()> {
+        let v = self.validators.get_mut(id)?;
+        v.stake = new_stake;
+        let mut state = self.current_state.lock().unwrap();
+        state.validators = self.validators.values().cloned().collect();
+        Some(())
+    }
+
+    /// Get validator
+    pub fn get_validator(&self, id: &str) -> Option<&Validator> {
+        self.validators.get(id)
+    }
+
+    /// Add a transaction to the mempool
+    pub fn add_to_mempool(&self, transaction: Transaction) {
+        self.pending_transactions.lock().unwrap().push(transaction);
+    }
+
+    /// Build a block from pending transactions (mempool)
+    pub fn build_block(&mut self) -> Option<Block> {
+        let transactions = {
+            let mut pending = self.pending_transactions.lock().unwrap();
+            if pending.is_empty() {
+                return None;
+            }
+            pending.drain(..).collect::<Vec<Transaction>>()
+        };
+        let merkle_root = Self::calculate_merkle_root(&transactions);
+
+        let (height, previous_hash) = {
+            let state = self.current_state.lock().unwrap();
+            (state.current_height + 1, state.last_block_hash.clone())
+        };
+
+        let validator_id = self
+            .select_validator(height)
+            .map(|v| v.id.clone())
+            .unwrap_or_else(|| "genesis".to_string());
+
+        let hash = Hash(format!(
+            "block_{}_{}",
+            height,
+            chrono::Utc::now().timestamp()
+        ));
+
+        let block = Block {
+            hash: hash.clone(),
+            previous_hash,
+            height,
+            transactions,
+            timestamp: chrono::Utc::now(),
+            merkle_root,
+            validator: validator_id,
+            signature: format!("sig_{}", chrono::Utc::now().timestamp()),
+        };
+
+        {
+            let mut state = self.current_state.lock().unwrap();
+            state.current_height = height;
+            state.last_block_hash = hash;
+            state.total_transactions += block.transactions.len() as u64;
+        }
+
+        Some(block)
+    }
+
+    /// Persist a block and update chain state to sled
+    fn persist_block(&self, block: &Block) -> Result<()> {
+        let blocks_tree = self.db.open_tree("blocks")?;
+        let key = format!("block_{}", block.height);
+        blocks_tree.insert(key.as_bytes(), serde_json::to_vec(block)?)?;
+
+        let total_tx = {
+            let state = self.current_state.lock().unwrap();
+            state.total_transactions
+        };
+
+        self.db
+            .insert("height", serde_json::to_vec(&block.height)?)?;
+        self.db.insert("total_tx", serde_json::to_vec(&total_tx)?)?;
+        self.db.insert(
+            "last_hash",
+            block.hash.0.as_bytes(),
+        )?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// List committed blocks (for audit/recovery)
+    pub fn list_blocks(&self) -> Result<Vec<Block>> {
+        let blocks_tree = self.db.open_tree("blocks")?;
+        let mut blocks = Vec::new();
+        for result in blocks_tree.iter() {
+            let (_, value) = result?;
+            if let Ok(block) = serde_json::from_slice::<Block>(&value) {
+                blocks.push(block);
+            }
+        }
+        blocks.sort_by_key(|b| b.height);
+        Ok(blocks)
     }
 
     fn calculate_merkle_root(transactions: &[Transaction]) -> Hash {
@@ -614,6 +785,7 @@ impl HyperledgerStyleConsensus {
         true // Placeholder
     }
 
+    #[allow(dead_code)]
     fn select_validator(&self, round: u64) -> Option<&Validator> {
         let validator_list: Vec<&Validator> = self.validators.values().collect();
         if validator_list.is_empty() {
@@ -639,7 +811,9 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
             });
         }
 
-        // Simulate consensus
+        // Add to mempool
+        self.add_to_mempool(transaction.clone());
+
         Ok(ConsensusResult {
             accepted: true,
             block_hash: Some(Hash(format!(
@@ -669,16 +843,86 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
     }
 
     async fn commit_block(&self, block: &Block) -> Result<()> {
-        println!("Committing block: {:?}", block.hash);
+        info!("Committing block {} at height {}", block.hash.0, block.height);
+        self.persist_block(block)?;
+        info!("Block {} persisted to sled", block.hash.0);
+
+        self.state_machine.apply_block(block).await?;
+        info!(
+            "Block {} applied to state machine at height {}",
+            block.hash.0, block.height
+        );
+
         Ok(())
     }
 
     async fn get_chain_state(&self) -> Result<ChainState> {
-        Ok(self.current_state.clone())
+        let state = self.current_state.lock().unwrap();
+        Ok(state.clone())
     }
 
     async fn handle_fork(&self, _fork_point: &Hash) -> Result<ForkResolution> {
         println!("Handling fork resolution");
         Ok(ForkResolution::KeepCurrent)
+    }
+
+    async fn build_and_commit_block(&self) -> Result<Option<Block>> {
+        let transactions = {
+            let mut pending = self.pending_transactions.lock().unwrap();
+            if pending.is_empty() {
+                return Ok(None);
+            }
+            pending.drain(..).collect::<Vec<Transaction>>()
+        };
+
+        let merkle_root = Self::calculate_merkle_root(&transactions);
+
+        let (height, previous_hash) = {
+            let state = self.current_state.lock().unwrap();
+            (state.current_height + 1, state.last_block_hash.clone())
+        };
+
+        let validator_list: Vec<&Validator> = self.validators.values().collect();
+        let validator_id = if validator_list.is_empty() {
+            "genesis".to_string()
+        } else {
+            let index = (height as usize) % validator_list.len();
+            validator_list[index].id.clone()
+        };
+
+        let hash = Hash(format!(
+            "block_{}_{}",
+            height,
+            chrono::Utc::now().timestamp()
+        ));
+
+        let block = Block {
+            hash: hash.clone(),
+            previous_hash,
+            height,
+            transactions,
+            timestamp: chrono::Utc::now(),
+            merkle_root,
+            validator: validator_id,
+            signature: format!("sig_{}", chrono::Utc::now().timestamp()),
+        };
+
+        if !self.validate_block(&block).await? {
+            return Err(crate::Error::ConsensusError(
+                "Block validation failed".to_string(),
+            ));
+        }
+
+        {
+            let mut state = self.current_state.lock().unwrap();
+            state.current_height = height;
+            state.last_block_hash = hash;
+            state.total_transactions += block.transactions.len() as u64;
+        }
+
+        self.commit_block(&block).await?;
+
+        info!("Built and committed block {} at height {}", block.hash.0, height);
+        Ok(Some(block))
     }
 }

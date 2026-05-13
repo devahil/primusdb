@@ -2,7 +2,7 @@
  * PrimusDB Node.js Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: MIT - See LICENSE file for details
- * Version: 1.2.0-alpha - Added: Auth, Token, Encryption, Transaction methods
+ * Version: 1.2.3-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -773,18 +773,249 @@ export class PrimusDB {
    *
    * @param storageType - Storage type
    * @param table - Table/collection name to truncate
+   * @param cascade - If true, also truncate dependent tables (default: false)
    */
-  async truncateTable(storageType: string, table: string): Promise<void> {
+  async truncateTable(storageType: string, table: string, cascade: boolean = false): Promise<void> {
     this.checkConnection();
 
     try {
-      const response = await this.httpClient.post(`/api/v1/crud/${storageType}/${table}/truncate`);
+      const response = await this.httpClient.post(`/api/v1/crud/${storageType}/${table}/truncate`, { cascade });
       if (response.status !== 200) {
         throw new Error(`Failed to truncate table: ${response.statusText}`);
       }
     } catch (error) {
       throw new Error(`Truncate table failed: ${error}`);
     }
+  }
+
+  // ==================== DDL / ER Model Operations ====================
+
+  /**
+   * Add a column to a relational table
+   */
+  async addColumn(storageType: string, table: string, field: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/ddl/${storageType}/${table}/column/add`, field);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Add column failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Add column failed: ${error}`); }
+  }
+
+  /**
+   * Drop a column from a relational table
+   */
+  async dropColumn(storageType: string, table: string, columnName: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.delete(`/api/v1/ddl/${storageType}/${table}/column/${columnName}`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Drop column failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Drop column failed: ${error}`); }
+  }
+
+  /**
+   * Modify a column definition
+   */
+  async modifyColumn(storageType: string, table: string, field: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.put(`/api/v1/ddl/${storageType}/${table}/column`, field);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Modify column failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Modify column failed: ${error}`); }
+  }
+
+  /**
+   * Add a constraint to a relational table
+   */
+  async addConstraint(storageType: string, table: string, constraint: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/ddl/${storageType}/${table}/constraint`, constraint);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Add constraint failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Add constraint failed: ${error}`); }
+  }
+
+  /**
+   * Drop a constraint from a relational table
+   */
+  async dropConstraint(storageType: string, table: string, constraintName: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.delete(`/api/v1/ddl/${storageType}/${table}/constraint/${constraintName}`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Drop constraint failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Drop constraint failed: ${error}`); }
+  }
+
+  /**
+   * Rename a relational table
+   */
+  async renameTable(storageType: string, table: string, newName: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/ddl/${storageType}/${table}/rename`, { new_name: newName });
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Rename table failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Rename table failed: ${error}`); }
+  }
+
+  /**
+   * Create a sequence
+   */
+  async createSequence(storageType: string, sequence: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/sequence/${storageType}`, sequence);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Create sequence failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Create sequence failed: ${error}`); }
+  }
+
+  /**
+   * Drop a sequence
+   */
+  async dropSequence(storageType: string, name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.delete(`/api/v1/sequence/${storageType}/${name}`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Drop sequence failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Drop sequence failed: ${error}`); }
+  }
+
+  /**
+   * Get next value from a sequence
+   */
+  async nextval(storageType: string, name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/sequence/${storageType}/${name}/nextval`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Nextval failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Nextval failed: ${error}`); }
+  }
+
+  /**
+   * Get current value of a sequence
+   */
+  async currval(storageType: string, name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get(`/api/v1/sequence/${storageType}/${name}/currval`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Currval failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Currval failed: ${error}`); }
+  }
+
+  /**
+   * Set a sequence value
+   */
+  async setval(storageType: string, name: string, value: number): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/sequence/${storageType}/${name}/setval`, { value });
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Setval failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Setval failed: ${error}`); }
+  }
+
+  /**
+   * Create a view
+   */
+  async createView(storageType: string, view: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/view/${storageType}`, view);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Create view failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Create view failed: ${error}`); }
+  }
+
+  /**
+   * Drop a view
+   */
+  async dropView(storageType: string, name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.delete(`/api/v1/view/${storageType}/${name}`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Drop view failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Drop view failed: ${error}`); }
+  }
+
+  /**
+   * Refresh a view's cached data
+   */
+  async refreshView(storageType: string, name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/view/${storageType}/${name}/refresh`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Refresh view failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Refresh view failed: ${error}`); }
+  }
+
+  /**
+   * Create a trigger on a table
+   */
+  async createTrigger(storageType: string, table: string, trigger: any): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/trigger/${storageType}/${table}`, trigger);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Create trigger failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Create trigger failed: ${error}`); }
+  }
+
+  /**
+   * Drop a trigger from a table
+   */
+  async dropTrigger(storageType: string, table: string, triggerName: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.delete(`/api/v1/trigger/${storageType}/${table}/${triggerName}`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Drop trigger failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Drop trigger failed: ${error}`); }
+  }
+
+  /**
+   * Get information schema tables listing
+   */
+  async infoSchemaTables(storageType: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get(`/api/v1/info-schema/${storageType}/tables`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Info schema tables failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Info schema tables failed: ${error}`); }
+  }
+
+  /**
+   * Get information schema columns for a table
+   */
+  async infoSchemaColumns(storageType: string, table: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get(`/api/v1/info-schema/${storageType}/${table}/columns`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Info schema columns failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Info schema columns failed: ${error}`); }
+  }
+
+  /**
+   * Get information schema constraints for a table
+   */
+  async infoSchemaConstraints(storageType: string, table: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get(`/api/v1/info-schema/${storageType}/${table}/constraints`);
+      if (response.status === 200) { return response.data; }
+      else { throw new Error(`Info schema constraints failed: ${response.statusText}`); }
+    } catch (error) { throw new Error(`Info schema constraints failed: ${error}`); }
   }
 
   private checkConnection(): void {
@@ -1411,6 +1642,159 @@ export class PrimusDB {
    */
   async executeMango(selector: any, params?: Record<string, any>): Promise<any> {
     return this.executeUql(JSON.stringify(selector), 'mango', params);
+  }
+
+  // ==================== ER Model Features (v1.2.2+) ====================
+
+  /**
+   * Insert data and return specified columns
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param data - Data to insert
+   * @param returning - Columns to return
+   * @returns Array of returned records
+   */
+  async insertReturning(storageType: string, table: string, data: Record<string, any>, returning: string[]): Promise<any[]> {
+    const cols = Object.keys(data).join(', ');
+    const vals = Object.values(data).map(v => typeof v === 'string' ? `'${v}'` : v).join(', ');
+    const ret = returning.join(', ');
+    const sql = `INSERT INTO ${table} (${cols}) VALUES (${vals}) RETURNING ${ret}`;
+    const result = await this.executeSql(sql);
+    return result?.records || [];
+  }
+
+  /**
+   * Update data and return specified columns
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param conditions - Update conditions
+   * @param data - New data
+   * @param returning - Columns to return
+   * @returns Array of returned records
+   */
+  async updateReturning(storageType: string, table: string, conditions: Record<string, any>, data: Record<string, any>, returning: string[]): Promise<any[]> {
+    const setClause = Object.entries(data).map(([k, v]) => typeof v === 'string' ? `${k} = '${v}'` : `${k} = ${v}`).join(', ');
+    const conds = Object.entries(conditions).map(([k, v]) => typeof v === 'string' ? `${k} = '${v}'` : `${k} = ${v}`).join(' AND ');
+    const ret = returning.join(', ');
+    const sql = `UPDATE ${table} SET ${setClause} WHERE ${conds} RETURNING ${ret}`;
+    const result = await this.executeSql(sql);
+    return result?.records || [];
+  }
+
+  /**
+   * Delete data and return specified columns
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param conditions - Delete conditions
+   * @param returning - Columns to return
+   * @returns Array of returned records
+   */
+  async deleteReturning(storageType: string, table: string, conditions: Record<string, any>, returning: string[]): Promise<any[]> {
+    const conds = Object.entries(conditions).map(([k, v]) => typeof v === 'string' ? `${k} = '${v}'` : `${k} = ${v}`).join(' AND ');
+    const ret = returning.join(', ');
+    const sql = `DELETE FROM ${table} WHERE ${conds} RETURNING ${ret}`;
+    const result = await this.executeSql(sql);
+    return result?.records || [];
+  }
+
+  /**
+   * Select data with GROUP BY, HAVING, DISTINCT, ORDER BY support
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param columns - Columns to select (default: *)
+   * @param conditions - WHERE conditions
+   * @param groupBy - GROUP BY columns
+   * @param having - HAVING conditions
+   * @param distinct - Whether to use DISTINCT
+   * @param orderBy - ORDER BY columns
+   * @param limit - Maximum results
+   * @param offset - Results offset
+   * @returns Array of matching records
+   */
+  async selectGrouped(
+    storageType: string, table: string,
+    columns?: string[], conditions?: Record<string, any>,
+    groupBy?: string[], having?: Record<string, any>,
+    distinct?: boolean, orderBy?: string[],
+    limit?: number, offset?: number
+  ): Promise<any[]> {
+    let sql = 'SELECT ';
+    if (distinct) sql += 'DISTINCT ';
+    sql += (columns ? columns.join(', ') : '*') + ` FROM ${table}`;
+    if (conditions) {
+      const conds = Object.entries(conditions).map(([k, v]) => typeof v === 'string' ? `${k} = '${v}'` : `${k} = ${v}`).join(' AND ');
+      sql += ` WHERE ${conds}`;
+    }
+    if (groupBy) sql += ` GROUP BY ${groupBy.join(', ')}`;
+    if (having) {
+      const havingConds = Object.entries(having).map(([k, v]) => typeof v === 'string' ? `${k} = '${v}'` : `${k} = ${v}`).join(' AND ');
+      sql += ` HAVING ${havingConds}`;
+    }
+    if (orderBy) sql += ` ORDER BY ${orderBy.join(', ')}`;
+    if (limit) sql += ` LIMIT ${limit}`;
+    if (offset) sql += ` OFFSET ${offset}`;
+    const result = await this.executeSql(sql);
+    return result?.records || [];
+  }
+
+  /**
+   * Truncate a table with cascade support
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param cascade - If true, also truncate dependent tables
+   * @returns Result
+   */
+  async truncateTableCascade(storageType: string, table: string, cascade: boolean = true): Promise<any> {
+    return this.truncateTable(storageType, table, cascade);
+  }
+
+  /**
+   * Add a foreign key constraint to a relational table
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param name - Constraint name
+   * @param column - Local column name
+   * @param referencesTable - Referenced table name
+   * @param referencesColumn - Referenced column name
+   * @param onDelete - ON DELETE action (Restrict, Cascade, SetNull, SetDefault, NoAction)
+   * @param onUpdate - ON UPDATE action
+   * @returns Result
+   */
+  async addForeignKey(
+    storageType: string, table: string,
+    name: string, column: string,
+    referencesTable: string, referencesColumn: string,
+    onDelete: string = 'Restrict', onUpdate: string = 'Restrict'
+  ): Promise<any> {
+    return this.addConstraint(storageType, table, {
+      name,
+      constraint_type: 'ForeignKey',
+      fields: [column],
+      definition: {
+        references_table: referencesTable,
+        references_field: referencesColumn,
+        on_delete: onDelete,
+        on_update: onUpdate
+      }
+    });
+  }
+
+  /**
+   * Drop a foreign key constraint
+   *
+   * @param storageType - Storage type
+   * @param table - Table/collection name
+   * @param constraintName - Constraint name to drop
+   * @returns Result
+   */
+  async dropForeignKey(storageType: string, table: string, constraintName: string): Promise<any> {
+    return this.dropConstraint(storageType, table, constraintName);
   }
 }
 

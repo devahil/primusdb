@@ -10,7 +10,7 @@ use super::cache::{CacheConfig, CacheError, CacheStatistics, MemoryCache};
 use super::consensus::{CacheConsensusEngine, ConsensusConfig, ConsensusError};
 use super::hashing::{HashRing, HashRingConfig};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]

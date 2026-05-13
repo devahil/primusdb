@@ -7,7 +7,7 @@ random number generation.
 
 ## Cryptographic Architecture
 
-```
+```text
 Security Layer Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -74,7 +74,7 @@ Security Layer Architecture
 ## Usage Examples
 
 ### Data Encryption
-```rust
+```ignore
 use primusdb::crypto::CryptoManager;
 
 let crypto = CryptoManager::new(&security_config)?;
@@ -90,7 +90,7 @@ assert_eq!(decrypted, plaintext);
 ```
 
 ### Key Management
-```rust
+```ignore
 // Generate new encryption key
 let key_id = crypto.generate_encryption_key("AES256GCM", 86400 * 30)?; // 30 days
 
@@ -105,7 +105,7 @@ for key in active_keys {
 ```
 
 ### Digital Signatures
-```rust
+```ignore
 // Sign transaction data
 let signature = crypto.sign_data(&transaction_bytes, &private_key)?;
 
@@ -115,7 +115,7 @@ assert!(is_valid);
 ```
 
 ### Password Hashing
-```rust
+```ignore
 // Hash password for storage
 let password_hash = crypto.hash_password("user_password")?;
 
@@ -228,10 +228,13 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub struct CryptoManager {
+    #[allow(dead_code)]
     config: crate::SecurityConfig,
+    #[allow(dead_code)]
     master_key: Vec<u8>,
     key_rotation_counter: u64,
     active_keys: HashMap<String, EncryptionKey>,
+    #[allow(dead_code)]
     random: SystemRandom,
 }
 

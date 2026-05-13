@@ -7,6 +7,7 @@ and advanced features like AI/ML predictions and vector search.
 
 import asyncio
 import json
+import urllib.parse
 from typing import Dict, List, Optional, Union, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -273,6 +274,191 @@ class PrimusDBClient:
         payload = params or {"algorithm": "kmeans", "clusters": 5}
 
         return await self._request("POST", endpoint, payload)
+
+    # ==================== DDL / ER Model Operations ====================
+
+    async def add_column(self, storage_type: StorageType, table: str, field: Dict) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/column/add"
+        return await self._request("POST", endpoint, field)
+
+    async def drop_column(self, storage_type: StorageType, table: str, column_name: str) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/column/{column_name}"
+        return await self._request("DELETE", endpoint)
+
+    async def modify_column(self, storage_type: StorageType, table: str, field: Dict) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/column"
+        return await self._request("PUT", endpoint, field)
+
+    async def add_constraint(self, storage_type: StorageType, table: str, constraint: Dict) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/constraint"
+        return await self._request("POST", endpoint, constraint)
+
+    async def drop_constraint(self, storage_type: StorageType, table: str, constraint_name: str) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/constraint/{constraint_name}"
+        return await self._request("DELETE", endpoint)
+
+    async def rename_table(self, storage_type: StorageType, table: str, new_name: str) -> Dict:
+        endpoint = f"ddl/{storage_type.value}/{table}/rename"
+        return await self._request("POST", endpoint, {"new_name": new_name})
+
+    async def create_sequence(self, storage_type: StorageType, sequence: Dict) -> Dict:
+        endpoint = f"sequence/{storage_type.value}"
+        return await self._request("POST", endpoint, sequence)
+
+    async def drop_sequence(self, storage_type: StorageType, name: str) -> Dict:
+        endpoint = f"sequence/{storage_type.value}/{name}"
+        return await self._request("DELETE", endpoint)
+
+    async def nextval(self, storage_type: StorageType, name: str) -> Dict:
+        endpoint = f"sequence/{storage_type.value}/{name}/nextval"
+        return await self._request("POST", endpoint)
+
+    async def currval(self, storage_type: StorageType, name: str) -> Dict:
+        endpoint = f"sequence/{storage_type.value}/{name}/currval"
+        return await self._request("GET", endpoint)
+
+    async def setval(self, storage_type: StorageType, name: str, value: int) -> Dict:
+        endpoint = f"sequence/{storage_type.value}/{name}/setval"
+        return await self._request("POST", endpoint, {"value": value})
+
+    async def create_view(self, storage_type: StorageType, view: Dict) -> Dict:
+        endpoint = f"view/{storage_type.value}"
+        return await self._request("POST", endpoint, view)
+
+    async def drop_view(self, storage_type: StorageType, name: str) -> Dict:
+        endpoint = f"view/{storage_type.value}/{name}"
+        return await self._request("DELETE", endpoint)
+
+    async def refresh_view(self, storage_type: StorageType, name: str) -> Dict:
+        endpoint = f"view/{storage_type.value}/{name}/refresh"
+        return await self._request("POST", endpoint)
+
+    async def create_trigger(self, storage_type: StorageType, table: str, trigger: Dict) -> Dict:
+        endpoint = f"trigger/{storage_type.value}/{table}"
+        return await self._request("POST", endpoint, trigger)
+
+    async def drop_trigger(self, storage_type: StorageType, table: str, trigger_name: str) -> Dict:
+        endpoint = f"trigger/{storage_type.value}/{table}/{trigger_name}"
+        return await self._request("DELETE", endpoint)
+
+    async def info_schema_tables(self, storage_type: StorageType) -> Dict:
+        endpoint = f"info-schema/{storage_type.value}/tables"
+        return await self._request("GET", endpoint)
+
+    async def info_schema_columns(self, storage_type: StorageType, table: str) -> Dict:
+        endpoint = f"info-schema/{storage_type.value}/{table}/columns"
+        return await self._request("GET", endpoint)
+
+    async def info_schema_constraints(self, storage_type: StorageType, table: str) -> Dict:
+        endpoint = f"info-schema/{storage_type.value}/{table}/constraints"
+        return await self._request("GET", endpoint)
+
+    # ==================== UQL / SQL Execution ====================
+
+    async def execute_sql(self, sql: str, params: Optional[Dict] = None) -> Dict:
+        endpoint = "uql"
+        payload = {"query": sql, "language": "sql"}
+        if params:
+            payload["params"] = params
+        return await self._request("POST", endpoint, payload)
+
+    # ==================== ER Model Features (v1.2.2+) ====================
+
+    async def truncate_table(self, storage_type: StorageType, table: str, cascade: bool = False) -> Dict:
+        endpoint = f"crud/{storage_type.value}/{table}/truncate"
+        return await self._request("POST", endpoint, {"cascade": cascade})
+
+    async def insert_returning(self, storage_type: StorageType, table: str,
+                               data: Dict, returning: List[str]) -> List[Dict]:
+        cols = ", ".join(data.keys())
+        vals = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in data.values())
+        ret = ", ".join(returning)
+        sql = f"INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING {ret}"
+        result = await self.execute_sql(sql)
+        return result.get("records", [])
+
+    async def update_returning(self, storage_type: StorageType, table: str,
+                               conditions: Dict, data: Dict,
+                               returning: List[str]) -> List[Dict]:
+        set_clause = ", ".join(f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}" for k, v in data.items())
+        conds = " AND ".join(
+            f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}" for k, v in conditions.items()
+        )
+        ret = ", ".join(returning)
+        sql = f"UPDATE {table} SET {set_clause} WHERE {conds} RETURNING {ret}"
+        result = await self.execute_sql(sql)
+        return result.get("records", [])
+
+    async def delete_returning(self, storage_type: StorageType, table: str,
+                               conditions: Dict, returning: List[str]) -> List[Dict]:
+        conds = " AND ".join(
+            f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}" for k, v in conditions.items()
+        )
+        ret = ", ".join(returning)
+        sql = f"DELETE FROM {table} WHERE {conds} RETURNING {ret}"
+        result = await self.execute_sql(sql)
+        return result.get("records", [])
+
+    async def select_grouped(
+        self, storage_type: StorageType, table: str,
+        columns: List[str] = None,
+        conditions: Optional[Dict] = None,
+        group_by: Optional[List[str]] = None,
+        having: Optional[Dict] = None,
+        distinct: bool = False,
+        order_by: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[Dict]:
+        cols = "*"
+        if columns:
+            cols = ", ".join(columns)
+        sql = "SELECT "
+        if distinct:
+            sql += "DISTINCT "
+        sql += f"{cols} FROM {table}"
+        if conditions:
+            conds = " AND ".join(
+                f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}" for k, v in conditions.items()
+            )
+            sql += f" WHERE {conds}"
+        if group_by:
+            sql += f" GROUP BY {', '.join(group_by)}"
+        if having:
+            having_conds = " AND ".join(
+                f"{k} = '{v}'" if isinstance(v, str) else f"{k} = {v}" for k, v in having.items()
+            )
+            sql += f" HAVING {having_conds}"
+        if order_by:
+            sql += f" ORDER BY {', '.join(order_by)}"
+        if limit:
+            sql += f" LIMIT {limit}"
+        if offset:
+            sql += f" OFFSET {offset}"
+        result = await self.execute_sql(sql)
+        return result.get("records", [])
+
+    async def add_foreign_key(self, storage_type: StorageType, table: str,
+                              name: str, column: str,
+                              references_table: str, references_column: str,
+                              on_delete: str = "Restrict",
+                              on_update: str = "Restrict") -> Dict:
+        constraint = {
+            "name": name,
+            "constraint_type": "ForeignKey",
+            "fields": [column],
+            "definition": {
+                "references_table": references_table,
+                "references_field": references_column,
+                "on_delete": on_delete,
+                "on_update": on_update,
+            }
+        }
+        return await self.add_constraint(storage_type, table, constraint)
+
+    async def drop_foreign_key(self, storage_type: StorageType, table: str,
+                               constraint_name: str) -> Dict:
+        return await self.drop_constraint(storage_type, table, constraint_name)
 
     async def __aenter__(self):
         await self.connect()

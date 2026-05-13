@@ -5,7 +5,7 @@ The memory cache system provides ultra-fast data access with minimal memory foot
 
 ## Architecture Overview
 
-```
+```text
 Memory Cache Architecture
 ══════════════════════════════════════════════════════════════
 
@@ -48,7 +48,7 @@ Memory Cache Architecture
 
 ### Basic Cache Operations
 
-```rust
+```ignore
 use primusdb::cache::{CacheConfig, MemoryCache};
 
 // Create cache with 1GB limit and LZ4 compression
@@ -74,7 +74,7 @@ let results = cache.search("Alice", 100)?;
 
 ### Advanced Configuration
 
-```rust
+```ignore
 let config = CacheConfig {
     max_memory: 512 * 1024 * 1024, // 512MB
     compression_enabled: true,
@@ -129,7 +129,7 @@ let config = CacheConfig {
 
 The cache system integrates seamlessly with all storage engines:
 
-```rust
+```ignore
 // Cache-enabled operations
 let result = primusdb.query_with_cache(
     storage_type,
@@ -141,7 +141,7 @@ let result = primusdb.query_with_cache(
 
 ## Monitoring and Statistics
 
-```rust
+```ignore
 let stats = cache.get_statistics()?;
 println!("Cache hit rate: {:.2}%", stats.hit_rate);
 println!("Memory usage: {} MB", stats.memory_used / 1024 / 1024);

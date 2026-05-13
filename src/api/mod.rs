@@ -212,13 +212,15 @@ curl -X POST localhost:8080/api/v1/query \
 - **3002** - Consensus failure
 */
 
+use crate::auth::{
+    Action, AuthService, LoginRequest, ResourceType,
+};
+use crate::namespace;
+use crate::query::{QueryLanguage, UqlQuery};
 use crate::{PrimusDB, Query, QueryOperation, StorageType};
-use crate::auth::{AuthService, AuthConfig, LoginRequest, CreateTokenRequest, TokenValidation, ResourceType, Action};
-use crate::query::{UqlEngine, UqlQuery, QueryLanguage, UqlResult};
 use axum::{
     extract::{Path, Query as AxumQuery, State},
     http::StatusCode,
-    response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -423,7 +425,10 @@ impl APIServer {
             .route("/api/v1/auth/register", post(register_user))
             // Protected endpoints
             .route("/api/v1/auth/token/create", post(create_api_token))
-            .route("/api/v1/auth/token/revoke/:token_id", post(revoke_api_token))
+            .route(
+                "/api/v1/auth/token/revoke/:token_id",
+                post(revoke_api_token),
+            )
             .route("/api/v1/auth/tokens", get(list_tokens))
             .route("/api/v1/auth/users", get(list_users))
             .route("/api/v1/auth/roles", get(list_roles))
@@ -486,6 +491,82 @@ impl APIServer {
                 "/api/v1/collection/:table/decrypt",
                 post(decrypt_collection),
             )
+            // ER/DDL Operations (v1.2.2+)
+            .route(
+                "/api/v1/ddl/:storage_type/:table/column/add",
+                post(ddl_add_column),
+            )
+            .route(
+                "/api/v1/ddl/:storage_type/:table/column/:name",
+                delete(ddl_drop_column),
+            )
+            .route(
+                "/api/v1/ddl/:storage_type/:table/column",
+                put(ddl_modify_column),
+            )
+            .route(
+                "/api/v1/ddl/:storage_type/:table/constraint",
+                post(ddl_add_constraint),
+            )
+            .route(
+                "/api/v1/ddl/:storage_type/:table/constraint/:name",
+                delete(ddl_drop_constraint),
+            )
+            .route(
+                "/api/v1/ddl/:storage_type/:table/rename",
+                post(ddl_rename_table),
+            )
+            // Sequence Operations
+            .route("/api/v1/sequence/:storage_type", post(sequence_create))
+            .route(
+                "/api/v1/sequence/:storage_type/:name",
+                delete(sequence_drop),
+            )
+            .route(
+                "/api/v1/sequence/:storage_type/:name/nextval",
+                post(sequence_nextval),
+            )
+            .route(
+                "/api/v1/sequence/:storage_type/:name/currval",
+                get(sequence_currval),
+            )
+            .route(
+                "/api/v1/sequence/:storage_type/:name/setval",
+                post(sequence_setval),
+            )
+            // View Operations
+            .route("/api/v1/view/:storage_type", post(view_create))
+            .route("/api/v1/view/:storage_type/:name", delete(view_drop))
+            .route(
+                "/api/v1/view/:storage_type/:name/refresh",
+                post(view_refresh),
+            )
+            // Trigger Operations
+            .route("/api/v1/trigger/:storage_type/:table", post(trigger_create))
+            .route(
+                "/api/v1/trigger/:storage_type/:table/:name",
+                delete(trigger_drop),
+            )
+            // Information Schema
+            .route(
+                "/api/v1/info-schema/:storage_type/tables",
+                get(info_schema_tables),
+            )
+            .route(
+                "/api/v1/info-schema/:storage_type/:table/columns",
+                get(info_schema_columns),
+            )
+            .route(
+                "/api/v1/info-schema/:storage_type/:table/constraints",
+                get(info_schema_constraints),
+            )
+            // Consensus & Blockchain Operations
+            .route("/api/v1/consensus/state", get(consensus_state))
+            .route("/api/v1/consensus/build-block", post(consensus_build_block))
+            .route(
+                "/api/v1/consensus/producer/start",
+                post(consensus_start_producer),
+            )
             // Key-Value Database Operations (CouchDB-compatible API)
             .route("/api/v1/kv/:db", get(kv_get_db_info))
             .route("/api/v1/kv/:db", put(kv_create_db))
@@ -496,13 +577,33 @@ impl APIServer {
             .route("/api/v1/kv/:db/_index", post(kv_create_index))
             .route("/api/v1/kv/:db/_bulk_docs", post(kv_bulk_docs))
             .route("/api/v1/kv/:db/_compact", post(kv_compact))
-            .route("/api/v1/kv/:db/_ensure_full_commit", post(kv_ensure_full_commit))
+            .route(
+                "/api/v1/kv/:db/_ensure_full_commit",
+                post(kv_ensure_full_commit),
+            )
             .route("/api/v1/kv/:db/_rev_limit", get(kv_get_rev_limit))
             .route("/api/v1/kv/:db/_rev_limit", put(kv_set_rev_limit))
             .route("/api/v1/kv/:db/:docid", get(kv_get_document))
             .route("/api/v1/kv/:db/:docid", put(kv_put_document))
             .route("/api/v1/kv/:db/:docid", delete(kv_delete_document))
             .route("/api/v1/kv/:db/:docid", post(kv_update_document))
+            // Namespace Operations
+            .route("/api/v1/namespaces", get(list_namespaces))
+            .route("/api/v1/namespaces/:path", post(create_namespace))
+            .route("/api/v1/namespaces/:path", get(get_namespace))
+            .route("/api/v1/namespaces/:path", put(update_namespace))
+            .route("/api/v1/namespaces/:path", delete(delete_namespace))
+            .route("/api/v1/namespaces/:path/children", get(list_namespace_children))
+            .route("/api/v1/namespaces/:path/effective-policy", get(get_effective_policy))
+            .route("/api/v1/namespaces/:path/resources", get(list_namespace_resources))
+            .route("/api/v1/namespaces/:path/resources", post(attach_resource))
+            .route("/api/v1/namespaces/:path/resources/:storage_type/:resource_name", delete(detach_resource))
+            .route("/api/v1/namespaces/:path/roles", get(list_namespace_roles))
+            .route("/api/v1/namespaces/:path/roles", post(create_namespace_role))
+            .route("/api/v1/namespaces/:path/roles/:role_id", delete(delete_namespace_role))
+            .route("/api/v1/namespaces/:path/users", get(list_namespace_user_bindings))
+            .route("/api/v1/namespaces/:path/users", post(add_namespace_user_binding))
+            .route("/api/v1/namespaces/:path/users/:user_id", delete(remove_namespace_user_binding))
             // Middleware
             .layer(TraceLayer::new_for_http())
             .layer(CompressionLayer::new())
@@ -524,7 +625,7 @@ impl APIServer {
 
         println!("🚀 PrimusDB API server listening on: http://{}", bind_addr);
         println!("📡 API root: http://{}/api/v1", bind_addr);
-        println!("🔐 Authentication enabled", );
+        println!("🔐 Authentication enabled",);
 
         axum::serve(listener, self.app)
             .await
@@ -539,7 +640,7 @@ async fn execute_query(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    let primusdb = &state.primusdb;
+    let _primusdb = &state.primusdb;
     let storage_type = request
         .get("storage_type")
         .and_then(|v| v.as_str())
@@ -556,6 +657,11 @@ async fn execute_query(
     let storage_type = parse_storage_type(storage_type)?;
     let operation = parse_operation(operation)?;
 
+    let namespace = request
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let query = Query {
         storage_type,
         operation,
@@ -564,6 +670,7 @@ async fn execute_query(
         data: request.get("data").cloned(),
         limit: request.get("limit").and_then(|v| v.as_u64()),
         offset: request.get("offset").and_then(|v| v.as_u64()),
+        namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -585,7 +692,7 @@ async fn execute_uql_query(
     let query = request.query.clone();
     let language = request.language.as_deref().unwrap_or("sql");
     let params = request.params.unwrap_or(serde_json::json!({}));
-    
+
     let query_lang = match language.to_lowercase().as_str() {
         "sql" => QueryLanguage::Sql,
         "mongodb" => QueryLanguage::MongoDb,
@@ -593,27 +700,22 @@ async fn execute_uql_query(
         "uql" => QueryLanguage::Uql,
         _ => QueryLanguage::Auto,
     };
-    
-    let config = state.primusdb.config();
-    let uql_engine = match UqlEngine::new(config) {
-        Ok(engine) => engine,
-        Err(e) => return Ok(Json(APIResponse::error(format!("Failed to create UQL engine: {}", e)))),
-    };
-    
-    let mut params_map: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+
+    let mut params_map: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
     if let Some(obj) = params.as_object() {
         for (k, v) in obj {
             params_map.insert(k.clone(), v.clone());
         }
     }
-    
+
     let uql_query = UqlQuery {
         query,
         query_type: query_lang,
         parameters: Some(params_map),
     };
-    
-    match uql_engine.execute_query(&uql_query) {
+
+    match state.primusdb.uql_execute_query(&uql_query) {
         Ok(result) => {
             let value = serde_json::json!({
                 "success": result.success,
@@ -621,7 +723,8 @@ async fn execute_uql_query(
                 "total": result.total,
                 "execution_time_ms": result.execution_time_ms,
                 "engine_used": result.engine_used,
-                "warnings": result.warnings
+                "warnings": result.warnings,
+                "affected_rows": result.affected_rows
             });
             Ok(Json(APIResponse::success(value)))
         }
@@ -643,6 +746,7 @@ async fn api_root() -> Json<serde_json::Value> {
             "root": "GET /api/v1",
             "health": "GET /health",
             "query": "POST /api/v1/query",
+            "uql": "POST /api/v1/uql",
             "crud": {
                 "create": "POST /api/v1/crud/{storage_type}/{table}",
                 "read": "GET /api/v1/crud/{storage_type}/{table}",
@@ -664,6 +768,35 @@ async fn api_root() -> Json<serde_json::Value> {
                 "info": "GET /api/v1/table/{storage_type}/{table}/info",
                 "create": "POST /api/v1/table/{storage_type}/{table}/create",
                 "drop": "DELETE /api/v1/table/{storage_type}/{table}/drop"
+            },
+            "ddl": {
+                "add_column": "POST /api/v1/ddl/{storage_type}/{table}/column/add",
+                "drop_column": "DELETE /api/v1/ddl/{storage_type}/{table}/column/{name}",
+                "modify_column": "PUT /api/v1/ddl/{storage_type}/{table}/column",
+                "add_constraint": "POST /api/v1/ddl/{storage_type}/{table}/constraint",
+                "drop_constraint": "DELETE /api/v1/ddl/{storage_type}/{table}/constraint/{name}",
+                "rename_table": "POST /api/v1/ddl/{storage_type}/{table}/rename"
+            },
+            "sequence": {
+                "create": "POST /api/v1/sequence/{storage_type}",
+                "drop": "DELETE /api/v1/sequence/{storage_type}/{name}",
+                "nextval": "POST /api/v1/sequence/{storage_type}/{name}/nextval",
+                "currval": "GET /api/v1/sequence/{storage_type}/{name}/currval",
+                "setval": "POST /api/v1/sequence/{storage_type}/{name}/setval"
+            },
+            "view": {
+                "create": "POST /api/v1/view/{storage_type}",
+                "drop": "DELETE /api/v1/view/{storage_type}/{name}",
+                "refresh": "POST /api/v1/view/{storage_type}/{name}/refresh"
+            },
+            "trigger": {
+                "create": "POST /api/v1/trigger/{storage_type}/{table}",
+                "drop": "DELETE /api/v1/trigger/{storage_type}/{table}/{name}"
+            },
+            "info_schema": {
+                "tables": "GET /api/v1/info-schema/{storage_type}/tables",
+                "columns": "GET /api/v1/info-schema/{storage_type}/{table}/columns",
+                "constraints": "GET /api/v1/info-schema/{storage_type}/{table}/constraints"
             }
         },
         "storage_engines": ["columnar", "vector", "document", "relational"],
@@ -680,9 +813,7 @@ async fn health_check() -> Json<APIResponse<serde_json::Value>> {
     })))
 }
 
-async fn system_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<APIResponse<serde_json::Value>> {
+async fn system_status(State(_state): State<Arc<AppState>>) -> Json<APIResponse<serde_json::Value>> {
     let status = serde_json::json!({
         "status": "running",
         "uptime_seconds": std::time::SystemTime::now()
@@ -704,7 +835,7 @@ async fn system_status(
     Json(APIResponse::success(status))
 }
 
-async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+async fn prometheus_metrics(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
     let metrics = format!(
         r#"# HELP primusdb_up PrimusDB service availability
 # TYPE primusdb_up gauge
@@ -784,7 +915,7 @@ primusdb_cache_operations_total{{operation="delete"}} 0
 }
 
 async fn cluster_health(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Json<APIResponse<serde_json::Value>> {
     let health = serde_json::json!({
         "cluster_status": "healthy",
@@ -813,6 +944,11 @@ async fn create_record(
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = parse_storage_type(&storage_type)?;
 
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let query = Query {
         storage_type,
         operation: QueryOperation::Create,
@@ -820,7 +956,8 @@ async fn create_record(
         conditions: None,
         data: Some(data),
         limit: None,
-        offset: None,
+            offset: None,
+            namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -843,6 +980,7 @@ async fn read_records(
         .and_then(|c| serde_json::from_str(c).ok());
     let limit = params.get("limit").and_then(|l| l.parse().ok());
     let offset = params.get("offset").and_then(|o| o.parse().ok());
+    let namespace = params.get("namespace").cloned();
 
     let query = Query {
         storage_type,
@@ -852,6 +990,7 @@ async fn read_records(
         data: None,
         limit,
         offset,
+        namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -869,6 +1008,11 @@ async fn update_record(
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = parse_storage_type(&storage_type)?;
 
+    let namespace = request
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let query = Query {
         storage_type,
         operation: QueryOperation::Update,
@@ -876,7 +1020,8 @@ async fn update_record(
         conditions: request.get("conditions").cloned(),
         data: request.get("data").cloned(),
         limit: None,
-        offset: None,
+            offset: None,
+            namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -897,6 +1042,7 @@ async fn delete_record(
     let conditions = params
         .get("conditions")
         .and_then(|c| serde_json::from_str(c).ok());
+    let namespace = params.get("namespace").cloned();
 
     let query = Query {
         storage_type,
@@ -905,7 +1051,8 @@ async fn delete_record(
         conditions,
         data: None,
         limit: None,
-        offset: None,
+            offset: None,
+            namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -919,17 +1066,26 @@ async fn delete_record(
 async fn truncate_table(
     State(state): State<Arc<AppState>>,
     Path((storage_type, table)): Path<(String, String)>,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = parse_storage_type(&storage_type)?;
+
+    let data = body.as_ref().map(|b| b.0.clone());
+    let namespace = body
+        .as_ref()
+        .and_then(|b| b.0.get("namespace"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let query = Query {
         storage_type,
         operation: QueryOperation::Truncate,
         table,
         conditions: None,
-        data: None,
+        data,
         limit: None,
-        offset: None,
+            offset: None,
+            namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -947,7 +1103,10 @@ async fn analyze_data(
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = parse_storage_type(&storage_type)?;
-
+    let namespace = request
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let query = Query {
         storage_type,
         operation: QueryOperation::Analyze,
@@ -955,7 +1114,8 @@ async fn analyze_data(
         conditions: request.get("conditions").cloned(),
         data: None,
         limit: None,
-        offset: None,
+            offset: None,
+            namespace,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -982,7 +1142,8 @@ async fn make_prediction(
             .map(|pt| serde_json::json!({"prediction_type": pt})),
         data: request.get("data").cloned(),
         limit: None,
-        offset: None,
+            offset: None,
+            namespace: None,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -1021,7 +1182,8 @@ async fn vector_search(
         conditions: Some(conditions),
         data: None,
         limit: None,
-        offset: None,
+            offset: None,
+            namespace: None,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -1049,7 +1211,8 @@ async fn cluster_data(
         conditions: Some(serde_json::json!({"operation": "cluster", "params": request})),
         data: None,
         limit: None,
-        offset: None,
+            offset: None,
+            namespace: None,
     };
 
     match state.primusdb.execute_query(query).await {
@@ -1128,14 +1291,20 @@ async fn encrypt_collection(
     Path(table): Path<String>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = StorageType::Document;
-    
-    match state.primusdb.enable_collection_encryption(storage_type, &table) {
+
+    match state
+        .primusdb
+        .enable_collection_encryption(storage_type, &table)
+    {
         Ok(_) => Ok(Json(APIResponse::success(serde_json::json!({
             "collection": table,
             "encryption": "enabled",
             "message": "Collection encryption enabled successfully"
         })))),
-        Err(e) => Ok(Json(APIResponse::error(format!("Failed to enable encryption: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Failed to enable encryption: {}",
+            e
+        )))),
     }
 }
 
@@ -1144,22 +1313,592 @@ async fn decrypt_collection(
     Path(table): Path<String>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
     let storage_type = StorageType::Document;
-    
-    match state.primusdb.disable_collection_encryption(storage_type, &table) {
+
+    match state
+        .primusdb
+        .disable_collection_encryption(storage_type, &table)
+    {
         Ok(_) => Ok(Json(APIResponse::success(serde_json::json!({
             "collection": table,
             "encryption": "disabled",
             "message": "Collection encryption disabled successfully"
         })))),
-        Err(e) => Ok(Json(APIResponse::error(format!("Failed to disable encryption: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Failed to disable encryption: {}",
+            e
+        )))),
+    }
+}
+
+// ==================== ER Model / DDL Operations ====================
+
+async fn ddl_add_column(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::AlterTableAddColumn,
+        table,
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Add column failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn ddl_drop_column(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table, name)): Path<(String, String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::AlterTableDropColumn,
+        table,
+        data: Some(serde_json::Value::String(name)),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Drop column failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn ddl_modify_column(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::AlterTableModifyColumn,
+        table,
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Modify column failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn ddl_add_constraint(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::AlterTableAddConstraint,
+        table,
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Add constraint failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn ddl_drop_constraint(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table, name)): Path<(String, String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::AlterTableDropConstraint,
+        table,
+        data: Some(serde_json::Value::String(name)),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Drop constraint failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn ddl_rename_table(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let new_name = body
+        .get("new_name")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let namespace = body
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::RenameTable,
+        table,
+        data: Some(serde_json::Value::String(new_name.to_string())),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Rename table failed: {}",
+            e
+        )))),
+    }
+}
+
+// Sequence Operations
+
+async fn sequence_create(
+    State(state): State<Arc<AppState>>,
+    Path(storage_type): Path<String>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::CreateSequence,
+        table: String::new(),
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Create sequence failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn sequence_drop(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::DropSequence,
+        table: name,
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Drop sequence failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn sequence_nextval(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::NextVal,
+        table: name.clone(),
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(serde_json::json!({
+            "sequence": name,
+            "result": serde_json::to_value(result).unwrap_or_default()
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("NextVal failed: {}", e)))),
+    }
+}
+
+async fn sequence_currval(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::CurrVal,
+        table: name.clone(),
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(serde_json::json!({
+            "sequence": name,
+            "result": serde_json::to_value(result).unwrap_or_default()
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("CurrVal failed: {}", e)))),
+    }
+}
+
+async fn sequence_setval(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let value = body
+        .get("value")
+        .and_then(|v| v.as_i64())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let namespace = body
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::SetVal,
+        table: name.clone(),
+        data: Some(serde_json::json!(value)),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(_) => Ok(Json(APIResponse::success(serde_json::json!({
+            "sequence": name,
+            "value": value,
+            "status": "set"
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!("SetVal failed: {}", e)))),
+    }
+}
+
+// View Operations
+
+async fn view_create(
+    State(state): State<Arc<AppState>>,
+    Path(storage_type): Path<String>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::CreateView,
+        table: String::new(),
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Create view failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn view_drop(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::DropView,
+        table: name,
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!("Drop view failed: {}", e)))),
+    }
+}
+
+async fn view_refresh(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, name)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::RefreshView,
+        table: name,
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Refresh view failed: {}",
+            e
+        )))),
+    }
+}
+
+// Trigger Operations
+
+async fn trigger_create(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = data
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::CreateTrigger,
+        table,
+        data: Some(data),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Create trigger failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn trigger_drop(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table, name)): Path<(String, String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::DropTrigger,
+        table,
+        data: Some(serde_json::Value::String(name)),
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Drop trigger failed: {}",
+            e
+        )))),
+    }
+}
+
+// Information Schema
+
+async fn info_schema_tables(
+    State(state): State<Arc<AppState>>,
+    Path(storage_type): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::InformationSchemaTables,
+        table: String::new(),
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Info schema failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn info_schema_columns(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::InformationSchemaColumns,
+        table,
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Info schema failed: {}",
+            e
+        )))),
+    }
+}
+
+async fn info_schema_constraints(
+    State(state): State<Arc<AppState>>,
+    Path((storage_type, table)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let storage_type = parse_storage_type(&storage_type)?;
+    let namespace = params.get("namespace").cloned();
+    let query = Query {
+        storage_type,
+        operation: QueryOperation::InformationSchemaConstraints,
+        table,
+        data: None,
+        conditions: None,
+        limit: None,
+            offset: None,
+            namespace,
+    };
+    match state.primusdb.execute_query(query).await {
+        Ok(result) => Ok(Json(APIResponse::success(
+            serde_json::to_value(result).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Info schema failed: {}",
+            e
+        )))),
     }
 }
 
 // ==================== Key-Value (CouchDB-compatible) API ====================
 
-async fn kv_get_db_info(
-    Path(db): Path<String>,
-) -> Json<serde_json::Value> {
+async fn kv_get_db_info(Path(db): Path<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "db_name": db,
         "doc_count": 0,
@@ -1176,31 +1915,30 @@ async fn kv_get_db_info(
     }))
 }
 
-async fn kv_create_db(
-    Path(db): Path<String>,
-) -> Json<APIResponse<serde_json::Value>> {
+async fn kv_create_db(Path(db): Path<String>) -> Json<APIResponse<serde_json::Value>> {
     Json(APIResponse::success(serde_json::json!({
         "ok": true,
         "id": db
     })))
 }
 
-async fn kv_delete_db(
-    Path(db): Path<String>,
-) -> Json<APIResponse<serde_json::Value>> {
+async fn kv_delete_db(Path(_db): Path<String>) -> Json<APIResponse<serde_json::Value>> {
     Json(APIResponse::success(serde_json::json!({
         "ok": true
     })))
 }
 
 async fn kv_all_docs(
-    Path(db): Path<String>,
+    Path(_db): Path<String>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    let include_docs = params.get("include_docs").map(|v| v == "true").unwrap_or(false);
-    let limit: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
+    let _include_docs = params
+        .get("include_docs")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let _limit: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
     let skip: Option<usize> = params.get("skip").and_then(|v| v.parse().ok());
-    
+
     Json(serde_json::json!({
         "total_rows": 0,
         "offset": skip.unwrap_or(0),
@@ -1209,8 +1947,8 @@ async fn kv_all_docs(
 }
 
 async fn kv_find(
-    Path(db): Path<String>,
-    Json(selector): Json<serde_json::Value>,
+    Path(_db): Path<String>,
+    Json(_selector): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "docs": [],
@@ -1222,26 +1960,31 @@ async fn kv_find(
     }))
 }
 
-async fn kv_list_indexes(
-    Path(db): Path<String>,
-) -> Json<serde_json::Value> {
+async fn kv_list_indexes(Path(_db): Path<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "indexes": []
     }))
 }
 
 async fn kv_create_index(
-    Path(db): Path<String>,
+    Path(_db): Path<String>,
     Json(index_def): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let name = index_def.get("name")
+    let name = index_def
+        .get("name")
         .and_then(|n| n.as_str())
         .unwrap_or("default");
-    let fields = index_def.get("index").and_then(|i| i.get("fields"))
+    let fields = index_def
+        .get("index")
+        .and_then(|i| i.get("fields"))
         .and_then(|f| f.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
-    
+
     Json(serde_json::json!({
         "ok": true,
         "id": format!("_design/{}", name),
@@ -1251,41 +1994,35 @@ async fn kv_create_index(
 }
 
 async fn kv_bulk_docs(
-    Path(db): Path<String>,
-    Json(request): Json<serde_json::Value>,
+    Path(_db): Path<String>,
+    Json(_request): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!([
         {"id": "sample", "rev": "1-abc", "error": null}
     ]))
 }
 
-async fn kv_compact(
-    Path(db): Path<String>,
-) -> Json<serde_json::Value> {
+async fn kv_compact(Path(_db): Path<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true
     }))
 }
 
-async fn kv_ensure_full_commit(
-    Path(db): Path<String>,
-) -> Json<serde_json::Value> {
+async fn kv_ensure_full_commit(Path(_db): Path<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
         "instance_start_time": "0"
     }))
 }
 
-async fn kv_get_rev_limit(
-    Path(db): Path<String>,
-) -> Json<serde_json::Value> {
+async fn kv_get_rev_limit(Path(_db): Path<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "rev_limit": 1000
     }))
 }
 
 async fn kv_set_rev_limit(
-    Path(db): Path<String>,
+    Path(_db): Path<String>,
     Json(limit): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -1294,9 +2031,7 @@ async fn kv_set_rev_limit(
     }))
 }
 
-async fn kv_get_document(
-    Path((db, docid)): Path<(String, String)>,
-) -> Json<serde_json::Value> {
+async fn kv_get_document(Path((_db, docid)): Path<(String, String)>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "_id": docid,
         "_rev": "1-abc",
@@ -1306,8 +2041,8 @@ async fn kv_get_document(
 }
 
 async fn kv_put_document(
-    Path((db, docid)): Path<(String, String)>,
-    Json(doc): Json<serde_json::Value>,
+    Path((_db, docid)): Path<(String, String)>,
+    Json(_doc): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
@@ -1317,7 +2052,7 @@ async fn kv_put_document(
 }
 
 async fn kv_delete_document(
-    Path((db, docid)): Path<(String, String)>,
+    Path((_db, docid)): Path<(String, String)>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
     let rev = params.get("rev").cloned().unwrap_or_default();
@@ -1329,8 +2064,8 @@ async fn kv_delete_document(
 }
 
 async fn kv_update_document(
-    Path((db, docid)): Path<(String, String)>,
-    Json(doc): Json<serde_json::Value>,
+    Path((_db, docid)): Path<(String, String)>,
+    Json(_doc): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "ok": true,
@@ -1360,22 +2095,29 @@ async fn register_user(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RegisterUserRequest>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    match state.auth_service.create_user(
-        request.username,
-        request.password,
-        request.email,
-        request.roles,
-        request.segment_id,
-    ).await {
+    match state
+        .auth_service
+        .create_user(
+            request.username,
+            request.password,
+            request.email,
+            request.roles,
+            request.segment_id,
+        )
+        .await
+    {
         Ok(user_id) => Ok(Json(APIResponse::success(serde_json::json!({
             "user_id": user_id,
             "message": "User created successfully"
         })))),
-        Err(e) => Ok(Json(APIResponse::error(format!("Registration failed: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Registration failed: {}",
+            e
+        )))),
     }
 }
 
-    async fn create_api_token(
+async fn create_api_token(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTokenRequestWithAuth>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
@@ -1385,19 +2127,33 @@ async fn register_user(
         expires_in_hours: request.expires_in_hours,
     };
 
-    match state.auth_service.validate_token(&request.authorization).await {
+    match state
+        .auth_service
+        .validate_token(&request.authorization)
+        .await
+    {
         Ok(validation) => {
-            match state.auth_service.create_token(&validation.user_id, token_request).await {
+            match state
+                .auth_service
+                .create_token(&validation.user_id, token_request)
+                .await
+            {
                 Ok((raw_token, token)) => Ok(Json(APIResponse::success(serde_json::json!({
                     "token": raw_token,
                     "token_id": token.id,
                     "expires_at": token.expires_at,
                     "message": "Store this token securely. It cannot be retrieved again."
                 })))),
-                Err(e) => Ok(Json(APIResponse::error(format!("Token creation failed: {}", e)))),
+                Err(e) => Ok(Json(APIResponse::error(format!(
+                    "Token creation failed: {}",
+                    e
+                )))),
             }
         }
-        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Authentication failed: {}",
+            e
+        )))),
     }
 }
 
@@ -1406,16 +2162,21 @@ async fn revoke_api_token(
     Path(token_id): Path<String>,
     Json(request): Json<RevokeTokenRequest>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    match state.auth_service.validate_token(&request.authorization).await {
-        Ok(_) => {
-            match state.auth_service.revoke_token(&token_id).await {
-                Ok(()) => Ok(Json(APIResponse::success(serde_json::json!({
-                    "message": "Token revoked successfully"
-                })))),
-                Err(e) => Ok(Json(APIResponse::error(format!("Revoke failed: {}", e)))),
-            }
-        }
-        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+    match state
+        .auth_service
+        .validate_token(&request.authorization)
+        .await
+    {
+        Ok(_) => match state.auth_service.revoke_token(&token_id).await {
+            Ok(()) => Ok(Json(APIResponse::success(serde_json::json!({
+                "message": "Token revoked successfully"
+            })))),
+            Err(e) => Ok(Json(APIResponse::error(format!("Revoke failed: {}", e)))),
+        },
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Authentication failed: {}",
+            e
+        )))),
     }
 }
 
@@ -1423,14 +2184,24 @@ async fn list_tokens(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ListTokensRequest>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    match state.auth_service.validate_token(&request.authorization).await {
+    match state
+        .auth_service
+        .validate_token(&request.authorization)
+        .await
+    {
         Ok(validation) => {
-            let tokens = state.auth_service.list_user_tokens(&validation.user_id).await;
+            let tokens = state
+                .auth_service
+                .list_user_tokens(&validation.user_id)
+                .await;
             Ok(Json(APIResponse::success(serde_json::json!({
                 "tokens": tokens
             }))))
         }
-        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Authentication failed: {}",
+            e
+        )))),
     }
 }
 
@@ -1438,29 +2209,45 @@ async fn list_users(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ListUsersRequest>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    match state.auth_service.validate_token(&request.authorization).await {
+    match state
+        .auth_service
+        .validate_token(&request.authorization)
+        .await
+    {
         Ok(validation) => {
-            if let Ok(true) = state.auth_service.check_permission(&validation, ResourceType::Admin, Action::Admin).await {
+            if let Ok(true) = state
+                .auth_service
+                .check_permission(&validation, ResourceType::Admin, Action::Admin)
+                .await
+            {
                 let users = state.auth_service.list_users().await;
-                let sanitized: Vec<_> = users.into_iter().map(|u| {
-                    serde_json::json!({
-                        "id": u.id,
-                        "username": u.username,
-                        "email": u.email,
-                        "roles": u.roles,
-                        "segment_id": u.segment_id,
-                        "is_active": u.is_active,
-                        "created_at": u.created_at
+                let sanitized: Vec<_> = users
+                    .into_iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "id": u.id,
+                            "username": u.username,
+                            "email": u.email,
+                            "roles": u.roles,
+                            "segment_id": u.segment_id,
+                            "is_active": u.is_active,
+                            "created_at": u.created_at
+                        })
                     })
-                }).collect();
+                    .collect();
                 Ok(Json(APIResponse::success(serde_json::json!({
                     "users": sanitized
                 }))))
             } else {
-                Ok(Json(APIResponse::error("Insufficient permissions".to_string())))
+                Ok(Json(APIResponse::error(
+                    "Insufficient permissions".to_string(),
+                )))
             }
         }
-        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Authentication failed: {}",
+            e
+        )))),
     }
 }
 
@@ -1477,21 +2264,41 @@ async fn create_segment(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSegmentRequestWithAuth>,
 ) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
-    match state.auth_service.validate_token(&request.authorization).await {
+    match state
+        .auth_service
+        .validate_token(&request.authorization)
+        .await
+    {
         Ok(validation) => {
-            if let Ok(true) = state.auth_service.check_permission(&validation, ResourceType::Admin, Action::Admin).await {
-                match state.auth_service.create_segment(request.name, request.description, request.parent_segment).await {
+            if let Ok(true) = state
+                .auth_service
+                .check_permission(&validation, ResourceType::Admin, Action::Admin)
+                .await
+            {
+                match state
+                    .auth_service
+                    .create_segment(request.name, request.description, request.parent_segment)
+                    .await
+                {
                     Ok(segment_id) => Ok(Json(APIResponse::success(serde_json::json!({
                         "segment_id": segment_id,
                         "message": "Segment created successfully"
                     })))),
-                    Err(e) => Ok(Json(APIResponse::error(format!("Segment creation failed: {}", e)))),
+                    Err(e) => Ok(Json(APIResponse::error(format!(
+                        "Segment creation failed: {}",
+                        e
+                    )))),
                 }
             } else {
-                Ok(Json(APIResponse::error("Insufficient permissions".to_string())))
+                Ok(Json(APIResponse::error(
+                    "Insufficient permissions".to_string(),
+                )))
             }
         }
-        Err(e) => Ok(Json(APIResponse::error(format!("Authentication failed: {}", e)))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Authentication failed: {}",
+            e
+        )))),
     }
 }
 
@@ -1542,6 +2349,333 @@ pub struct CreateSegmentRequestWithAuth {
     pub parent_segment: Option<String>,
 }
 
+// ── Consensus Handlers ─────────────────────────────────────────────
+
+async fn consensus_state(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.primusdb.get_chain_state().await {
+        Ok(chain_state) => Ok(Json(APIResponse::success(
+            serde_json::to_value(chain_state).unwrap_or_default(),
+        ))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Failed to get chain state: {}",
+            e
+        )))),
+    }
+}
+
+async fn consensus_build_block(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    match state.primusdb.build_and_commit_block().await {
+        Ok(Some(block)) => Ok(Json(APIResponse::success(
+            serde_json::json!({
+                "hash": block.hash.as_str(),
+                "height": block.height,
+                "num_transactions": block.transactions.len(),
+                "validator": block.validator,
+            }),
+        ))),
+        Ok(None) => Ok(Json(APIResponse::success(serde_json::json!({
+            "message": "No pending transactions in mempool"
+        })))),
+        Err(e) => Ok(Json(APIResponse::error(format!(
+            "Failed to build block: {}",
+            e
+        )))),
+    }
+}
+
+async fn consensus_start_producer(
+    State(state): State<Arc<AppState>>,
+    Json(params): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let interval_ms = params
+        .get("interval_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000);
+    state.primusdb.start_background_producer(interval_ms);
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "message": format!("Background producer started with {}ms interval", interval_ms)
+    }))))
+}
+
+// ── Namespace Request / Response types ───────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateNamespaceRequest {
+    pub description: Option<String>,
+    pub segment_id: Option<String>,
+    pub metadata: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNamespaceRequest {
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+    pub segment_id: Option<String>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AttachResourceRequest {
+    pub storage_type: String,
+    pub resource_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRoleRequest {
+    pub name: String,
+    pub description: String,
+    pub permissions: Vec<String>,
+    pub inheritable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddUserBindingRequest {
+    pub user_id: String,
+    pub role_id: String,
+    pub granted_by: String,
+    pub expires_at: Option<String>,
+}
+
+// ── Namespace Handlers ───────────────────────────────────────────────────────
+
+async fn list_namespaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<APIResponse<Vec<namespace::Namespace>>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().list_all() {
+        Ok(namespaces) => Ok(Json(APIResponse::success(namespaces))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn create_namespace(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    Json(request): Json<CreateNamespaceRequest>,
+) -> Result<Json<APIResponse<namespace::Namespace>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().create(
+        &path,
+        request.description.as_deref().unwrap_or(""),
+        None,
+        request.segment_id,
+        request.metadata.unwrap_or_default(),
+    ) {
+        Ok(ns) => Ok(Json(APIResponse::success(ns))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn get_namespace(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<namespace::Namespace>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().get_by_path(&path) {
+        Ok(Some(ns)) => Ok(Json(APIResponse::success(ns))),
+        Ok(None) => Ok(Json(APIResponse::error(format!("Namespace '{}' not found", path)))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn update_namespace(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    Json(request): Json<UpdateNamespaceRequest>,
+) -> Result<Json<APIResponse<namespace::Namespace>>, StatusCode> {
+    let update = namespace::NamespaceUpdate {
+        description: request.description,
+        policies: None,
+        segment_id: request.segment_id,
+        is_active: request.is_active,
+        metadata: request.metadata,
+    };
+    match state.primusdb.get_namespace_controller().update(&path, update) {
+        Ok(ns) => Ok(Json(APIResponse::success(ns))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn delete_namespace(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<()>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().delete(&path) {
+        Ok(()) => Ok(Json(APIResponse::success(()))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn list_namespace_children(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<Vec<namespace::Namespace>>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().list_children(&path) {
+        Ok(children) => Ok(Json(APIResponse::success(children))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn get_effective_policy(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<namespace::NamespacePolicies>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().effective_policy(&path) {
+        Ok(policy) => Ok(Json(APIResponse::success(policy))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn list_namespace_resources(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<Vec<namespace::NamespaceResource>>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().get_by_path(&path) {
+        Ok(Some(ns)) => match state.primusdb.get_namespace_controller().list_resources(&ns.id) {
+            Ok(resources) => Ok(Json(APIResponse::success(resources))),
+            Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+        },
+        Ok(None) => Ok(Json(APIResponse::error(format!("Namespace '{}' not found", path)))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn attach_resource(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    Json(request): Json<AttachResourceRequest>,
+) -> Result<Json<APIResponse<namespace::NamespaceResource>>, StatusCode> {
+    let st = match parse_storage_type(&request.storage_type) {
+        Ok(t) => t,
+        Err(e) => return Ok(Json(APIResponse::error(format!("Invalid storage type: {}", e)))),
+    };
+    match state.primusdb.get_namespace_controller().attach_resource(&path, st, &request.resource_name) {
+        Ok(resource) => Ok(Json(APIResponse::success(resource))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn detach_resource(
+    State(state): State<Arc<AppState>>,
+    Path((path, storage_type, resource_name)): Path<(String, String, String)>,
+) -> Result<Json<APIResponse<()>>, StatusCode> {
+    let st = match parse_storage_type(&storage_type) {
+        Ok(t) => t,
+        Err(e) => return Ok(Json(APIResponse::error(format!("Invalid storage type: {}", e)))),
+    };
+    match state.primusdb.get_namespace_controller().detach_resource(&path, st, &resource_name) {
+        Ok(()) => Ok(Json(APIResponse::success(()))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn list_namespace_roles(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<Vec<namespace::NamespaceRole>>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().get_by_path(&path) {
+        Ok(Some(ns)) => match state.primusdb.get_namespace_controller().list_roles(&ns.id) {
+            Ok(roles) => Ok(Json(APIResponse::success(roles))),
+            Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+        },
+        Ok(None) => Ok(Json(APIResponse::error(format!("Namespace '{}' not found", path)))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn create_namespace_role(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    Json(request): Json<CreateRoleRequest>,
+) -> Result<Json<APIResponse<namespace::NamespaceRole>>, StatusCode> {
+    let permissions: Vec<namespace::NamespacePermission> = request
+        .permissions
+        .iter()
+        .filter_map(|p| match p.to_lowercase().as_str() {
+            "create" => Some(namespace::NamespacePermission::Create),
+            "read" => Some(namespace::NamespacePermission::Read),
+            "update" => Some(namespace::NamespacePermission::Update),
+            "delete" => Some(namespace::NamespacePermission::Delete),
+            "attach_resource" | "attachresource" => Some(namespace::NamespacePermission::AttachResource),
+            "detach_resource" | "detachresource" => Some(namespace::NamespacePermission::DetachResource),
+            "manage_users" | "manageusers" => Some(namespace::NamespacePermission::ManageUsers),
+            "manage_roles" | "manageroles" => Some(namespace::NamespacePermission::ManageRoles),
+            "manage_policies" | "managepolicies" => Some(namespace::NamespacePermission::ManagePolicies),
+            "cross_namespace_read" | "crossnamespaceread" => Some(namespace::NamespacePermission::CrossNamespaceRead),
+            "cross_namespace_write" | "crossnamespacewrite" => Some(namespace::NamespacePermission::CrossNamespaceWrite),
+            "full_access" | "fullaccess" => Some(namespace::NamespacePermission::FullAccess),
+            _ => None,
+        })
+        .collect();
+
+    match state.primusdb.get_namespace_controller().add_role(
+        &path,
+        &request.name,
+        &request.description,
+        permissions,
+        request.inheritable.unwrap_or(true),
+    ) {
+        Ok(role) => Ok(Json(APIResponse::success(role))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn delete_namespace_role(
+    State(state): State<Arc<AppState>>,
+    Path((path, role_id)): Path<(String, String)>,
+) -> Result<Json<APIResponse<()>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().remove_role(&path, &role_id) {
+        Ok(()) => Ok(Json(APIResponse::success(()))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn list_namespace_user_bindings(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<Json<APIResponse<Vec<namespace::NamespaceUserBinding>>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().get_by_path(&path) {
+        Ok(Some(ns)) => match state.primusdb.get_namespace_controller().list_user_bindings(&ns.id) {
+            Ok(bindings) => Ok(Json(APIResponse::success(bindings))),
+            Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+        },
+        Ok(None) => Ok(Json(APIResponse::error(format!("Namespace '{}' not found", path)))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn add_namespace_user_binding(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    Json(request): Json<AddUserBindingRequest>,
+) -> Result<Json<APIResponse<namespace::NamespaceUserBinding>>, StatusCode> {
+    let expires_at = request.expires_at.and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+
+    match state.primusdb.get_namespace_controller().add_user_binding(
+        &path,
+        &request.user_id,
+        &request.role_id,
+        &request.granted_by,
+        expires_at,
+    ) {
+        Ok(binding) => Ok(Json(APIResponse::success(binding))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
+async fn remove_namespace_user_binding(
+    State(state): State<Arc<AppState>>,
+    Path((path, user_id)): Path<(String, String)>,
+) -> Result<Json<APIResponse<()>>, StatusCode> {
+    match state.primusdb.get_namespace_controller().remove_user_binding(&path, &user_id) {
+        Ok(()) => Ok(Json(APIResponse::success(()))),
+        Err(e) => Ok(Json(APIResponse::error(e.to_string()))),
+    }
+}
+
 // Helper functions
 fn parse_storage_type(storage_type: &str) -> Result<StorageType, StatusCode> {
     match storage_type {
@@ -1561,6 +2695,25 @@ fn parse_operation(operation: &str) -> Result<QueryOperation, StatusCode> {
         "delete" => Ok(QueryOperation::Delete),
         "analyze" => Ok(QueryOperation::Analyze),
         "predict" => Ok(QueryOperation::Predict),
+        "alter_add_column" => Ok(QueryOperation::AlterTableAddColumn),
+        "alter_drop_column" => Ok(QueryOperation::AlterTableDropColumn),
+        "alter_modify_column" => Ok(QueryOperation::AlterTableModifyColumn),
+        "alter_add_constraint" => Ok(QueryOperation::AlterTableAddConstraint),
+        "alter_drop_constraint" => Ok(QueryOperation::AlterTableDropConstraint),
+        "rename_table" => Ok(QueryOperation::RenameTable),
+        "create_sequence" => Ok(QueryOperation::CreateSequence),
+        "drop_sequence" => Ok(QueryOperation::DropSequence),
+        "nextval" => Ok(QueryOperation::NextVal),
+        "currval" => Ok(QueryOperation::CurrVal),
+        "setval" => Ok(QueryOperation::SetVal),
+        "create_view" => Ok(QueryOperation::CreateView),
+        "drop_view" => Ok(QueryOperation::DropView),
+        "refresh_view" => Ok(QueryOperation::RefreshView),
+        "create_trigger" => Ok(QueryOperation::CreateTrigger),
+        "drop_trigger" => Ok(QueryOperation::DropTrigger),
+        "info_schema_tables" => Ok(QueryOperation::InformationSchemaTables),
+        "info_schema_columns" => Ok(QueryOperation::InformationSchemaColumns),
+        "info_schema_constraints" => Ok(QueryOperation::InformationSchemaConstraints),
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }

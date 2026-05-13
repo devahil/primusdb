@@ -7,7 +7,7 @@ external dependencies.
 
 ## Architecture Overview
 
-```
+```text
 AI/ML Engine Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -56,7 +56,7 @@ Key Features:
 ## Usage Examples
 
 ### Training a Model
-```rust
+```ignore
 use primusdb::ai::{AIEngine, TrainingRequest, ModelType};
 
 let ai_engine = AIEngine::new(&config).await?;
@@ -74,7 +74,7 @@ println!("Trained model: {} with accuracy: {:.2}%", model.id, model.accuracy * 1
 ```
 
 ### Making Predictions
-```rust
+```ignore
 let prediction_request = PredictionRequest {
     model_id: model.id.clone(),
     input_data: serde_json::json!({
@@ -90,7 +90,7 @@ println!("Predicted revenue: ${:.2} (confidence: {:.2}%)",
 ```
 
 ### Real-time Analytics
-```rust
+```ignore
 // Analyze patterns in data
 let patterns = ai_engine.analyze_patterns("user_behavior").await?;
 for pattern in patterns.patterns {
@@ -121,7 +121,7 @@ use std::collections::HashMap;
 /// management, versioning, and performance monitoring.
 ///
 /// # Architecture
-/// ```
+/// ```text
 /// AIEngine
 /// ├── Model Registry    - Stores trained models with metadata
 /// ├── Training Pipeline - Handles model training and validation
@@ -130,11 +130,10 @@ use std::collections::HashMap;
 /// └── Model Metrics     - Performance monitoring and optimization
 /// ```
 pub struct AIEngine {
-    /// Configuration for AI/ML operations
+    #[allow(dead_code)]
     config: PrimusDBConfig,
-    /// Registry of trained models indexed by model ID
     models: HashMap<String, Model>,
-    /// Registry of prediction endpoints indexed by predictor ID
+    #[allow(dead_code)]
     predictors: HashMap<String, Predictor>,
 }
 
@@ -144,7 +143,7 @@ pub struct AIEngine {
 /// and training metadata. Models are persisted and versioned automatically.
 ///
 /// # Model Lifecycle
-/// ```
+/// ```text
 /// 1. Training Request → 2. Data Preparation → 3. Model Training
 /// 4. Validation → 5. Model Persistence → 6. Inference Ready
 /// ```

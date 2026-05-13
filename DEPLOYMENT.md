@@ -1,7 +1,7 @@
 # PrimusDB Deployment Guide
 =========================
 
-This guide covers deploying PrimusDB v1.2.0-alpha in various environments, from single-node installations to large-scale distributed clusters.
+This guide covers deploying PrimusDB v1.2.2-alpha in various environments, from single-node installations to large-scale distributed clusters.
 
 ## Quick Start Deployment
 

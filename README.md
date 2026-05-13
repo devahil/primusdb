@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.2.0--alpha-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.2.2--alpha-blue.svg)]()
 
 PrimusDB is a high-performance, hybrid database engine written in Rust that combines multiple storage paradigms (columnar, vector, document, and relational) into a unified system. Designed for modern applications requiring analytics, AI/ML integration, and flexible data management.
 
@@ -19,6 +19,7 @@ PrimusDB is a high-performance, hybrid database engine written in Rust that comb
 - **Key-Value Engine**: CouchDB-compatible API with _id/_rev versioning, Mango queries, bulk operations, and collection encryption
 
 ### Core Capabilities
+- **Unified Query Language (UQL)**: Cross-engine SQL/MongoDB/Mango/UQL queries with query planner and executor
 - **CRUD Operations**: Complete create, read, update, delete across all storage types with advanced filtering
 - **Transaction Support**: Full transaction management with ACID compliance, rollback, and commit
 - **AI/ML Integration**: Advanced predictive analytics, anomaly detection, pattern analysis, and forecasting
@@ -28,6 +29,17 @@ PrimusDB is a high-performance, hybrid database engine written in Rust that comb
 - **Clustering**: Production-ready distributed clustering with node discovery, load balancing, and automatic failover
 - **Compression**: LZ4 and Zstd algorithms with adaptive compression and advanced indexing
 - **Advanced Analytics**: Complex joins, aggregations, and analytical queries
+
+### ER Model (v1.2.2+)
+- **Extended Data Types**: 13 SQL-standard types including `SmallInt`, `BigInt`, `Decimal`, `Varchar`, `Char`, `Timestamp`, `Time`, `Uuid`, `Enum`, `Serial`, `BigSerial`, `Money`, `Interval`
+- **Referential Integrity**: Foreign keys with `CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION` on delete/update
+- **Sequences**: Auto-increment with `NEXTVAL`, `CURRVAL`, `SETVAL`, persistence, cycle, cache
+- **Views**: Virtual and materialized views with query caching and refresh
+- **Triggers**: Before/After/InsteadOf triggers on Insert/Update/Delete with Raise/Execute operations
+- **DDL Operations**: `ADD COLUMN`, `DROP COLUMN`, `MODIFY COLUMN`, `ADD/DROP CONSTRAINT`, `RENAME TABLE`
+- **DML RETURNING**: `INSERT RETURNING`, `UPDATE RETURNING`, `DELETE RETURNING` clauses
+- **Enhanced SELECT**: `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, aggregation functions
+- **Information Schema**: System tables for tables, columns, and constraints metadata
 
 ### Security & Authentication
 - **User Authentication**: Secure login with Argon2 password hashing
@@ -44,6 +56,11 @@ PrimusDB is a high-performance, hybrid database engine written in Rust that comb
 - **REST API**: Complete HTTP interface for all operations
 - **CLI Tool**: Command-line interface for database management
 - **Language Drivers**: Native drivers for Node.js, Python, Java, Ruby, and Rust
+  - All drivers support: Transactions, ReferentialActions, Sequences, Views, Triggers, AlterTable, ReturningClause, GroupByQuery, InformationSchema, TruncateCascade, ExtendedDataTypes
+  - Async operations: Rust ✓, Python ✓, Node ✓, Ruby ✓, Java ✗
+  - Connection pooling: Rust ✓, Node ✓, Java ✓, Python ✗, Ruby ✗
+  - Prepared statements: Python ✓, Java ✓, Rust ✗, Node ✗, Ruby ✗
+  - SSL support: Java ✓, others ✗
 - **Docker Support**: Containerized deployment with Arch Linux base
 
 ## Installation

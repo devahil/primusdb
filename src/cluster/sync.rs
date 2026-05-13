@@ -21,17 +21,17 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use primusdb::cluster::sync::{SyncCoordinator, SyncConfig};
 //!
 //! let config = SyncConfig::default();
 //! let sync = SyncCoordinator::new(config, "node-1".to_string())?;
 //! ```
 
-use crate::{PrimusDBConfig, Result};
+use crate::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod consensus;
@@ -96,16 +96,16 @@ pub enum ConflictResolution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorClock {
     /// Node ID -> logical clock value
-    clocks: HashMap<String, u64>,
+    pub clocks: HashMap<String, u64>,
     /// Last update timestamp
-    timestamp: u64,
+    pub timestamp: u64,
 }
 
 impl VectorClock {
     pub fn new(node_id: &str) -> Self {
         let mut clocks = HashMap::new();
         clocks.insert(node_id.to_string(), 1);
-        
+
         Self {
             clocks,
             timestamp: SystemTime::now()
@@ -134,7 +134,7 @@ impl VectorClock {
 
     pub fn happens_before(&self, other: &VectorClock) -> bool {
         let mut at_least_one_less = false;
-        
+
         for (node, clock) in &self.clocks {
             let other_clock = other.clocks.get(node).unwrap_or(&0);
             if clock > other_clock {
@@ -144,13 +144,13 @@ impl VectorClock {
                 at_least_one_less = true;
             }
         }
-        
+
         for (node, other_clock) in &other.clocks {
             if !self.clocks.contains_key(node) && *other_clock > 0 {
                 at_least_one_less = true;
             }
         }
-        
+
         at_least_one_less
     }
 
@@ -277,6 +277,7 @@ pub struct SyncCoordinator {
     operation_log: RwLock<Vec<DistributedOperation>>,
     sync_metadata: RwLock<HashMap<String, SyncMetadata>>,
     node_status: RwLock<HashMap<String, SyncStatus>>,
+    #[allow(dead_code)]
     pending_writes: RwLock<HashMap<String, Vec<QuorumVote>>>,
 }
 
@@ -306,14 +307,14 @@ impl SyncCoordinator {
         let operation_id = self.generate_operation_id();
         let mut vector_clock = VectorClock::new(&self.node_id);
         vector_clock.increment(&self.node_id);
-        
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        
+
         let term = *self.term.read().unwrap();
-        
+
         let operation = DistributedOperation {
             id: operation_id.clone(),
             op_type: OperationType::Insert,
@@ -329,18 +330,20 @@ impl SyncCoordinator {
             index: self.operation_log.read().unwrap().len() as u64,
             committed: false,
         };
-        
+
         let quorum_required = self.config.write_quorum;
-        
-        let votes = self.request_votes(&operation, &validators, quorum_required).await;
-        
+
+        let votes = self
+            .request_votes(&operation, &validators, quorum_required)
+            .await;
+
         let confirmed = votes.iter().filter(|v| v.vote).count() >= quorum_required;
-        
+
         if confirmed {
             let mut log = self.operation_log.write().unwrap();
             log.push(operation);
         }
-        
+
         Ok(ConsensusWriteResult {
             confirmed,
             quorum_size: quorum_required,
@@ -357,22 +360,27 @@ impl SyncCoordinator {
         read_nodes: Vec<String>,
     ) -> Result<ConsensusReadResult> {
         let quorum_required = self.config.read_quorum;
-        
+
         let mut versions = Vec::new();
         let mut data: Option<serde_json::Value> = None;
-        
-        for node in &read_nodes {
-            if let Some(metadata) = self.sync_metadata.read().unwrap().get(&format!("{}:{}", table, key)) {
+
+        for _node in &read_nodes {
+            if let Some(metadata) = self
+                .sync_metadata
+                .read()
+                .unwrap()
+                .get(&format!("{}:{}", table, key))
+            {
                 versions.push(metadata.vector_clock.clone());
                 if data.is_none() {
                     data = None;
                 }
             }
         }
-        
-        let is_consistent = versions.len() >= quorum_required 
-            && self.verify_version_agreement(&versions);
-        
+
+        let is_consistent =
+            versions.len() >= quorum_required && self.verify_version_agreement(&versions);
+
         Ok(ConsensusReadResult {
             data,
             is_consistent,
@@ -383,20 +391,18 @@ impl SyncCoordinator {
 
     /// Reconcile data with a specific node
     pub async fn reconcile_node(&self, target_node: &str) -> Result<ReconciliationResult> {
-        let status = self.node_status.read().unwrap()
-            .get(target_node)
-            .cloned();
-        
+        let status = self.node_status.read().unwrap().get(target_node).cloned();
+
         let mut conflicts_resolved = 0u64;
         let mut records_merged = 0u64;
-        
+
         if let Some(node_status) = status {
             if node_status.pending_operations > 0 {
                 conflicts_resolved = self.resolve_conflicts(target_node).await?;
                 records_merged = self.merge_records(target_node).await?;
             }
         }
-        
+
         Ok(ReconciliationResult {
             node_id: target_node.to_string(),
             conflicts_resolved,
@@ -409,7 +415,10 @@ impl SyncCoordinator {
     }
 
     /// Check referential integrity across cluster
-    pub async fn check_referential_integrity(&self, table: &str) -> Result<ReferentialIntegrityResult> {
+    pub async fn check_referential_integrity(
+        &self,
+        table: &str,
+    ) -> Result<ReferentialIntegrityResult> {
         if !self.config.enable_referential_integrity {
             return Ok(ReferentialIntegrityResult {
                 is_valid: true,
@@ -419,23 +428,23 @@ impl SyncCoordinator {
                 error_count: 0,
             });
         }
-        
+
         let mut orphaned: Vec<String> = Vec::new();
-        let mut broken_fk: Vec<String> = Vec::new();
+        let broken_fk: Vec<String> = Vec::new();
         let mut checked = 0u64;
-        
+
         let metadata = self.sync_metadata.read().unwrap();
-        
+
         for (key, meta) in metadata.iter() {
             if key.starts_with(table) {
                 checked += 1;
-                
+
                 if meta.dirty && meta.replicas.len() < self.config.replication_factor {
                     orphaned.push(format!("{} - insufficient replicas", key));
                 }
             }
         }
-        
+
         let error_count = (orphaned.len() + broken_fk.len()) as u64;
         Ok(ReferentialIntegrityResult {
             is_valid: orphaned.is_empty() && broken_fk.is_empty(),
@@ -450,30 +459,33 @@ impl SyncCoordinator {
     pub async fn elect_leader(&self, candidates: Vec<String>) -> Result<String> {
         let mut current_term = self.term.write().unwrap();
         *current_term += 1;
-        
+
         let mut votes = 0;
         let quorum = (candidates.len() / 2) + 1;
-        
+
         for node in &candidates {
             if self.request_vote(node, *current_term).await {
                 votes += 1;
             }
         }
-        
+
         if votes >= quorum {
             *self.is_leader.write().unwrap() = true;
             Ok(self.node_id.clone())
         } else {
-            Err(crate::Error::ClusterError("Leader election failed".to_string()))
+            Err(crate::Error::ClusterError(
+                "Leader election failed".to_string(),
+            ))
         }
     }
 
     /// Update sync metadata for a record
     pub fn update_metadata(&self, key: &str, data: &serde_json::Value) -> Result<()> {
         let mut metadata = self.sync_metadata.write().unwrap();
-        
-        let meta = metadata.entry(key.to_string()).or_insert_with(|| {
-            SyncMetadata {
+
+        let meta = metadata
+            .entry(key.to_string())
+            .or_insert_with(|| SyncMetadata {
                 key: key.to_string(),
                 vector_clock: VectorClock::new(&self.node_id),
                 version: 0,
@@ -481,9 +493,8 @@ impl SyncCoordinator {
                 replicas: vec![self.node_id.clone()],
                 dirty: true,
                 checksum: String::new(),
-            }
-        });
-        
+            });
+
         meta.vector_clock.increment(&self.node_id);
         meta.version += 1;
         meta.last_sync = SystemTime::now()
@@ -492,7 +503,7 @@ impl SyncCoordinator {
             .as_millis() as u64;
         meta.dirty = true;
         meta.checksum = self.compute_data_checksum(data);
-        
+
         Ok(())
     }
 
@@ -503,10 +514,10 @@ impl SyncCoordinator {
         quorum: usize,
     ) -> Vec<QuorumVote> {
         let term = *self.term.read().unwrap();
-        
+
         let mut votes = Vec::new();
         let mut confirmations = 0;
-        
+
         for validator in validators {
             let vote = QuorumVote {
                 node_id: validator.clone(),
@@ -514,21 +525,21 @@ impl SyncCoordinator {
                 term,
                 hash: "validated".to_string(),
             };
-            
+
             if vote.vote {
                 confirmations += 1;
             }
             votes.push(vote);
-            
+
             if confirmations >= quorum {
                 break;
             }
         }
-        
+
         votes
     }
 
-    async fn request_vote(&self, node_id: &str, term: u64) -> bool {
+    async fn request_vote(&self, _node_id: &str, term: u64) -> bool {
         let current_term = *self.term.read().unwrap();
         term >= current_term
     }
@@ -545,7 +556,7 @@ impl SyncCoordinator {
         if versions.is_empty() {
             return true;
         }
-        
+
         let base = &versions[0];
         versions.iter().all(|v| !base.is_concurrent(v))
     }
@@ -565,7 +576,7 @@ impl SyncCoordinator {
     fn compute_hash(&self, operation_id: &str, timestamp: &u64) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         operation_id.hash(&mut hasher);
         timestamp.hash(&mut hasher);
@@ -575,11 +586,252 @@ impl SyncCoordinator {
     fn compute_data_checksum(&self, data: &serde_json::Value) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         data.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     }
+}
+
+impl SyncCoordinator {
+    /// Build a Merkle tree for a relational table's rows.
+    /// Returns the root MerkleNode. Each leaf represents a row,
+    /// and internal nodes are combined hashes of children.
+    pub fn build_table_merkle_tree(
+        &self,
+        _table_name: &str,
+        rows: &[(String, HashMap<String, u64>, u64, String)],
+    ) -> MerkleNode {
+        use sha2::Digest;
+
+        if rows.is_empty() {
+            return MerkleNode {
+                hash: "empty".to_string(),
+                children: None,
+                key_range: None,
+                is_leaf: true,
+            };
+        }
+
+        let leaf_hashes: Vec<(String, String)> = rows
+            .iter()
+            .map(|(id, _vc, version, checksum)| {
+                let h = format!(
+                    "{:x}",
+                    sha2::Sha256::digest(format!("{}:{}:{}", id, checksum, version).as_bytes())
+                );
+                (id.clone(), h)
+            })
+            .collect();
+
+        let root = self::build_merkle_tree_recursive(&leaf_hashes);
+        root
+    }
+
+    /// Reconcile a relational table between local and remote rows.
+    /// Returns a ReconciliationPlan with pushes, pulls, and conflicts.
+    pub fn reconcile_table(
+        &self,
+        _table_name: &str,
+        local_rows: &[(
+            String,
+            HashMap<String, u64>,
+            u64,
+            String,
+            serde_json::Map<String, serde_json::Value>,
+        )],
+        remote_rows: &[(
+            String,
+            HashMap<String, u64>,
+            u64,
+            String,
+            serde_json::Map<String, serde_json::Value>,
+        )],
+        local_node_id: &str,
+        remote_node_id: &str,
+    ) -> ReconciliationPlan {
+        let local_map: HashMap<&str, &(_, _, _, _, _)> = local_rows
+            .iter()
+            .map(|r| (r.0.as_str() as &str, r))
+            .collect();
+        let remote_map: HashMap<&str, &(_, _, _, _, _)> = remote_rows
+            .iter()
+            .map(|r| (r.0.as_str() as &str, r))
+            .collect();
+
+        let mut pull_records = Vec::new();
+        let mut push_records = Vec::new();
+        let mut conflicts = Vec::new();
+
+        // Rows in remote that we don't have -> pull
+        for (key, _remote) in &remote_map {
+            if !local_map.contains_key(key) {
+                pull_records.push(key.to_string());
+            }
+        }
+
+        // Rows we have that remote doesn't -> push
+        for (key, _local) in &local_map {
+            if !remote_map.contains_key(key) {
+                push_records.push(key.to_string());
+            }
+        }
+
+        // Rows in both -> compare vector clocks
+        for (key, local) in &local_map {
+            if let Some(remote) = remote_map.get(key) {
+                let local_vc = &local.1;
+                let remote_vc = &remote.1;
+
+                if local_vc != remote_vc {
+                    let mut local_newer = false;
+                    let mut remote_newer = false;
+
+                    for (node, clock) in remote_vc {
+                        let lc = local_vc.get(node).unwrap_or(&0);
+                        if clock > lc {
+                            remote_newer = true;
+                        }
+                        if clock < lc {
+                            local_newer = true;
+                        }
+                    }
+                    for (node, clock) in local_vc {
+                        if !remote_vc.contains_key(node) && *clock > 0 {
+                            local_newer = true;
+                        }
+                    }
+
+                    if local_newer && !remote_newer {
+                        push_records.push(key.to_string());
+                    } else if remote_newer && !local_newer {
+                        pull_records.push(key.to_string());
+                    } else {
+                        // Concurrent modification -> conflict
+                        conflicts.push(DataConflict {
+                            key: key.to_string(),
+                            local_version: RecordVersion {
+                                key: key.to_string(),
+                                version: local.2,
+                                vector_clock: local_vc.clone(),
+                                timestamp: 0,
+                                modified_by: local_node_id.to_string(),
+                                checksum: local.3.clone(),
+                            },
+                            remote_version: RecordVersion {
+                                key: key.to_string(),
+                                version: remote.2,
+                                vector_clock: remote_vc.clone(),
+                                timestamp: 0,
+                                modified_by: remote_node_id.to_string(),
+                                checksum: remote.3.clone(),
+                            },
+                            resolution: ConflictResolutionStrategy::KeepMostRecent,
+                        });
+                    }
+                }
+            }
+        }
+
+        ReconciliationPlan {
+            pull_records,
+            push_records,
+            conflicts,
+            estimated_bytes: 0,
+        }
+    }
+
+    /// Register sync metadata for all rows in a table
+    pub fn register_table_sync_metadata(
+        &self,
+        table_name: &str,
+        rows: &[(String, HashMap<String, u64>, u64, String)],
+    ) {
+        let mut metadata = self.sync_metadata.write().unwrap();
+        for (id, vc, version, checksum) in rows {
+            let key = format!("{}:{}", table_name, id);
+            let mut vector_clock = cluster_vector_clock_from_map(vc);
+            vector_clock.increment(&self.node_id);
+            metadata.insert(
+                key,
+                SyncMetadata {
+                    key: id.clone(),
+                    vector_clock,
+                    version: *version,
+                    last_sync: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                    replicas: vec![self.node_id.clone()],
+                    dirty: false,
+                    checksum: checksum.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn cluster_vector_clock_from_map(
+    map: &HashMap<String, u64>,
+) -> crate::cluster::sync::VectorClock {
+    let mut vc = crate::cluster::sync::VectorClock::new("sync");
+    vc.clocks = map.clone();
+    vc
+}
+
+fn build_merkle_tree_recursive(leaf_hashes: &[(String, String)]) -> MerkleNode {
+    use sha2::Digest;
+
+    if leaf_hashes.len() == 1 {
+        return MerkleNode {
+            hash: leaf_hashes[0].1.clone(),
+            children: None,
+            key_range: Some((leaf_hashes[0].0.clone(), leaf_hashes[0].0.clone())),
+            is_leaf: true,
+        };
+    }
+
+    let mut current_hashes: Vec<MerkleNode> = leaf_hashes
+        .iter()
+        .map(|(key, hash)| MerkleNode {
+            hash: hash.clone(),
+            children: None,
+            key_range: Some((key.clone(), key.clone())),
+            is_leaf: true,
+        })
+        .collect();
+
+    while current_hashes.len() > 1 {
+        let mut next_level = Vec::new();
+        for chunk in current_hashes.chunks(2) {
+            if chunk.len() == 2 {
+                let combined = format!("{}{}", chunk[0].hash, chunk[1].hash);
+                let hash = format!("{:x}", sha2::Sha256::digest(combined.as_bytes()));
+                let start_key = chunk[0]
+                    .key_range
+                    .as_ref()
+                    .map(|k| k.0.clone())
+                    .unwrap_or_default();
+                let end_key = chunk[1]
+                    .key_range
+                    .as_ref()
+                    .map(|k| k.1.clone())
+                    .unwrap_or_default();
+                let children = vec![chunk[0].hash.clone(), chunk[1].hash.clone()];
+                next_level.push(MerkleNode {
+                    hash,
+                    children: Some(children),
+                    key_range: Some((start_key, end_key)),
+                    is_leaf: false,
+                });
+            } else {
+                next_level.push(chunk[0].clone());
+            }
+        }
+        current_hashes = next_level;
+    }
+
+    current_hashes.into_iter().next().unwrap()
 }
 
 fn rand_id() -> u32 {

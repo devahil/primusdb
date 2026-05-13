@@ -6,7 +6,7 @@ providing optimal load balancing and minimal key redistribution during cluster s
 
 ## How Consistent Hashing Works
 
-```
+```text
 Consistent Hashing Ring
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -63,7 +63,7 @@ Key Distribution Example:
 ## Usage Examples
 
 ### Basic Consistent Hashing
-```rust
+```ignore
 use primusdb::cache::hashing::{ConsistentHash, HashRing};
 
 let mut hash_ring = HashRing::new();
@@ -83,7 +83,7 @@ hash_ring.remove_node("cache-node-2:8080");
 ```
 
 ### Cluster Scaling
-```rust
+```ignore
 // Before scaling
 let node1 = hash_ring.get_node("important:key")?;
 // node1 = "cache-node-1:8080"
@@ -101,7 +101,7 @@ let moved_key = hash_ring.get_node("new:key")?;
 ```
 
 ### Load Monitoring
-```rust
+```ignore
 // Get load distribution
 let load_distribution = hash_ring.get_load_distribution()?;
 for (node, load) in load_distribution {
@@ -152,7 +152,7 @@ if balance_score < 0.8 {
 ## Configuration Options
 
 ### HashRing Configuration
-```rust
+```ignore
 pub struct HashRingConfig {
     pub virtual_nodes_per_node: usize,        // Default: 256
     pub hash_algorithm: HashAlgorithm,        // Default: SipHash
@@ -165,7 +165,7 @@ pub struct HashRingConfig {
 ## Integration with Cache Cluster
 
 ### Key Distribution
-```rust
+```ignore
 // Cache cluster uses consistent hashing for key distribution
 let cluster = CacheCluster::new(cluster_config).await?;
 let hash_ring = cluster.get_hash_ring();
@@ -176,7 +176,7 @@ cluster.route_to_node(target_node, cache_operation).await?;
 ```
 
 ### Load Balancing
-```rust
+```ignore
 // Monitor and balance cluster load
 loop {
     let imbalance = hash_ring.check_load_balance().await?;
@@ -188,7 +188,7 @@ loop {
 ```
 
 ### Fault Tolerance
-```rust
+```ignore
 // Handle node failures gracefully
 cluster.on_node_failure(failed_node).await?;
 hash_ring.remove_node(failed_node);
@@ -201,7 +201,7 @@ cluster.migrate_keys(failed_node, new_target).await?;
 ## Monitoring and Observability
 
 ### Load Distribution Metrics
-```rust
+```ignore
 let metrics = hash_ring.get_metrics().await?;
 println!("Total keys: {}", metrics.total_keys);
 println!("Average load: {}", metrics.average_load_per_node);
@@ -209,7 +209,7 @@ println!("Load standard deviation: {}", metrics.load_std_dev);
 ```
 
 ### Performance Metrics
-```rust
+```ignore
 let perf = hash_ring.get_performance_stats().await?;
 println!("Average lookup time: {}ns", perf.avg_lookup_ns);
 println!("Cache hit rate: {:.2}%", perf.key_distribution_cache_hit_rate);

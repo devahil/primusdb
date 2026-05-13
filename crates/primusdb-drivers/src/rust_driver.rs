@@ -1,8 +1,8 @@
 use super::{HTTPDriver, PrimusDBDriver, StorageType};
-use async_trait::async_trait;
 use serde_json;
 
 /// Rust native driver for PrimusDB
+#[derive(Clone)]
 pub struct RustDriver {
     inner: HTTPDriver,
 }

@@ -14,7 +14,7 @@ ensuring that data files cannot be read or modified with hexadecimal editors.
 
 ## Architecture
 
-```
+```text
 File Encryption Layer
 ══════════════════════════════════════════════════════════════════════
 
@@ -49,7 +49,7 @@ File Encryption Layer
 
 ## File Format
 
-```
+```text
 Encrypted File Format
 ══════════════════════════════════════════════════════════════════════
 
@@ -70,14 +70,13 @@ Encrypted File Format
 */
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce as AesNonce,
 };
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write as IoWrite};
 use std::path::Path;
 

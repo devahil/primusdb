@@ -13,7 +13,7 @@ This module provides high-performance compression using the LZ4 algorithm, optim
 
 ## Usage
 
-```rust
+```ignore
 use primusdb::cache::compression::{CompressionEngine, CompressionLevel};
 
 let engine = CompressionEngine::new(CompressionLevel::Balanced);
@@ -195,6 +195,7 @@ impl CompressionEngine {
     }
 
     /// Return buffer to pool
+    #[allow(dead_code)]
     fn return_buffer(&mut self, mut buffer: Vec<u8>) {
         buffer.clear();
         // Keep only buffers that are reasonably sized

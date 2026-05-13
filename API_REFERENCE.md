@@ -1,7 +1,7 @@
 # PrimusDB API Reference
 =====================
 
-This document provides comprehensive reference for PrimusDB's REST API (v1.1.0), including all endpoints, request/response formats, error codes, and usage examples.
+This document provides comprehensive reference for PrimusDB's REST API (v1.2.3-alpha), including all endpoints, request/response formats, error codes, and usage examples.
 
 ## API Overview
 
@@ -340,9 +340,13 @@ Create a new record.
   "metadata": {
     "created_by": "user123",
     "tags": ["important", "urgent"]
-  }
+  },
+  "namespace": "myorg.production"
 }
 ```
+
+**Optional fields:**
+- `namespace`: Namespace path for data isolation. When set, data is stored in an isolated namespace. Requires `[namespaces] enabled = true` in config (default: enabled).
 
 **Response:**
 ```json
@@ -362,10 +366,10 @@ curl -X POST http://localhost:8080/api/v1/crud/columnar/sales \
   -H "Content-Type: application/json" \
   -d '{"product_id": 1, "amount": 99.99, "date": "2023-12-01"}'
 
-# Document record
+# Document record in namespace
 curl -X POST http://localhost:8080/api/v1/crud/document/users \
   -H "Content-Type: application/json" \
-  -d '{"name": "John", "email": "john@example.com", "age": 30}'
+  -d '{"name": "John", "email": "john@example.com", "namespace": "myorg.production"}'
 
 # Vector record
 curl -X POST http://localhost:8080/api/v1/crud/vector/embeddings \
@@ -386,6 +390,7 @@ Query records with optional filtering and pagination.
 - `offset`: Number of records to skip (default: 0)
 - `sort`: Sort field and direction (e.g., "created_at:desc")
 - `fields`: Comma-separated list of fields to return
+- `namespace`: Namespace path for data isolation
 
 **Examples:**
 ```bash
@@ -400,6 +405,9 @@ curl "http://localhost:8080/api/v1/crud/relational/products?fields=id,name,price
 
 # Sort results
 curl "http://localhost:8080/api/v1/crud/columnar/sales?sort=amount:desc"
+
+# Query within a namespace
+curl "http://localhost:8080/api/v1/crud/document/users?namespace=myorg.production"
 ```
 
 **Response:**
@@ -430,9 +438,13 @@ Update existing records.
 {
   "conditions": {"id": "rec_123"},
   "data": {"age": 31, "updated_at": "2024-01-10T12:30:00Z"},
-  "upsert": false
+  "upsert": false,
+  "namespace": "myorg.production"
 }
 ```
+
+**Optional fields:**
+- `namespace`: Namespace path for data isolation.
 
 **Response:**
 ```json
@@ -451,9 +463,13 @@ Delete records.
 **Request Body:**
 ```json
 {
-  "conditions": {"status": "inactive"}
+  "conditions": {"status": "inactive"},
+  "namespace": "myorg.production"
 }
 ```
+
+**Optional fields:**
+- `namespace`: Namespace path for data isolation.
 
 **Response:**
 ```json
@@ -508,7 +524,18 @@ Drop (delete) a table/collection.
 ```
 
 ### POST /api/v1/crud/{storage_type}/{table}/truncate
-Truncate (empty) a table/collection.
+Truncate (empty) a table/collection. Supports optional cascade for relational tables with foreign key references.
+
+**Request Body (optional):**
+```json
+{
+  "cascade": true,
+  "namespace": "myorg.production"
+}
+```
+
+**Optional fields:**
+- `namespace`: Namespace path for data isolation.
 
 **Response:**
 ```json
@@ -825,23 +852,18 @@ Execute complex queries using PrimusDB's query language.
 ```json
 {
   "storage_type": "document",
-  "query": {
-    "collection": "users",
-    "filter": {
-      "age": {"$gte": 25},
-      "status": "active"
-    },
-    "projection": {"name": 1, "email": 1},
-    "sort": {"created_at": -1},
-    "limit": 50,
-    "skip": 0
-  },
-  "options": {
-    "explain": false,
-    "timeout_ms": 5000
-  }
+  "operation": "Read",
+  "table": "users",
+  "conditions": {"age": {"$gte": 25}},
+  "data": null,
+  "limit": 50,
+  "offset": 0,
+  "namespace": "myorg.production"
 }
 ```
+
+**Optional fields:**
+- `namespace`: Namespace path for data isolation.
 
 **Response:**
 ```json
@@ -858,6 +880,93 @@ Execute complex queries using PrimusDB's query language.
   }
 }
 ```
+
+## Namespace Management
+
+PrimusDB provides hierarchical namespace isolation, allowing multiple tenants or projects to share the same database while keeping their data fully isolated. Namespaces use dot-separated paths (e.g., `myorg.production`). All CRUD and DDL operations can optionally target a namespace.
+
+### Configuration
+Namespaces are enabled by default. See the `[namespaces]` section in `ADMIN.md` for configuration options.
+
+### GET /api/v1/namespaces
+List all namespaces.
+
+### POST /api/v1/namespaces/{path}
+Create a new namespace.
+
+**Request Body (optional):**
+```json
+{
+  "description": "Production namespace for MyOrg",
+  "inherit_policy": true
+}
+```
+
+### GET /api/v1/namespaces/{path}
+Get namespace details.
+
+### PUT /api/v1/namespaces/{path}
+Update namespace metadata.
+
+### DELETE /api/v1/namespaces/{path}
+Delete a namespace.
+
+### GET /api/v1/namespaces/{path}/children
+List child namespaces.
+
+### GET /api/v1/namespaces/{path}/effective-policy
+Get the effective access policy for a namespace (inherits from parents).
+
+### GET /api/v1/namespaces/{path}/resources
+List resources attached to a namespace.
+
+### POST /api/v1/namespaces/{path}/resources
+Attach a resource to a namespace.
+
+**Request Body:**
+```json
+{
+  "storage_type": "relational",
+  "resource_name": "users"
+}
+```
+
+### DELETE /api/v1/namespaces/{path}/resources/{storage_type}/{resource_name}
+Detach a resource from a namespace.
+
+### GET /api/v1/namespaces/{path}/roles
+List roles in a namespace.
+
+### POST /api/v1/namespaces/{path}/roles
+Create a role in a namespace.
+
+**Request Body:**
+```json
+{
+  "name": "readonly",
+  "permissions": {"Read": true}
+}
+```
+
+### DELETE /api/v1/namespaces/{path}/roles/{role_id}
+Delete a role.
+
+### GET /api/v1/namespaces/{path}/users
+List user bindings in a namespace.
+
+### POST /api/v1/namespaces/{path}/users
+Add a user binding to a namespace.
+
+**Request Body:**
+```json
+{
+  "user_id": "user_abc123",
+  "role_id": "role_readonly"
+}
+```
+
+### DELETE /api/v1/namespaces/{path}/users/{user_id}
+Remove a user binding from a namespace.
 
 ## Cluster Management
 
@@ -919,6 +1028,297 @@ Remove a node from the cluster.
     "data_migration_status": "completed"
   }
 }
+```
+
+## Unified Query Language (UQL)
+
+### POST /api/v1/uql
+Execute queries across all storage engines using SQL, MongoDB, or Mango syntax.
+
+**Request Body:**
+```json
+{
+  "query": "SELECT * FROM users WHERE age > 25 ORDER BY name ASC LIMIT 10",
+  "language": "sql",
+  "parameters": null
+}
+```
+
+**Query Language Options:**
+- `sql` — Standard SQL syntax (SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE)
+- `mongodb` — MongoDB-style query documents
+- `mango` — CouchDB Mango query syntax
+- `uql` — Native PrimusDB JSON query format
+- `auto` — Auto-detect from query content
+
+**Supported SQL Features:**
+- SELECT with WHERE, ORDER BY, LIMIT, OFFSET, DISTINCT, GROUP BY, HAVING
+- INSERT, UPDATE, DELETE with RETURNING clause
+- JOIN between tables within the same engine or cross-engine
+- Window functions (ROW_NUMBER, RANK, DENSE_RANK, etc.)
+- Common Table Expressions (WITH clauses)
+
+**Response:**
+```json
+{
+  "success": true,
+  "records": [...],
+  "total": 10,
+  "execution_time_ms": 5,
+  "engine_used": "uql",
+  "cached": false,
+  "affected_rows": 0,
+  "warnings": []
+}
+```
+
+## DDL Operations (Entity-Relationship Model)
+
+> **Namespace support**: All DDL endpoints accept an optional `namespace` parameter — via JSON body (in endpoints that accept a body) or via query parameter `?namespace=myorg.production` (in GET/DELETE endpoints). When set, the operation is scoped to the given namespace and table/sequence/view/trigger names are resolved to namespace-specific physical names.
+
+### POST /api/v1/ddl/{storage_type}/{table}/alter
+Execute ALTER TABLE operations (add/drop/modify column, add/drop constraint).
+
+**Request Body (Add Column):**
+```json
+{
+  "operation": "add_column",
+  "field": {"name": "discount", "field_type": "Float", "nullable": true},
+  "namespace": "myorg.production"
+}
+```
+
+### POST /api/v1/ddl/{storage_type}/{old_name}/rename
+Rename an existing table.
+
+**Request Body:**
+```json
+{
+  "new_name": "new_table_name",
+  "namespace": "myorg.production"
+}
+```
+
+### POST /api/v1/ddl/{storage_type}/_/create_sequence
+Create a new sequence for auto-incrementing values.
+
+**Request Body:**
+```json
+{
+  "name": "order_seq",
+  "increment": 1,
+  "min_value": 1,
+  "max_value": 999999999,
+  "cycle": false,
+  "cache_size": 100,
+  "namespace": "myorg.production"
+}
+```
+
+### POST /api/v1/ddl/{storage_type}/{sequence_name}/nextval
+Get the next value from a sequence.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### POST /api/v1/ddl/{storage_type}/{sequence_name}/currval
+Get the current value of a sequence.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### POST /api/v1/ddl/{storage_type}/{sequence_name}/setval
+Set a sequence to a specific value.
+
+**Request Body:**
+```json
+{
+  "value": 1000,
+  "namespace": "myorg.production"
+}
+```
+
+### DELETE /api/v1/ddl/{storage_type}/{sequence_name}/drop_sequence
+Drop a sequence.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### POST /api/v1/ddl/{storage_type}/_/create_view
+Create a new view (virtual table).
+
+**Request Body:**
+```json
+{
+  "name": "active_users",
+  "query_definition": {"selector": {"status": "active"}},
+  "columns": ["id", "name", "email"],
+  "referenced_tables": ["users"],
+  "namespace": "myorg.production"
+}
+```
+
+### DELETE /api/v1/ddl/{storage_type}/{view_name}/drop_view
+Drop a view.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### POST /api/v1/ddl/{storage_type}/{view_name}/refresh_view
+Refresh a materialized view (re-execute query).
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### POST /api/v1/ddl/{storage_type}/_/create_trigger
+Create a new trigger on a table.
+
+**Request Body:**
+```json
+{
+  "name": "check_age",
+  "table_name": "users",
+  "timing": "Before",
+  "event": "Insert",
+  "operation": {"Raise": "Age must be positive"},
+  "namespace": "myorg.production"
+}
+```
+
+### DELETE /api/v1/ddl/{storage_type}/{table_name}/drop_trigger
+Drop a trigger.
+
+**Request Body:**
+```json
+{"trigger_name": "check_age", "namespace": "myorg.production"}
+```
+
+## Information Schema
+
+### GET /api/v1/info/{storage_type}/tables
+List all tables with metadata for the specified storage type.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### GET /api/v1/info/{storage_type}/{table}/columns
+List column definitions for a specific table.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+### GET /api/v1/info/{storage_type}/{table}/constraints
+List constraint definitions for a specific table.
+
+**Query Parameters:**
+- `namespace`: Namespace path (optional)
+
+## Collection Encryption
+
+### POST /api/v1/collection/{collection_name}/encrypt
+Enable AES-256-GCM encryption for a document collection.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "collection": "my_collection",
+    "encryption": "enabled",
+    "message": "Collection encryption enabled successfully"
+  }
+}
+```
+
+### POST /api/v1/collection/{collection_name}/decrypt
+Disable encryption for a document collection.
+
+## Key-Value Store (CouchDB-Compatible API)
+
+### PUT /api/v1/kv/{database}
+Create a new Key-Value database.
+
+### GET /api/v1/kv/{database}
+Get database information (doc count, size, etc.).
+
+### DELETE /api/v1/kv/{database}
+Delete a Key-Value database and all its documents.
+
+### PUT /api/v1/kv/{database}/{doc_id}
+Create or update a document.
+
+**Request Body:**
+```json
+{
+  "_id": "my_doc",
+  "type": "user",
+  "name": "John Doe",
+  "tags": ["developer"]
+}
+```
+
+### GET /api/v1/kv/{database}/{doc_id}
+Get a document by ID.
+
+### DELETE /api/v1/kv/{database}/{doc_id}?rev={rev}
+Delete a document (requires current revision).
+
+### GET /api/v1/kv/{database}/_all_docs
+List all documents. Supports `?include_docs=true`, `?limit=`, `?skip=`.
+
+### POST /api/v1/kv/{database}/_find
+Find documents using Mango-style query selectors.
+
+**Request Body:**
+```json
+{
+  "selector": {"age": {"$gte": 25}},
+  "limit": 10,
+  "skip": 0,
+  "sort": [{"age": "desc"}]
+}
+```
+
+### POST /api/v1/kv/{database}/_bulk_docs
+Insert or update multiple documents in bulk.
+
+**Request Body:**
+```json
+{
+  "docs": [{"_id": "doc1"}, {"_id": "doc2"}],
+  "all_or_nothing": false
+}
+```
+
+### POST /api/v1/kv/{database}/_index
+Create a new index for Mango queries.
+
+**Request Body:**
+```json
+{
+  "index": {"fields": ["type", "age"]},
+  "name": "type-age-index"
+}
+```
+
+### GET /api/v1/kv/{database}/_index
+List all indexes in the database.
+
+### POST /api/v1/kv/{database}/_compact
+Compact the database to reclaim space.
+
+### POST /api/v1/kv/{database}/_ensure_full_commit
+Ensure all writes are flushed to disk.
+
+### GET /api/v1/kv/{database}/_rev_limit
+Get the revision limit for conflict resolution.
+
+### PUT /api/v1/kv/{database}/_rev_limit
+Set the revision limit.
+
+**Request Body:**
+```json
+{"rev_limit": 1000}
 ```
 
 ## Error Codes

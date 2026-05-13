@@ -263,6 +263,25 @@ max_background_jobs = 4
 compression_level = 6
 ```
 
+### Namespace Configuration
+```toml
+[namespaces]
+enabled = true                           # Enable/disable namespace isolation
+default_namespace = "root.default"       # Default namespace for unqualified queries
+strict_isolation = true                  # Reject cross-namespace access
+allow_cross_namespace_queries = false    # Allow queries that span multiple namespaces
+cache_size = 10000                       # Namespace metadata cache size (entries)
+max_depth = 16                           # Maximum nesting depth for namespace paths
+allow_legacy_without_namespace = true    # Allow operations without namespace field
+```
+
+Namespace paths use dot-separated components (e.g., `myorg.production`). Each component must start with a letter or underscore and contain only alphanumeric characters and underscores.
+
+When namespaces are enabled:
+- CRUD operations with `namespace` set are isolated to that namespace via `NamespacedStorageEngine`
+- DDL/ER operations with `namespace` set use hash-based physical names (`ns_{sha256_6hex}__{name}`)
+- Omitting the `namespace` field uses the default namespace (or the global table namespace when `allow_legacy_without_namespace = true`)
+
 ### Connection Pooling
 ```toml
 [network.pool]

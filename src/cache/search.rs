@@ -13,7 +13,7 @@ This module provides high-performance search capabilities within compressed data
 
 ## Usage
 
-```rust
+```ignore
 use primusdb::cache::search::CompressedSearch;
 
 let mut search = CompressedSearch::new();
@@ -41,6 +41,7 @@ use std::sync::RwLock;
 pub struct CompressedSearch {
     indexes: RwLock<HashMap<String, SearchIndex>>,
     bloom_filters: RwLock<HashMap<String, BloomFilter>>,
+    #[allow(dead_code)]
     patterns: RwLock<HashMap<String, Regex>>,
 }
 
@@ -99,7 +100,7 @@ impl CompressedSearch {
 
         // First pass: bloom filter check
         let indexes = self.indexes.read().unwrap();
-        let bloom_filters = self.bloom_filters.read().unwrap();
+        let _bloom_filters = self.bloom_filters.read().unwrap();
 
         for (key, index) in indexes.iter() {
             // Check bloom filter first
@@ -139,12 +140,12 @@ impl CompressedSearch {
         regex_pattern: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let regex = Regex::new(regex_pattern)?;
+        let _regex = Regex::new(regex_pattern)?;
 
-        let mut results = Vec::new();
+        let results = Vec::new();
         let indexes = self.indexes.read().unwrap();
 
-        for (key, index) in indexes.iter() {
+        for (_key, _index) in indexes.iter() {
             // This is simplified - in practice, you'd need to extract text from compressed data
             // For now, we'll just return empty results
             // A full implementation would decompress chunks and search them

@@ -76,6 +76,10 @@ pub enum Commands {
     /// Execute advanced operations
     #[command(subcommand)]
     Advanced(AdvancedCommands),
+
+    /// Manage namespaces
+    #[command(subcommand)]
+    Namespace(NamespaceCommands),
 }
 
 #[derive(Subcommand)]
@@ -270,6 +274,51 @@ pub enum AdvancedCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum NamespaceCommands {
+    /// Create a new namespace
+    Create {
+        /// Namespace path (e.g. root.tenant.project)
+        path: String,
+        /// Description of the namespace
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List all namespaces
+    List,
+
+    /// Show namespace info
+    Info {
+        /// Namespace path
+        path: String,
+    },
+
+    /// Delete a namespace
+    Delete {
+        /// Namespace path
+        path: String,
+    },
+
+    /// List child namespaces
+    Children {
+        /// Parent namespace path
+        path: String,
+    },
+
+    /// List namespace effective policy
+    Policy {
+        /// Namespace path
+        path: String,
+    },
+
+    /// List resources attached to namespace
+    Resources {
+        /// Namespace path
+        path: String,
+    },
+}
+
 fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> crate::Result<()> {
     if !dst.exists() {
         fs::create_dir_all(dst)?;
@@ -392,6 +441,10 @@ discovery_servers = []
         Commands::Advanced(adv_cmd) => {
             handle_advanced_cli_command(adv_cmd).await?;
         }
+
+        Commands::Namespace(ns_cmd) => {
+            handle_namespace_cli_command(ns_cmd)?;
+        }
     }
 
     Ok(())
@@ -420,6 +473,7 @@ async fn handle_crud_cli_command(cmd: CrudCommands) -> crate::Result<()> {
             node_id: "cli_node".to_string(),
             discovery_servers: vec![],
         },
+        namespaces: Default::default(),
     };
     let transaction = Transaction {
         id: "cli_operation".to_string(),
@@ -539,8 +593,9 @@ async fn handle_table_cli_command(cmd: TableCommands) -> crate::Result<()> {
             node_id: "cli_node".to_string(),
             discovery_servers: vec![],
         },
+        namespaces: Default::default(),
     };
-    let transaction = Transaction {
+    let _transaction = Transaction {
         id: "cli_operation".to_string(),
         operations: vec![],
         created_at: chrono::Utc::now(),
@@ -585,7 +640,7 @@ async fn handle_table_cli_command(cmd: TableCommands) -> crate::Result<()> {
         } => {
             println!("Truncating table '{}' in {} storage", table, storage_type);
             let engine = get_engine(&storage_type, &config)?;
-            engine.truncate_table(&table).await?;
+            engine.truncate_table(&table, false).await?;
             println!("Table truncated successfully");
         }
 
@@ -634,6 +689,7 @@ async fn handle_advanced_cli_command(cmd: AdvancedCommands) -> crate::Result<()>
             node_id: "cli_node".to_string(),
             discovery_servers: vec![],
         },
+        namespaces: Default::default(),
     };
     let transaction = Transaction {
         id: "cli_operation".to_string(),
@@ -799,6 +855,9 @@ async fn run_client_mode(cli: Cli) -> crate::Result<()> {
         }
         Commands::Advanced(adv_cmd) => {
             handle_advanced_client_command(cli.server, adv_cmd).await?;
+        }
+        Commands::Namespace(ns_cmd) => {
+            handle_namespace_client_command(cli.server, ns_cmd).await?;
         }
     }
 
@@ -1030,6 +1089,197 @@ async fn handle_advanced_client_command(
             let response = client.get(&url).send().await?;
             let json: serde_json::Value = response.json().await?;
             println!("Table info:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_namespace_cli_command(cmd: NamespaceCommands) -> crate::Result<()> {
+    let config = PrimusDBConfig {
+        storage: crate::StorageConfig {
+            data_dir: "/tmp/primusdb_cli_ns".to_string(),
+            max_file_size: 1024 * 1024 * 1024,
+            compression: crate::CompressionType::Lz4,
+            cache_size: 512 * 1024 * 1024,
+        },
+        network: crate::NetworkConfig {
+            bind_address: "127.0.0.1".to_string(),
+            port: 8080,
+            max_connections: 1000,
+        },
+        security: crate::SecurityConfig {
+            encryption_enabled: true,
+            key_rotation_interval: 86400,
+            auth_required: false,
+        },
+        cluster: crate::ClusterConfig {
+            enabled: false,
+            node_id: "cli_ns".to_string(),
+            discovery_servers: vec![],
+        },
+        namespaces: Default::default(),
+    };
+
+    match cmd {
+        NamespaceCommands::Create { path, description } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            let ns = controller.create(
+                &path,
+                description.as_deref().unwrap_or(""),
+                None,
+                None,
+                std::collections::HashMap::new(),
+            )?;
+            println!("Namespace created:");
+            println!("  Path: {}", ns.path);
+            println!("  ID: {}", ns.id);
+            println!("  Description: {}", ns.description);
+        }
+
+        NamespaceCommands::List => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            let namespaces = controller.list_all()?;
+            println!("Namespaces ({}):", namespaces.len());
+            for ns in &namespaces {
+                println!("  {} (id: {})", ns.path, ns.id);
+            }
+        }
+
+        NamespaceCommands::Info { path } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            match controller.get_by_path(&path)? {
+                Some(ns) => {
+                    println!("Namespace: {}", ns.path);
+                    println!("  ID: {}", ns.id);
+                    println!("  Description: {}", ns.description);
+                    println!("  Parent: {:?}", ns.parent_path);
+                    println!("  Active: {}", ns.is_active);
+                    println!("  Created: {}", ns.created_at);
+                }
+                None => println!("Namespace '{}' not found", path),
+            }
+        }
+
+        NamespaceCommands::Delete { path } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            match controller.delete(&path) {
+                Ok(()) => println!("Namespace '{}' deleted", path),
+                Err(e) => println!("Error: {}", e),
+            }
+        }
+
+        NamespaceCommands::Children { path } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            let children = controller.list_children(&path)?;
+            println!("Children of '{}' ({}):", path, children.len());
+            for child in &children {
+                println!("  {}", child.path);
+            }
+        }
+
+        NamespaceCommands::Policy { path } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            match controller.effective_policy(&path) {
+                Ok(policy) => {
+                    println!("Effective policy for '{}':", path);
+                    println!("  Max depth: {}", policy.max_depth);
+                    println!("  Max resources: {}", policy.max_resources);
+                    println!("  Max users: {}", policy.max_users);
+                    println!("  Max storage: {} bytes", policy.max_storage_bytes);
+                    println!("  Allowed types: {:?}", policy.allowed_storage_types);
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+        }
+
+        NamespaceCommands::Resources { path } => {
+            let controller = crate::namespace::NamespaceController::new(&config)?;
+            controller.init()?;
+            match controller.get_by_path(&path)? {
+                Some(ns) => {
+                    let resources = controller.list_resources(&ns.id)?;
+                    println!("Resources in '{}' ({}):", path, resources.len());
+                    for r in &resources {
+                        println!(
+                            "  {} [{:?}] -> {}",
+                            r.resource_name, r.storage_type, r.physical_name
+                        );
+                    }
+                }
+                None => println!("Namespace '{}' not found", path),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_namespace_client_command(server: String, cmd: NamespaceCommands) -> crate::Result<()> {
+    let client = reqwest::Client::new();
+    let base = format!("{}/api/v1/namespaces", server);
+
+    match cmd {
+        NamespaceCommands::Create { path, description } => {
+            let url = format!("{}/{}", base, path);
+            let body = serde_json::json!({"description": description});
+            let response = client.post(&url).json(&body).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Create result:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::List => {
+            let response = client.get(&base).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Namespaces:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::Info { path } => {
+            let url = format!("{}/{}", base, path);
+            let response = client.get(&url).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Namespace info:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::Delete { path } => {
+            let url = format!("{}/{}", base, path);
+            let response = client.delete(&url).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Delete result:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::Children { path } => {
+            let url = format!("{}/{}/children", base, path);
+            let response = client.get(&url).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Children:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::Policy { path } => {
+            let url = format!("{}/{}/effective-policy", base, path);
+            let response = client.get(&url).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Effective policy:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        NamespaceCommands::Resources { path } => {
+            let url = format!("{}/{}/resources", base, path);
+            let response = client.get(&url).send().await?;
+            let json: serde_json::Value = response.json().await?;
+            println!("Resources:");
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
     }

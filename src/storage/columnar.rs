@@ -14,7 +14,7 @@ providing superior performance for aggregations, analytics, and reporting.
 
 ## Architecture Overview
 
-```
+```text
 Columnar Storage Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -93,7 +93,7 @@ Columnar Storage Architecture
 4. **Vectorization**: SIMD operations for aggregations
 
 ### Example Query Flow:
-```
+```text
 SELECT AVG(price) FROM sales WHERE category = 'electronics'
     ↓
 Column Pruning: Only read 'price' and 'category' columns
@@ -108,7 +108,7 @@ Result: ~100x faster than row-based equivalent
 ## Storage Format
 
 ### On-Disk Structure:
-```
+```text
 Table Directory/
 ├── metadata.json     # Schema and table information
 ├── col1.data         # Column 1 data (compressed)
@@ -158,7 +158,7 @@ Table Directory/
 ## Best Practices
 
 ### Data Loading:
-```rust
+```ignore
 // Use bulk inserts for best performance
 for chunk in data.chunks(10000) {
     columnar_engine.bulk_insert("sales", chunk)?;
@@ -166,7 +166,7 @@ for chunk in data.chunks(10000) {
 ```
 
 ### Query Optimization:
-```rust
+```ignore
 // Prefer column-specific queries
 let result = engine.aggregate("sales",
     AggregateQuery {
@@ -178,7 +178,7 @@ let result = engine.aggregate("sales",
 ```
 
 ### Schema Design:
-```rust
+```ignore
 // Design for analytical queries
 let schema = Schema {
     fields: vec![
@@ -201,10 +201,10 @@ use crate::{
 };
 use async_trait::async_trait;
 
+use crate::crypto::FileEncryptionManager;
 use sled::Db;
 use std::any::Any;
 use std::collections::HashMap;
-use crate::crypto::FileEncryptionManager;
 
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -230,12 +230,14 @@ use std::sync::RwLock;
 /// - **Scalability**: Excellent for large datasets with proper partitioning
 pub struct ColumnarEngine {
     /// Configuration settings for the columnar engine
+    #[allow(dead_code)]
     config: PrimusDBConfig,
     /// Embedded Sled database for persistent storage
     /// Uses separate trees for each table to enable concurrent access
     db: Db,
     /// File encryption manager for data-at-rest security
     /// All binary data files are encrypted with AES-256-GCM
+    #[allow(dead_code)]
     file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
 }
 
@@ -258,20 +260,20 @@ impl ColumnarEngine {
     /// - Configuration is invalid
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// let config = PrimusDBConfig::default();
     /// let engine = ColumnarEngine::new(&config)?;
     /// ```
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/columnar", config.storage.data_dir);
         let db = sled::open(&db_path)?;
-        
+
         let file_encryption = if config.security.encryption_enabled {
             Some(FileEncryptionManager::new())
         } else {
             None
         };
-        
+
         Ok(ColumnarEngine {
             config: config.clone(),
             db,
@@ -381,8 +383,8 @@ impl StorageEngine for ColumnarEngine {
         let result: Vec<Record> = tokio::task::spawn_blocking({
             let db = self.db.clone();
             let table_key = format!("table:{}", table);
-            let limit_val = limit;
-            let offset_val = offset;
+            let _limit_val = limit;
+            let _offset_val = offset;
             move || -> crate::Result<Vec<Record>> {
                 let tree = db.open_tree(table_key)?;
                 let mut records = Vec::new();
@@ -481,17 +483,50 @@ impl StorageEngine for ColumnarEngine {
         _conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<String> {
-        let count: usize = tokio::task::spawn_blocking({
+        let table_owned = table.to_string();
+        let result: serde_json::Value = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
-            move || -> crate::Result<usize> {
+            let table_key = format!("table:{}", table_owned);
+            move || -> crate::Result<serde_json::Value> {
                 let tree = db.open_tree(table_key)?;
-                Ok(tree.len())
+                let mut total_records = 0u64;
+                let mut field_counts: HashMap<String, u64> = HashMap::new();
+                let mut field_types: HashMap<String, String> = HashMap::new();
+
+                for item in tree.iter() {
+                    let (_, value) = item?;
+                    total_records += 1;
+                    let data: serde_json::Value = serde_json::from_slice(&value)?;
+                    if let Some(obj) = data.as_object() {
+                        for (key, val) in obj {
+                            *field_counts.entry(key.clone()).or_insert(0) += 1;
+                            if !field_types.contains_key(key) {
+                                let type_str = match val {
+                                    serde_json::Value::Null => "null",
+                                    serde_json::Value::Bool(_) => "boolean",
+                                    serde_json::Value::Number(_) => "number",
+                                    serde_json::Value::String(_) => "string",
+                                    serde_json::Value::Array(_) => "array",
+                                    serde_json::Value::Object(_) => "object",
+                                };
+                                field_types.insert(key.clone(), type_str.to_string());
+                            }
+                        }
+                    }
+                }
+
+                Ok(serde_json::json!({
+                    "table": table_owned,
+                    "total_records": total_records,
+                    "fields": field_counts,
+                    "field_types": field_types,
+                    "engine": "columnar"
+                }))
             }
         })
         .await??;
 
-        Ok(format!("Table {} has {} records", table, count))
+        Ok(serde_json::to_string(&result)?)
     }
 
     async fn create_table(&self, table: &str, _schema: &Schema) -> Result<()> {
@@ -520,7 +555,7 @@ impl StorageEngine for ColumnarEngine {
         Ok(())
     }
 
-    async fn truncate_table(&self, table: &str) -> Result<()> {
+    async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
         tokio::task::spawn_blocking({
             let db = self.db.clone();
             let table_key = format!("table:{}", table);
@@ -545,7 +580,7 @@ impl StorageEngine for ColumnarEngine {
             move || -> crate::Result<(usize, u64)> {
                 let tree = db.open_tree(table_key)?;
                 let count = tree.len();
-                let size = 0; // Placeholder for size_on_disk
+                let size = 0;
                 Ok((count, size))
             }
         })

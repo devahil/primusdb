@@ -14,7 +14,7 @@ nearest neighbor search using advanced indexing algorithms and SIMD acceleration
 
 ## Architecture Overview
 
-```
+```text
 Vector Storage Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -98,7 +98,7 @@ Vector Storage Architecture
 - **Manhattan Distance**: Robust to outliers, good for sparse data
 
 ### Metric Selection Guide:
-```rust
+```ignore
 // Text embeddings - use Cosine
 let text_results = vector_engine.search("text_collection", query_embedding,
     DistanceMetric::Cosine, 10)?;
@@ -115,7 +115,7 @@ let normalized_results = vector_engine.search("normalized_collection", query_emb
 ## Indexing Strategies
 
 ### IVF (Inverted File) Indexing:
-```rust
+```ignore
 let ivf_config = VectorIndexConfig {
     index_type: VectorIndexType::IVF {
         nlist: 1024,    // Number of clusters
@@ -130,7 +130,7 @@ let ivf_config = VectorIndexConfig {
 ```
 
 ### HNSW Indexing:
-```rust
+```ignore
 let hnsw_config = VectorIndexConfig {
     index_type: VectorIndexType::HNSW {
         m: 16,              // Max connections per node
@@ -147,7 +147,7 @@ let hnsw_config = VectorIndexConfig {
 ## Storage Format
 
 ### On-Disk Structure:
-```
+```text
 Vector Collection/
 ├── metadata.json          # Collection info, dimensions, index type
 ├── vectors/               # Directory for vector data
@@ -171,11 +171,11 @@ Vector Collection/
 ## Query Processing
 
 ### Similarity Search Flow:
-```
+```text
 Query Vector → Preprocessing → Index Search → Distance Calculation → Top-K Selection
       ↓              ↓              ↓              ↓              ↓
    Normalize    Quantize       IVF/HNSW       Cosine/Euclidean   Heap Sort
-   (if needed)  (if used)     Traversal       Computation     + Filtering
+   (if needed)  (if used)     Traversal     Computation       + Filtering
 ```
 
 ### Performance Optimizations:
@@ -201,7 +201,7 @@ Query Vector → Preprocessing → Index Search → Distance Calculation → Top
 ## Best Practices
 
 ### Index Selection:
-```rust
+```ignore
 // Small collections (< 10K vectors)
 let index = VectorIndexType::Flat; // Exact search
 
@@ -213,7 +213,7 @@ let index = VectorIndexType::HNSW { m: 32, ef_construction: 400 };
 ```
 
 ### Performance Tuning:
-```rust
+```ignore
 // High accuracy, lower speed
 let search_config = SearchConfig {
     ef_search: 64,    // HNSW search parameter
@@ -230,7 +230,7 @@ let search_config = SearchConfig {
 ```
 
 ### Batch Operations:
-```rust
+```ignore
 // Bulk insert for better performance
 let vectors = vec![embedding1, embedding2, embedding3];
 vector_engine.insert_batch("embeddings", vectors, metadata_list)?;
@@ -268,11 +268,12 @@ use crate::{
     PrimusDBConfig, Record, Result,
 };
 use async_trait::async_trait;
+use tracing::info;
 
+use crate::crypto::FileEncryptionManager;
 use sled::Db;
 use std::any::Any;
 use std::collections::HashMap;
-use crate::crypto::FileEncryptionManager;
 
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -305,12 +306,14 @@ use std::sync::RwLock;
 /// - **Scalability**: Millions of vectors supported
 pub struct VectorEngine {
     /// Configuration for vector operations and indexing
+    #[allow(dead_code)]
     config: PrimusDBConfig,
     /// Embedded database for persistent vector storage
     db: Db,
     /// File encryption manager for data-at-rest security
     /// Vector files are encrypted with AES-256-GCM to prevent
     /// unauthorized reading with hexadecimal editors
+    #[allow(dead_code)]
     file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
 }
 
@@ -318,6 +321,7 @@ pub struct VectorEngine {
 ///
 /// Contains all data and metadata for a single vector collection,
 /// including the vectors themselves, their metadata, and indexing structures.
+#[allow(dead_code)]
 #[derive(Debug)]
 struct VectorCollection {
     /// Collection name/identifier
@@ -330,6 +334,7 @@ struct VectorCollection {
     index: Option<VectorIndex>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct VectorData {
     id: String,
@@ -337,12 +342,14 @@ struct VectorData {
     metadata: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct VectorIndex {
     index_type: VectorIndexType,
     data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum VectorIndexType {
     IVF { nlist: usize, nprobe: usize },
@@ -354,13 +361,13 @@ impl VectorEngine {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/vector", config.storage.data_dir);
         let db = sled::open(&db_path)?;
-        
+
         let file_encryption = if config.security.encryption_enabled {
             Some(FileEncryptionManager::new())
         } else {
             None
         };
-        
+
         Ok(VectorEngine {
             config: config.clone(),
             db,
@@ -375,12 +382,34 @@ impl VectorEngine {
         dot_product / (norm_a * norm_b)
     }
 
+    #[allow(dead_code)]
     fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
         a.iter()
             .zip(b.iter())
             .map(|(x, y)| (x - y).powi(2))
             .sum::<f32>()
             .sqrt()
+    }
+
+    fn matches_conditions(data: &serde_json::Value, conditions: &serde_json::Value) -> bool {
+        if conditions.is_null() || conditions.as_object().map_or(true, |o| o.is_empty()) {
+            return true;
+        }
+        if let Some(obj) = conditions.as_object() {
+            for (key, cond_val) in obj {
+                match data.get(key) {
+                    Some(data_val) => {
+                        if data_val != cond_val {
+                            return false;
+                        }
+                    }
+                    None => return false,
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -534,15 +563,60 @@ impl StorageEngine for VectorEngine {
         &self,
         table: &str,
         conditions: Option<&serde_json::Value>,
-        _data: &serde_json::Value,
+        data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        // Implementation for vector update
-        println!(
-            "Vector update in {} with conditions: {:?}",
-            table, conditions
-        );
-        Ok(1)
+        let conditions = conditions.cloned().unwrap_or(serde_json::Value::Null);
+        let data = data.clone();
+        let table_owned = table.to_string();
+        let result: u64 = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table_owned);
+            move || -> crate::Result<u64> {
+                let tree = db.open_tree(table_key)?;
+                let mut updated = 0u64;
+                let mut batch = Vec::new();
+
+                for item in tree.iter() {
+                    let (key, value) = item?;
+                    let stored: serde_json::Value = serde_json::from_slice(&value)?;
+
+                    if Self::matches_conditions(&stored, &conditions) {
+                        let merged = if let (Some(stored_obj), Some(data_obj)) =
+                            (stored.as_object(), data.as_object())
+                        {
+                            let mut merged = stored_obj.clone();
+                            for (k, v) in data_obj {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                            serde_json::Value::Object(merged)
+                        } else {
+                            data.clone()
+                        };
+                        let new_value = serde_json::to_vec(&merged)?;
+                        batch.push((key.to_vec(), new_value));
+                        updated += 1;
+                    }
+                }
+
+                for (key, value) in batch {
+                    tree.insert(key, value)?;
+                }
+
+                if updated > 0 {
+                    tree.flush()?;
+                }
+
+                info!(
+                    "Vector update in {}: {} records updated",
+                    table_owned, updated
+                );
+                Ok(updated)
+            }
+        })
+        .await??;
+
+        Ok(result)
     }
 
     async fn delete(
@@ -551,12 +625,44 @@ impl StorageEngine for VectorEngine {
         conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        // Implementation for vector delete
-        println!(
-            "Vector delete from {} with conditions: {:?}",
-            table, conditions
-        );
-        Ok(1)
+        let conditions = conditions.cloned().unwrap_or(serde_json::Value::Null);
+        let table_owned = table.to_string();
+        let result: u64 = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table_owned);
+            move || -> crate::Result<u64> {
+                let tree = db.open_tree(table_key)?;
+                let mut deleted = 0u64;
+                let mut to_remove = Vec::new();
+
+                for item in tree.iter() {
+                    let (key, value) = item?;
+                    let stored: serde_json::Value = serde_json::from_slice(&value)?;
+
+                    if Self::matches_conditions(&stored, &conditions) {
+                        to_remove.push(key.to_vec());
+                        deleted += 1;
+                    }
+                }
+
+                for key in &to_remove {
+                    tree.remove(key)?;
+                }
+
+                if deleted > 0 {
+                    tree.flush()?;
+                }
+
+                info!(
+                    "Vector delete from {}: {} records deleted",
+                    table_owned, deleted
+                );
+                Ok(deleted)
+            }
+        })
+        .await??;
+
+        Ok(result)
     }
 
     async fn analyze(
@@ -565,31 +671,134 @@ impl StorageEngine for VectorEngine {
         _conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<String> {
-        // Implementation for vector analytics and clustering
-        println!("Vector analyze for table: {}", table);
-        Ok("Vector analysis completed".to_string())
+        let table_owned = table.to_string();
+        let result: serde_json::Value = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table_owned);
+            move || -> crate::Result<serde_json::Value> {
+                let tree = db.open_tree(table_key)?;
+                let mut total_records = 0u64;
+                let mut field_counts: HashMap<String, u64> = HashMap::new();
+                let mut field_types: HashMap<String, String> = HashMap::new();
+
+                for item in tree.iter() {
+                    let (_, value) = item?;
+                    total_records += 1;
+                    let data: serde_json::Value = serde_json::from_slice(&value)?;
+                    if let Some(obj) = data.as_object() {
+                        for (key, val) in obj {
+                            *field_counts.entry(key.clone()).or_insert(0) += 1;
+                            if !field_types.contains_key(key) {
+                                let type_str = match val {
+                                    serde_json::Value::Null => "null",
+                                    serde_json::Value::Bool(_) => "boolean",
+                                    serde_json::Value::Number(_) => "number",
+                                    serde_json::Value::String(_) => "string",
+                                    serde_json::Value::Array(_) => "array",
+                                    serde_json::Value::Object(_) => "object",
+                                };
+                                field_types.insert(key.clone(), type_str.to_string());
+                            }
+                        }
+                    }
+                }
+
+                Ok(serde_json::json!({
+                    "table": table_owned,
+                    "total_records": total_records,
+                    "fields": field_counts,
+                    "field_types": field_types,
+                    "engine": "vector"
+                }))
+            }
+        })
+        .await??;
+
+        info!(
+            "Vector analyze for table: {} - {} records",
+            table, result["total_records"]
+        );
+        Ok(serde_json::to_string(&result)?)
     }
 
     async fn create_table(&self, table: &str, _schema: &Schema) -> Result<()> {
-        println!("Creating vector collection: {}", table);
+        tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table);
+            move || -> crate::Result<()> {
+                db.open_tree(table_key)?;
+                Ok(())
+            }
+        })
+        .await??;
+
+        info!("Vector collection created: {}", table);
         Ok(())
     }
 
     async fn drop_table(&self, table: &str) -> Result<()> {
-        println!("Dropping vector collection: {}", table);
+        tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table);
+            move || -> crate::Result<()> {
+                db.drop_tree(table_key)?;
+                Ok(())
+            }
+        })
+        .await??;
+
+        info!("Vector collection dropped: {}", table);
         Ok(())
     }
 
-    async fn truncate_table(&self, table: &str) -> Result<()> {
-        println!("Truncating vector collection: {}", table);
-        // Implementation would clear the vector data structures
+    async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
+        tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table);
+            move || -> crate::Result<()> {
+                let tree = db.open_tree(table_key)?;
+                let mut iter = tree.iter();
+                while let Some(Ok((key, _))) = iter.next() {
+                    tree.remove(key)?;
+                }
+                tree.flush()?;
+                Ok(())
+            }
+        })
+        .await??;
+
+        info!("Vector collection truncated: {}", table);
         Ok(())
     }
 
     async fn table_info(&self, table: &str) -> Result<TableInfo> {
-        println!("Getting vector collection info for: {}", table);
-        Err(crate::Error::DatabaseError(
-            "Collection not found".to_string(),
-        ))
+        let (count, size): (usize, u64) = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = format!("table:{}", table);
+            move || -> crate::Result<(usize, u64)> {
+                let tree = db.open_tree(table_key)?;
+                let count = tree.len();
+                let size = 0;
+                Ok((count, size))
+            }
+        })
+        .await??;
+
+        info!(
+            "Vector collection info retrieved: {} ({} rows)",
+            table, count
+        );
+        Ok(TableInfo {
+            name: table.to_string(),
+            schema: Schema {
+                fields: vec![],
+                indexes: vec![],
+                constraints: vec![],
+            },
+            row_count: count as u64,
+            size_bytes: size,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
     }
 }

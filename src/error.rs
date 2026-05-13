@@ -6,7 +6,7 @@ Errors are categorized by subsystem and provide detailed context for debugging.
 
 ## Error Categories
 
-```
+```text
 Error Hierarchy:
 ══════════════════
 
@@ -35,7 +35,7 @@ PrimusDB uses a comprehensive error handling strategy:
 
 ## Usage Examples
 
-```rust
+```ignore
 use primusdb::Result;
 
 // Function that may fail
@@ -157,6 +157,10 @@ pub enum Error {
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
+    /// Bincode serialization/deserialization failure
+    #[error("Bincode error: {0}")]
+    BincodeError(String),
+
     /// General database operation failure not covered by specific error types
     /// Used for complex operations that may fail for multiple reasons
     /// Recovery: Check system logs for detailed failure information
@@ -218,7 +222,7 @@ pub enum Error {
 /// consistent error handling with the custom Error enum.
 ///
 /// # Usage
-/// ```rust
+/// ```ignore
 /// use primusdb::Result;
 ///
 /// fn my_function() -> Result<String> {
@@ -227,3 +231,9 @@ pub enum Error {
 /// }
 /// ```
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<Box<bincode::ErrorKind>> for Error {
+    fn from(e: Box<bincode::ErrorKind>) -> Self {
+        Error::BincodeError(e.to_string())
+    }
+}

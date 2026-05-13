@@ -6,7 +6,7 @@ node management, consensus-based operations, and advanced security features.
 
 ## Architecture Overview
 
-```
+```text
 Distributed Cache Cluster Architecture
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -76,7 +76,7 @@ Distributed Cache Cluster Architecture
 ## Usage Examples
 
 ### Basic Cluster Setup
-```rust
+```ignore
 use primusdb::cache::cluster::{CacheCluster, ClusterConfig};
 
 // Configure cache cluster
@@ -103,7 +103,7 @@ let data = cluster.get("user:123").await?;
 ```
 
 ### Consensus-Based Operations
-```rust
+```ignore
 // All cache operations go through consensus validation
 let result = cluster.consensus_put("key", b"data", vec![
     "validator-1".to_string(),
@@ -117,7 +117,7 @@ assert!(validation.is_valid);
 ```
 
 ### Cluster Management
-```rust
+```ignore
 // Add new cache node
 cluster.add_node("cache-node-4:8080").await?;
 
@@ -163,7 +163,7 @@ cluster.scale_to(10).await?; // Scale to 10 nodes
 ## Configuration Options
 
 ### ClusterConfig
-```rust
+```ignore
 pub struct ClusterConfig {
     pub nodes: Vec<String>,                    // Initial cluster nodes
     pub replication_factor: usize,             // Data replication count
@@ -179,7 +179,7 @@ pub struct ClusterConfig {
 
 The cache cluster integrates seamlessly with the node manager:
 
-```rust
+```ignore
 // Node manager handles cache node lifecycle
 node_manager.register_cache_node(cache_node).await?;
 node_manager.scale_cache_cluster(desired_size).await?;

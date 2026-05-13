@@ -10,7 +10,6 @@
 //! This module implements a Raft-style consensus protocol for PrimusDB cluster operations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Consensus role in the cluster
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

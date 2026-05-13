@@ -1,7 +1,7 @@
 # PrimusDB User Manual
 ===================
 
-This manual provides comprehensive guidance for users working with PrimusDB v1.2.0-alpha databases.
+This manual provides comprehensive guidance for users working with PrimusDB v1.2.3-alpha databases.
 
 ## Authentication
 
@@ -247,6 +247,57 @@ curl -X POST http://localhost:8080/api/v1/uql \
   }'
 ```
 
+#### Advanced SQL Queries
+
+##### GROUP BY / HAVING / ORDER BY
+```bash
+# Aggregate with GROUP BY and HAVING
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT category, COUNT(*) as cnt, AVG(price) as avg_price FROM products GROUP BY category HAVING COUNT(*) > 5 ORDER BY cnt DESC",
+    "language": "sql"
+  }'
+```
+
+##### DISTINCT
+```bash
+# Select distinct values
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT DISTINCT category FROM products",
+    "language": "sql"
+  }'
+```
+
+##### RETURNING Clause (INSERT/UPDATE/DELETE ... RETURNING)
+```bash
+# INSERT with RETURNING
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "INSERT INTO users (name, email) VALUES ('"'"'Alice'"'"', '"'"'alice@example.com'"'"') RETURNING id, name",
+    "language": "sql"
+  }'
+
+# UPDATE with RETURNING
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "UPDATE users SET age = 31 WHERE name = '"'"'Alice'"'"' RETURNING id, name, age",
+    "language": "sql"
+  }'
+
+# DELETE with RETURNING
+curl -X POST http://localhost:8080/api/v1/uql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "DELETE FROM users WHERE age < 18 RETURNING id, name",
+    "language": "sql"
+  }'
+```
+
 ### Updating Data
 
 #### CLI Update
@@ -403,9 +454,211 @@ primusdb-cli table truncate --storage-type columnar --table sales
 
 # Truncate a collection
 primusdb-cli table truncate --storage-type document --table users
+
+# Truncate with CASCADE (also truncates child tables with FK references)
+curl -X POST http://localhost:8080/api/v1/crud/relational/orders/truncate \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"cascade": true}'
 ```
 
-### Table Information
+### ALTER TABLE Operations
+
+#### Add Column
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/products/alter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "operation": "add_column",
+    "field": {"name": "discount", "field_type": "Float", "nullable": true, "default_value": 0.0}
+  }'
+```
+
+#### Drop Column
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/products/alter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "operation": "drop_column",
+    "column": "old_field"
+  }'
+```
+
+#### Modify Column
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/products/alter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "operation": "modify_column",
+    "field": {"name": "price", "field_type": "Decimal(10,2)"}
+  }'
+```
+
+#### Add Constraint (Foreign Key, Unique, Check)
+```bash
+# Add foreign key constraint
+curl -X POST http://localhost:8080/api/v1/ddl/relational/orders/alter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "operation": "add_constraint",
+    "constraint": {
+      "name": "fk_user_id",
+      "constraint_type": "ForeignKey",
+      "fields": ["user_id"],
+      "definition": {
+        "references_table": "users",
+        "references_field": "id",
+        "on_delete": "Cascade",
+        "on_update": "Restrict"
+      }
+    }
+  }'
+```
+
+#### Drop Constraint
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/orders/alter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "operation": "drop_constraint",
+    "constraint_name": "fk_user_id"
+  }'
+```
+
+#### Rename Table
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/old_name/rename \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"new_name": "new_name"}'
+```
+
+### Sequences
+
+Sequences generate unique numeric values for auto-incrementing columns.
+
+#### Create Sequence
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/_/create_sequence \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "name": "order_number_seq",
+    "increment": 1,
+    "min_value": 1,
+    "max_value": 999999999,
+    "cycle": false,
+    "cache_size": 100
+  }'
+```
+
+#### Next Value
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/order_number_seq/nextval \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### Current Value
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/order_number_seq/currval \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### Set Value
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/order_number_seq/setval \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"value": 1000}'
+```
+
+#### Drop Sequence
+```bash
+curl -X DELETE http://localhost:8080/api/v1/ddl/relational/order_number_seq/drop_sequence \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Views (Virtual Tables)
+
+Views are stored queries that act like virtual tables.
+
+#### Create View
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/_/create_view \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "name": "active_users",
+    "query_definition": {"selector": {"status": "active"}},
+    "columns": ["id", "name", "email"],
+    "referenced_tables": ["users"]
+  }'
+```
+
+#### Drop View
+```bash
+curl -X DELETE http://localhost:8080/api/v1/ddl/relational/active_users/drop_view \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### Refresh View (Materialized)
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/active_users/refresh_view \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Triggers
+
+Triggers automatically execute actions when specified events occur on a table.
+
+#### Create Trigger
+```bash
+curl -X POST http://localhost:8080/api/v1/ddl/relational/_/create_trigger \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{
+    "name": "check_age_before_insert",
+    "table_name": "users",
+    "timing": "Before",
+    "event": "Insert",
+    "operation": {"Raise": "Age must be positive"}
+  }'
+```
+
+#### Drop Trigger
+```bash
+curl -X DELETE http://localhost:8080/api/v1/ddl/relational/users/drop_trigger \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"trigger_name": "check_age_before_insert"}'
+```
+
+### Information Schema
+
+Query database metadata programmatically.
+
+#### List All Tables
+```bash
+curl -X GET http://localhost:8080/api/v1/info/relational/tables \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### List Table Columns
+```bash
+curl -X GET http://localhost:8080/api/v1/info/relational/users/columns \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### List Table Constraints
+```bash
+curl -X GET http://localhost:8080/api/v1/info/relational/users/constraints \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
 ```bash
 # Get table metadata
 primusdb-cli table info --storage-type columnar --table sales

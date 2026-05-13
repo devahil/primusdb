@@ -6,7 +6,7 @@ including user management, role-based access control, API tokens, and cluster no
 
 ## Architecture
 
-```
+```text
 Authentication & Authorization Layer
 ══════════════════════════════════════════════════════════════════════
 
@@ -70,7 +70,6 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, Duration, Utc};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,6 +118,7 @@ pub enum ResourceType {
     Vector,
     Document,
     Relational,
+    Namespace,
     Cluster,
     Admin,
     All,
@@ -196,6 +196,7 @@ pub struct AuthManager {
     segments: HashMap<String, Segment>,
     tokens: HashMap<String, ApiToken>,
     token_by_hash: HashMap<String, String>,
+    #[allow(dead_code)]
     crypto: Arc<CryptoManager>,
     random: SystemRandom,
     login_attempts: HashMap<String, (u32, Option<DateTime<Utc>>)>,
@@ -214,14 +215,15 @@ impl CryptoManager {
         Self { master_key, random }
     }
 
+    #[allow(dead_code)]
     fn encrypt_token(&self, token: &str) -> crate::Result<String> {
         let cipher = Aes256Gcm::new_from_slice(&self.master_key)
             .map_err(|e| crate::Error::CryptoError(format!("Failed to create cipher: {}", e)))?;
 
         let mut nonce_bytes = [0u8; 12];
-        self.random.fill(&mut nonce_bytes).map_err(|_| {
-            crate::Error::CryptoError("Failed to generate nonce".to_string())
-        })?;
+        self.random
+            .fill(&mut nonce_bytes)
+            .map_err(|_| crate::Error::CryptoError("Failed to generate nonce".to_string()))?;
         let nonce = AesNonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -236,15 +238,21 @@ impl CryptoManager {
         result.extend_from_slice(tag);
         result.extend_from_slice(actual_ciphertext);
 
-        Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &result))
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &result,
+        ))
     }
 
+    #[allow(dead_code)]
     fn decrypt_token(&self, encrypted: &str) -> crate::Result<String> {
         let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encrypted)
             .map_err(|e| crate::Error::CryptoError(format!("Base64 decode failed: {}", e)))?;
 
         if data.len() < 28 {
-            return Err(crate::Error::CryptoError("Invalid encrypted data".to_string()));
+            return Err(crate::Error::CryptoError(
+                "Invalid encrypted data".to_string(),
+            ));
         }
 
         let nonce = &data[..12];
@@ -296,7 +304,13 @@ impl AuthManager {
                 description: "Full system access".to_string(),
                 privileges: vec![Privilege {
                     resource: ResourceType::All,
-                    actions: vec![Action::Read, Action::Write, Action::Delete, Action::Create, Action::Admin],
+                    actions: vec![
+                        Action::Read,
+                        Action::Write,
+                        Action::Delete,
+                        Action::Create,
+                        Action::Admin,
+                    ],
                     segment_filter: None,
                 }],
                 parent_role: None,
@@ -451,7 +465,10 @@ impl AuthManager {
             .map_err(|e| crate::Error::CryptoError(format!("Password hashing failed: {}", e)))?
             .to_string();
 
-        let user_id = format!("user_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let user_id = format!(
+            "user_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let user = User {
             id: user_id.clone(),
             username,
@@ -489,7 +506,9 @@ impl AuthManager {
             .ok_or_else(|| crate::Error::AuthenticationError("Invalid credentials".to_string()))?;
 
         if !user.is_active {
-            return Err(crate::Error::AuthenticationError("Account is disabled".to_string()));
+            return Err(crate::Error::AuthenticationError(
+                "Account is disabled".to_string(),
+            ));
         }
 
         let parsed_hash = PasswordHash::new(&user.password_hash)
@@ -501,12 +520,19 @@ impl AuthManager {
             .is_ok();
 
         if !password_valid {
-            let attempts = self.login_attempts.entry(username.to_string()).or_insert((0, None));
+            let attempts = self
+                .login_attempts
+                .entry(username.to_string())
+                .or_insert((0, None));
             attempts.0 += 1;
             if attempts.0 >= self.config.max_login_attempts {
-                attempts.1 = Some(Utc::now() + Duration::minutes(self.config.lockout_duration_minutes as i64));
+                attempts.1 = Some(
+                    Utc::now() + Duration::minutes(self.config.lockout_duration_minutes as i64),
+                );
             }
-            return Err(crate::Error::AuthenticationError("Invalid credentials".to_string()));
+            return Err(crate::Error::AuthenticationError(
+                "Invalid credentials".to_string(),
+            ));
         }
 
         self.login_attempts.remove(username);
@@ -533,16 +559,16 @@ impl AuthManager {
         scopes: Vec<TokenScope>,
         expires_in_hours: Option<u32>,
     ) -> crate::Result<(String, ApiToken)> {
-        let user = self
+        let _user = self
             .users
             .get(user_id)
             .ok_or_else(|| crate::Error::ValidationError("User not found".to_string()))?;
 
         let mut token_bytes = vec![0u8; 32];
-        self.random.fill(&mut token_bytes).map_err(|e| {
-            crate::Error::CryptoError(format!("Failed to generate token: {}", e))
-        })?;
-        
+        self.random
+            .fill(&mut token_bytes)
+            .map_err(|e| crate::Error::CryptoError(format!("Failed to generate token: {}", e)))?;
+
         let raw_token = hex::encode(&token_bytes);
         let token_hash = {
             let mut hasher = Sha256::new();
@@ -552,8 +578,11 @@ impl AuthManager {
 
         let expires_at = expires_in_hours.map(|hours| Utc::now() + Duration::hours(hours as i64));
 
-        let token_id = format!("token_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        
+        let token_id = format!(
+            "token_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
         let token = ApiToken {
             id: token_id.clone(),
             user_id: user_id.to_string(),
@@ -591,18 +620,22 @@ impl AuthManager {
             .ok_or_else(|| crate::Error::AuthenticationError("Token not found".to_string()))?;
 
         if !token.is_active {
-            return Err(crate::Error::AuthenticationError("Token is revoked".to_string()));
+            return Err(crate::Error::AuthenticationError(
+                "Token is revoked".to_string(),
+            ));
         }
 
         if let Some(expires_at) = token.expires_at {
             if expires_at < Utc::now() {
-                return Err(crate::Error::AuthenticationError("Token expired".to_string()));
+                return Err(crate::Error::AuthenticationError(
+                    "Token expired".to_string(),
+                ));
             }
         }
 
         let token_user_id = token.user_id.clone();
         let token_scopes = token.scopes.clone();
-        
+
         let mut token = token.clone();
         token.last_used = Some(Utc::now());
         self.tokens.insert(token_id.clone(), token);
@@ -674,7 +707,8 @@ impl AuthManager {
 
         for privilege in &validation.privileges {
             if privilege.resource == ResourceType::All || privilege.resource == resource {
-                if privilege.actions.contains(&action) || privilege.actions.contains(&Action::Admin) {
+                if privilege.actions.contains(&action) || privilege.actions.contains(&Action::Admin)
+                {
                     return Ok(true);
                 }
             }
@@ -683,9 +717,17 @@ impl AuthManager {
         Ok(false)
     }
 
-    pub fn create_segment(&mut self, name: String, description: String, parent_segment: Option<String>) -> crate::Result<String> {
-        let segment_id = format!("seg_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        
+    pub fn create_segment(
+        &mut self,
+        name: String,
+        description: String,
+        parent_segment: Option<String>,
+    ) -> crate::Result<String> {
+        let segment_id = format!(
+            "seg_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
         let segment = Segment {
             id: segment_id.clone(),
             name,
@@ -763,9 +805,18 @@ impl AuthService {
         manager.authenticate(&request.username, &request.password)
     }
 
-    pub async fn create_token(&self, user_id: &str, request: CreateTokenRequest) -> crate::Result<(String, ApiToken)> {
+    pub async fn create_token(
+        &self,
+        user_id: &str,
+        request: CreateTokenRequest,
+    ) -> crate::Result<(String, ApiToken)> {
         let mut manager = self.auth_manager.write().await;
-        manager.create_api_token(user_id, request.name, request.scopes, request.expires_in_hours)
+        manager.create_api_token(
+            user_id,
+            request.name,
+            request.scopes,
+            request.expires_in_hours,
+        )
     }
 
     pub async fn validate_token(&self, token: &str) -> crate::Result<TokenValidation> {
@@ -778,12 +829,24 @@ impl AuthService {
         manager.revoke_token(token_id)
     }
 
-    pub async fn check_permission(&self, validation: &TokenValidation, resource: ResourceType, action: Action) -> crate::Result<bool> {
+    pub async fn check_permission(
+        &self,
+        validation: &TokenValidation,
+        resource: ResourceType,
+        action: Action,
+    ) -> crate::Result<bool> {
         let manager = self.auth_manager.read().await;
         manager.check_permission(validation, resource, action)
     }
 
-    pub async fn create_user(&self, username: String, password: String, email: Option<String>, roles: Vec<String>, segment_id: Option<String>) -> crate::Result<String> {
+    pub async fn create_user(
+        &self,
+        username: String,
+        password: String,
+        email: Option<String>,
+        roles: Vec<String>,
+        segment_id: Option<String>,
+    ) -> crate::Result<String> {
         let mut manager = self.auth_manager.write().await;
         manager.create_user(username, password, email, roles, segment_id)
     }
@@ -803,7 +866,12 @@ impl AuthService {
         manager.list_roles()
     }
 
-    pub async fn create_segment(&self, name: String, description: String, parent_segment: Option<String>) -> crate::Result<String> {
+    pub async fn create_segment(
+        &self,
+        name: String,
+        description: String,
+        parent_segment: Option<String>,
+    ) -> crate::Result<String> {
         let mut manager = self.auth_manager.write().await;
         manager.create_segment(name, description, parent_segment)
     }

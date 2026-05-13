@@ -1,4 +1,3 @@
-use axum::{routing::get, Json, Router};
 ///
 ///# PrimusDB Server Binary - REST API Server
 ///
@@ -291,13 +290,12 @@ use axum::{routing::get, Json, Router};
 ///production-ready features, comprehensive monitoring, and enterprise security.
 ///
 use clap::Parser;
+use primusdb::auth::{AuthConfig, AuthService};
 use primusdb::{
     ClusterConfig, CompressionType, NetworkConfig, PrimusDB, PrimusDBConfig, SecurityConfig,
     StorageConfig,
 };
-use primusdb::auth::{AuthService, AuthConfig};
 use std::sync::Arc;
-use tower::limit::RateLimitLayer;
 
 #[derive(Parser)]
 #[command(name = "primusdb-server")]
@@ -386,5 +384,6 @@ fn create_config(args: &ServerCli) -> PrimusDBConfig {
             ),
             discovery_servers: vec![],
         },
+        namespaces: Default::default(),
     }
 }

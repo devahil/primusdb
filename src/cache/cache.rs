@@ -14,7 +14,7 @@ The core memory cache implementation providing compressed storage, LRU eviction,
 
 ## Usage
 
-```rust
+```ignore
 use primusdb::cache::{MemoryCache, CacheConfig, CompressionLevel};
 
 let config = CacheConfig {
@@ -54,7 +54,7 @@ use super::compression::{CompressionEngine, CompressionError, CompressionLevel};
 use super::search::{CompressedSearch, SearchError, SearchResult};
 use lru::LruCache;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]

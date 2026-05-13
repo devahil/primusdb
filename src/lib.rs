@@ -14,7 +14,7 @@ Enhanced with integrated AI/ML capabilities and enterprise-grade security.
 
 ## Architecture Overview
 
-```
+```text
 PrimusDB Engine Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -116,7 +116,7 @@ PrimusDB Engine Architecture
 
 ## Quick Start
 
-```rust
+```ignore
 use primusdb::{PrimusDBConfig, PrimusDB};
 
 #[tokio::main]
@@ -164,7 +164,13 @@ and performance.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
+
+use crate::query::UqlEngine;
+
+/// SQL parser module for driver SQL string support
+/// **DEPRECATED** — Use `crate::query::UqlEngine` / `PrimusDB::uql_execute_query()` instead.
+pub mod parser;
 
 /// Core modules for PrimusDB functionality
 pub mod ai;
@@ -177,13 +183,16 @@ pub mod consensus;
 pub mod crypto;
 pub mod drivers;
 pub mod error;
+pub mod namespace;
 // pub mod protocol; // Temporarily disabled for compilation
-pub mod storage;
 pub mod query;
+pub mod storage;
 pub mod transaction;
 
 /// Re-export error types for convenience
 pub use error::*;
+/// Re-export namespace types for convenience
+pub use namespace::*;
 
 /// Re-export cache types for convenience
 pub use cache::*;
@@ -194,7 +203,7 @@ pub use cache::*;
 /// including storage, network, security, and clustering settings.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use primusdb::PrimusDBConfig;
 ///
 /// let config = PrimusDBConfig {
@@ -231,6 +240,8 @@ pub struct PrimusDBConfig {
     pub security: SecurityConfig,
     /// Clustering configuration for distributed deployments
     pub cluster: ClusterConfig,
+    /// Namespace configuration for multi-model isolation
+    pub namespaces: namespace::NamespaceConfig,
 }
 
 /// Configuration for storage-related settings
@@ -339,7 +350,7 @@ pub enum CompressionType {
 /// and AI/ML functionality.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use primusdb::{PrimusDB, PrimusDBConfig};
 ///
 /// #[tokio::main]
@@ -353,6 +364,7 @@ pub enum CompressionType {
 ///     Ok(())
 /// }
 /// ```
+#[allow(dead_code)]
 pub struct PrimusDB {
     /// Configuration used to initialize this instance
     config: PrimusDBConfig,
@@ -366,6 +378,18 @@ pub struct PrimusDB {
     transaction_manager: Arc<transaction::TransactionManager>,
     /// AI/ML engine for analytics and predictions
     ai_engine: Arc<ai::AIEngine>,
+    /// UQL engine for unified queries across all storage engines
+    uql_engine: Arc<UqlEngine>,
+    /// Cluster manager for distributed node coordination
+    cluster_manager: Arc<RwLock<cluster::ClusterManager>>,
+    /// Sync coordinator for distributed data synchronization
+    sync_coordinator: Arc<cluster::sync::SyncCoordinator>,
+    /// Cluster authentication manager (Hyperledger-style genesis keys)
+    cluster_auth: Arc<tokio::sync::RwLock<auth::ClusterAuthManager>>,
+    /// Namespace controller for multi-model isolation
+    namespace_controller: Arc<namespace::NamespaceController>,
+    /// Background block producer handle
+    producer_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Types of storage engines available in PrimusDB
@@ -374,26 +398,37 @@ pub struct PrimusDB {
 /// Choose the appropriate type based on your data access patterns and requirements.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StorageType {
-    /// Columnar storage optimized for analytical queries and aggregations
-    /// Best for: Data warehousing, OLAP, complex analytics
-    /// Features: Compression, bitmap indexes, vectorized operations
     Columnar,
-    /// Vector storage optimized for similarity search and embeddings
-    /// Best for: ML applications, recommendation systems, semantic search
-    /// Features: FAISS-style indexing, SIMD operations, distance metrics
     Vector,
-    /// Document storage for flexible JSON documents
-    /// Best for: Content management, user profiles, flexible schemas
-    /// Features: Dynamic indexing, schema validation, nested queries
     Document,
-    /// Relational storage with SQL support and ACID transactions
-    /// Best for: Traditional applications, complex relationships, reporting
-    /// Features: Foreign keys, joins, constraints, ACID compliance
     Relational,
-    /// Key-Value storage (CouchDB-compatible API)
-    /// Best for: Document stores, caching, session management
-    /// Features: _id, _rev, bulk operations, views, Mango queries
     KeyValue,
+}
+
+impl std::fmt::Display for StorageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageType::Columnar => write!(f, "Columnar"),
+            StorageType::Vector => write!(f, "Vector"),
+            StorageType::Document => write!(f, "Document"),
+            StorageType::Relational => write!(f, "Relational"),
+            StorageType::KeyValue => write!(f, "KeyValue"),
+        }
+    }
+}
+
+impl std::str::FromStr for StorageType {
+    type Err = crate::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Columnar" => Ok(StorageType::Columnar),
+            "Vector" => Ok(StorageType::Vector),
+            "Document" => Ok(StorageType::Document),
+            "Relational" => Ok(StorageType::Relational),
+            "KeyValue" => Ok(StorageType::KeyValue),
+            _ => Err(crate::Error::ValidationError(format!("Unknown storage type: {}", s))),
+        }
+    }
 }
 
 /// Result types returned by database operations
@@ -439,7 +474,7 @@ pub struct Record {
 /// operation type, target table/collection, and associated parameters.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use primusdb::{Query, StorageType, QueryOperation};
 ///
 /// let select_query = Query {
@@ -471,6 +506,24 @@ pub struct Query {
     /// Number of records to skip (OFFSET clause)
     /// Used for pagination along with limit
     pub offset: Option<u64>,
+    /// Namespace path for resource isolation
+    /// When set, the table name is translated to a namespace-specific physical name
+    pub namespace: Option<String>,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self {
+            storage_type: StorageType::Document,
+            operation: QueryOperation::Read,
+            table: String::new(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -479,33 +532,40 @@ pub struct Query {
 /// Defines the fundamental CRUD operations plus additional specialized operations.
 /// Each operation type has different semantics and return values.
 pub enum QueryOperation {
-    /// Read/select operation - retrieve existing records
-    /// Returns: QueryResult::Select with matching records
     Read,
-    /// Create/insert operation - add new records
-    /// Returns: QueryResult::Insert with number of records created
     Create,
-    /// Update operation - modify existing records
-    /// Returns: QueryResult::Update with number of records modified
     Update,
-    /// Delete operation - remove records
-    /// Returns: QueryResult::Delete with number of records removed
     Delete,
-    /// Truncate operation - empty table/collection
-    /// Returns: QueryResult::Truncate with operation status
     Truncate,
-    /// Analyze operation - perform data analysis
-    /// Returns: QueryResult::Explain with analysis results
     Analyze,
-    /// Predict operation - make AI/ML predictions
-    /// Returns: QueryResult::Select with prediction results
     Predict,
+
+    // ER Model Operations (v1.2.2+)
+    AlterTableAddColumn,
+    AlterTableDropColumn,
+    AlterTableModifyColumn,
+    AlterTableAddConstraint,
+    AlterTableDropConstraint,
+    RenameTable,
+    CreateSequence,
+    DropSequence,
+    NextVal,
+    CurrVal,
+    SetVal,
+    CreateView,
+    DropView,
+    RefreshView,
+    CreateTrigger,
+    DropTrigger,
+    InformationSchemaTables,
+    InformationSchemaColumns,
+    InformationSchemaConstraints,
 }
 
 impl PrimusDB {
     pub fn new(config: PrimusDBConfig) -> Result<Self> {
         let config_clone = config.clone();
-        
+
         let mut storage_engines: HashMap<StorageType, Arc<dyn storage::StorageEngine>> =
             HashMap::new();
 
@@ -532,12 +592,52 @@ impl PrimusDB {
         );
 
         let crypto_manager = Arc::new(crypto::CryptoManager::new(&config_clone.security)?);
-        let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(&config_clone)?);
+        let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(
+            &config_clone,
+            storage_engines.clone(),
+        )?);
         let transaction_manager = Arc::new(transaction::TransactionManager::new(
             &config_clone,
             consensus_engine.clone(),
+            storage_engines.clone(),
         )?);
         let ai_engine = Arc::new(ai::AIEngine::new(&config_clone)?);
+
+        let mut uql_engines: HashMap<StorageType, Arc<dyn storage::StorageEngine + Send + Sync>> =
+            HashMap::new();
+        for (&k, v) in &storage_engines {
+            uql_engines.insert(k, v.clone());
+        }
+        let uql_engine = Arc::new(UqlEngine::with_storage_engines(
+            &config,
+            Arc::new(RwLock::new(uql_engines)),
+        ));
+
+        let cluster_manager = Arc::new(RwLock::new(cluster::ClusterManager::new(&config_clone)?));
+        let sync_config = cluster::sync::SyncConfig {
+            replication_factor: 3,
+            sync_interval_ms: 100,
+            conflict_resolution: cluster::sync::ConflictResolution::VectorClock,
+            enable_referential_integrity: true,
+            read_quorum: 2,
+            write_quorum: 2,
+            heartbeat_interval_ms: 1000,
+            max_clock_drift_ms: 5000,
+            merkle_sync: true,
+        };
+        let sync_coordinator = Arc::new(cluster::sync::SyncCoordinator::new(
+            sync_config,
+            config_clone.cluster.node_id.clone(),
+        )?);
+
+        let cluster_auth = Arc::new(tokio::sync::RwLock::new(
+            auth::ClusterAuthManager::new(auth::ClusterAuthConfig::default())?,
+        ));
+
+        let namespace_controller = Arc::new(namespace::NamespaceController::new(&config)?);
+        if config.namespaces.enabled {
+            namespace_controller.init()?;
+        }
 
         Ok(PrimusDB {
             config,
@@ -546,6 +646,12 @@ impl PrimusDB {
             consensus_engine,
             transaction_manager,
             ai_engine,
+            uql_engine,
+            cluster_manager,
+            sync_coordinator,
+            cluster_auth,
+            namespace_controller,
+            producer_handle: Mutex::new(None),
         })
     }
 
@@ -553,17 +659,69 @@ impl PrimusDB {
         &self.config
     }
 
+    pub fn uql_engine(&self) -> Arc<UqlEngine> {
+        self.uql_engine.clone()
+    }
+
+    pub fn uql_execute_query(
+        &self,
+        query: &crate::query::UqlQuery,
+    ) -> crate::Result<crate::query::UqlResult> {
+        self.uql_engine.execute_query(query)
+    }
+
+    pub async fn get_chain_state(&self) -> Result<consensus::ChainState> {
+        self.consensus_engine.get_chain_state().await
+    }
+
+    pub async fn build_and_commit_block(&self) -> Result<Option<consensus::Block>> {
+        self.consensus_engine.build_and_commit_block().await
+    }
+
     pub async fn execute_query(&self, query: Query) -> Result<QueryResult> {
-        let transaction = self.transaction_manager.begin_transaction().await?;
+        let mut transaction = self.transaction_manager.begin_transaction().await?;
 
         let result = match query.operation {
-            QueryOperation::Create => self.handle_create(&query, &transaction).await?,
+            QueryOperation::Create => self.handle_create(&query, &mut transaction).await?,
             QueryOperation::Read => self.handle_read(&query, &transaction).await?,
-            QueryOperation::Update => self.handle_update(&query, &transaction).await?,
-            QueryOperation::Delete => self.handle_delete(&query, &transaction).await?,
+            QueryOperation::Update => self.handle_update(&query, &mut transaction).await?,
+            QueryOperation::Delete => self.handle_delete(&query, &mut transaction).await?,
             QueryOperation::Truncate => self.handle_truncate(&query, &transaction).await?,
             QueryOperation::Analyze => self.handle_analyze(&query, &transaction).await?,
             QueryOperation::Predict => self.handle_predict(&query, &transaction).await?,
+
+            // ER Model Operations (v1.2.2+)
+            QueryOperation::AlterTableAddColumn => self.handle_alter_add_column(&query).await?,
+            QueryOperation::AlterTableDropColumn => self.handle_alter_drop_column(&query).await?,
+            QueryOperation::AlterTableModifyColumn => {
+                self.handle_alter_modify_column(&query).await?
+            }
+            QueryOperation::AlterTableAddConstraint => {
+                self.handle_alter_add_constraint(&query).await?
+            }
+            QueryOperation::AlterTableDropConstraint => {
+                self.handle_alter_drop_constraint(&query).await?
+            }
+            QueryOperation::RenameTable => self.handle_rename_table(&query).await?,
+            QueryOperation::CreateSequence => self.handle_create_sequence(&query).await?,
+            QueryOperation::DropSequence => self.handle_drop_sequence(&query).await?,
+            QueryOperation::NextVal => self.handle_nextval(&query).await?,
+            QueryOperation::CurrVal => self.handle_currval(&query).await?,
+            QueryOperation::SetVal => self.handle_setval(&query).await?,
+            QueryOperation::CreateView => self.handle_create_view(&query).await?,
+            QueryOperation::DropView => self.handle_drop_view(&query).await?,
+            QueryOperation::RefreshView => self.handle_refresh_view(&query).await?,
+            QueryOperation::CreateTrigger => self.handle_create_trigger(&query).await?,
+            QueryOperation::DropTrigger => self.handle_drop_trigger(&query).await?,
+            QueryOperation::InformationSchemaTables => {
+                self.handle_info_schema_tables(&query).await?
+            }
+            QueryOperation::InformationSchemaColumns => {
+                self.handle_info_schema_columns(&query).await?
+            }
+            QueryOperation::InformationSchemaConstraints => {
+                self.handle_info_schema_constraints(&query).await?
+            }
         };
 
         self.transaction_manager
@@ -575,20 +733,27 @@ impl PrimusDB {
     async fn handle_create(
         &self,
         query: &Query,
-        transaction: &transaction::Transaction,
+        transaction: &mut transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
 
-        let count = engine
-            .insert(
-                query.table.as_str(),
-                query.data.as_ref().unwrap(),
-                transaction,
-            )
-            .await?;
+        let data = query.data.clone().unwrap_or(serde_json::Value::Null);
+        let op_id = format!("op_{}", transaction.operations.len());
+
+        transaction.operations.push(transaction::TransactionOperation {
+            id: op_id,
+            operation_type: transaction::OperationType::Insert,
+            table: query.table.clone(),
+            data: data.clone(),
+            conditions: None,
+            before_image: None,
+            after_image: Some(data.clone()),
+            executed: true,
+            rollback_data: Some(data.clone()),
+            storage_type: query.storage_type.to_string(),
+        });
+
+        let count = engine.insert(query.table.as_str(), &data, transaction).await?;
         Ok(QueryResult::Insert(count))
     }
 
@@ -597,10 +762,7 @@ impl PrimusDB {
         query: &Query,
         transaction: &transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
 
         let records = engine
             .select(
@@ -617,18 +779,42 @@ impl PrimusDB {
     async fn handle_update(
         &self,
         query: &Query,
-        transaction: &transaction::Transaction,
+        transaction: &mut transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
+
+        // Capture before images for rollback
+        let before_records = engine
+            .select(
+                query.table.as_str(),
+                query.conditions.as_ref(),
+                u64::MAX,
+                0,
+                transaction,
+            )
+            .await?;
+
+        let data = query.data.clone().unwrap_or(serde_json::Value::Null);
+        let op_id = format!("op_{}", transaction.operations.len());
+
+        transaction.operations.push(transaction::TransactionOperation {
+            id: op_id,
+            operation_type: transaction::OperationType::Update,
+            table: query.table.clone(),
+            data: data.clone(),
+            conditions: query.conditions.clone(),
+            before_image: Some(serde_json::json!(before_records)),
+            after_image: None,
+            executed: true,
+            rollback_data: Some(serde_json::json!(before_records)),
+            storage_type: query.storage_type.to_string(),
+        });
 
         let count = engine
             .update(
                 query.table.as_str(),
                 query.conditions.as_ref(),
-                query.data.as_ref().unwrap(),
+                &data,
                 transaction,
             )
             .await?;
@@ -638,12 +824,35 @@ impl PrimusDB {
     async fn handle_delete(
         &self,
         query: &Query,
-        transaction: &transaction::Transaction,
+        transaction: &mut transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
+
+        // Capture deleted records for rollback
+        let deleted_records = engine
+            .select(
+                query.table.as_str(),
+                query.conditions.as_ref(),
+                u64::MAX,
+                0,
+                transaction,
+            )
+            .await?;
+
+        let op_id = format!("op_{}", transaction.operations.len());
+
+        transaction.operations.push(transaction::TransactionOperation {
+            id: op_id,
+            operation_type: transaction::OperationType::Delete,
+            table: query.table.clone(),
+            data: serde_json::Value::Null,
+            conditions: query.conditions.clone(),
+            before_image: Some(serde_json::json!(deleted_records)),
+            after_image: None,
+            executed: true,
+            rollback_data: Some(serde_json::json!(deleted_records)),
+            storage_type: query.storage_type.to_string(),
+        });
 
         let count = engine
             .delete(query.table.as_str(), query.conditions.as_ref(), transaction)
@@ -654,14 +863,18 @@ impl PrimusDB {
     async fn handle_truncate(
         &self,
         query: &Query,
-        transaction: &transaction::Transaction,
+        _transaction: &transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
 
-        engine.truncate_table(query.table.as_str()).await?;
+        let cascade = query
+            .data
+            .as_ref()
+            .and_then(|d| d.get("cascade"))
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+
+        engine.truncate_table(query.table.as_str(), cascade).await?;
         Ok(QueryResult::Truncate(1))
     }
 
@@ -670,10 +883,7 @@ impl PrimusDB {
         query: &Query,
         transaction: &transaction::Transaction,
     ) -> Result<QueryResult> {
-        let engine = self
-            .storage_engines
-            .get(&query.storage_type)
-            .ok_or_else(|| Error::StorageEngineNotFound(query.storage_type))?;
+        let engine = self.get_engine_for_query(query.storage_type, query.namespace.as_deref())?;
 
         let analysis = engine
             .analyze(query.table.as_str(), query.conditions.as_ref(), transaction)
@@ -693,6 +903,260 @@ impl PrimusDB {
         Ok(QueryResult::Select(predictions))
     }
 
+    // ── ER Model Handler Helpers ──────────────────────────────────────
+
+    fn get_relational_engine(
+        &self,
+        st: StorageType,
+    ) -> Result<&storage::relational::RelationalEngine> {
+        let engine = self
+            .storage_engines
+            .get(&st)
+            .ok_or_else(|| Error::StorageEngineNotFound(st))?;
+        engine
+            .as_ref()
+            .as_any()
+            .downcast_ref::<storage::relational::RelationalEngine>()
+            .ok_or_else(|| {
+                Error::ValidationError("Operation requires relational storage engine".to_string())
+            })
+    }
+
+    fn conv_rq(rq: storage::relational::QueryResult) -> QueryResult {
+        match rq {
+            storage::relational::QueryResult::Records(recs) => QueryResult::Select(recs),
+            storage::relational::QueryResult::AffectedRows(n) => QueryResult::Update(n),
+        }
+    }
+
+    async fn handle_alter_add_column(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let field: storage::Field = serde_json::from_value(
+            query
+                .data
+                .clone()
+                .ok_or_else(|| Error::ValidationError("Missing column definition".to_string()))?,
+        )?;
+        rel.alter_table_add_column(&table, field)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_alter_drop_column(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let col = query
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ValidationError("Missing column name".to_string()))?;
+        rel.alter_table_drop_column(&table, col)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_alter_modify_column(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let field: storage::Field = serde_json::from_value(
+            query
+                .data
+                .clone()
+                .ok_or_else(|| Error::ValidationError("Missing column definition".to_string()))?,
+        )?;
+        rel.alter_table_modify_column(&table, field)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_alter_add_constraint(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let constraint: storage::Constraint =
+            serde_json::from_value(query.data.clone().ok_or_else(|| {
+                Error::ValidationError("Missing constraint definition".to_string())
+            })?)?;
+        rel.alter_table_add_constraint(&table, constraint)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_alter_drop_constraint(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let name = query
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ValidationError("Missing constraint name".to_string()))?;
+        rel.alter_table_drop_constraint(&table, name)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_rename_table(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let new_name = query
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ValidationError("Missing new table name".to_string()))?;
+        let resolved_new = self.resolve_table_name(new_name, query.namespace.as_deref())?;
+        rel.rename_table(&table, &resolved_new)?;
+        Ok(QueryResult::Truncate(1))
+    }
+
+    async fn handle_create_sequence(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let mut seq: storage::Sequence =
+            serde_json::from_value(query.data.clone().ok_or_else(|| {
+                Error::ValidationError("Missing sequence definition".to_string())
+            })?)?;
+        seq.name = self.resolve_table_name(&seq.name, query.namespace.as_deref())?;
+        rel.create_sequence(
+            &seq.name,
+            seq.increment,
+            seq.min_value,
+            seq.max_value,
+            seq.cycle,
+            seq.cache_size,
+        )?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_drop_sequence(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        rel.drop_sequence(&table)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_nextval(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let val = rel.nextval(&table)?;
+        Ok(QueryResult::Insert(val as u64))
+    }
+
+    async fn handle_currval(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let val = rel.currval(&table)?;
+        Ok(QueryResult::Insert(val as u64))
+    }
+
+    async fn handle_setval(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let val = query
+            .data
+            .as_ref()
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| Error::ValidationError("Missing sequence value".to_string()))?;
+        rel.setval(&table, val)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_create_view(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let mut view: storage::View = serde_json::from_value(
+            query
+                .data
+                .clone()
+                .ok_or_else(|| Error::ValidationError("Missing view definition".to_string()))?,
+        )?;
+        view.name = self.resolve_table_name(&view.name, query.namespace.as_deref())?;
+        view.referenced_tables = view
+            .referenced_tables
+            .into_iter()
+            .map(|t| self.resolve_table_name(&t, query.namespace.as_deref()).unwrap_or(t))
+            .collect();
+        rel.create_view(
+            &view.name,
+            view.query_definition,
+            view.columns,
+            view.referenced_tables,
+        )?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_drop_view(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        rel.drop_view(&table)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_refresh_view(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        rel.refresh_view(&table)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_create_trigger(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let mut trig: storage::Trigger =
+            serde_json::from_value(query.data.clone().ok_or_else(|| {
+                Error::ValidationError("Missing trigger definition".to_string())
+            })?)?;
+        trig.name = self.resolve_table_name(&trig.name, query.namespace.as_deref())?;
+        trig.table_name = self.resolve_table_name(&trig.table_name, query.namespace.as_deref())?;
+        let timing = match trig.timing {
+            storage::TriggerTiming::Before => storage::relational::TriggerTiming::Before,
+            storage::TriggerTiming::After => storage::relational::TriggerTiming::After,
+            storage::TriggerTiming::InsteadOf => storage::relational::TriggerTiming::InsteadOf,
+        };
+        let event = match trig.event {
+            storage::TriggerEvent::Insert => storage::relational::TriggerEvent::Insert,
+            storage::TriggerEvent::Update => storage::relational::TriggerEvent::Update,
+            storage::TriggerEvent::Delete => storage::relational::TriggerEvent::Delete,
+            storage::TriggerEvent::All => storage::relational::TriggerEvent::All,
+        };
+        let op = match trig.operation {
+            storage::TriggerOperation::Function(f) => {
+                storage::relational::TriggerOperation::Function(f)
+            }
+            storage::TriggerOperation::Execute(s) => {
+                storage::relational::TriggerOperation::Execute(s)
+            }
+            storage::TriggerOperation::Raise(m) => storage::relational::TriggerOperation::Raise(m),
+        };
+        rel.create_trigger(&trig.name, &trig.table_name, timing, event, op)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_drop_trigger(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        let trig_name = query
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ValidationError("Missing trigger name".to_string()))?;
+        let resolved_name = self.resolve_table_name(trig_name, query.namespace.as_deref())?;
+        rel.drop_trigger(&table, &resolved_name)?;
+        Ok(QueryResult::Truncate(0))
+    }
+
+    async fn handle_info_schema_tables(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        Ok(Self::conv_rq(rel.get_information_schema_tables()?))
+    }
+
+    async fn handle_info_schema_columns(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        Ok(Self::conv_rq(
+            rel.get_information_schema_columns(&table)?,
+        ))
+    }
+
+    async fn handle_info_schema_constraints(&self, query: &Query) -> Result<QueryResult> {
+        let rel = self.get_relational_engine(query.storage_type)?;
+        let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
+        Ok(Self::conv_rq(
+            rel.get_information_schema_constraints(&table)?,
+        ))
+    }
+
     pub async fn rollback_transaction(&self, transaction_id: String) -> Result<()> {
         self.transaction_manager
             .rollback_transaction(transaction_id)
@@ -700,59 +1164,187 @@ impl PrimusDB {
     }
 
     pub fn get_cluster_status(&self) -> Result<cluster::ClusterStatus> {
-        // TODO: Implement cluster status
-        Ok(cluster::ClusterStatus::default())
+        let cm = self.cluster_manager.read().unwrap();
+        Ok(cm.get_cluster_status())
     }
 
-    pub fn enable_collection_encryption(&self, storage_type: StorageType, collection: &str) -> Result<()> {
-        let engine = self.storage_engines.get(&storage_type)
+    pub fn get_cluster_manager(&self) -> Arc<RwLock<cluster::ClusterManager>> {
+        self.cluster_manager.clone()
+    }
+
+    pub fn get_sync_coordinator(&self) -> Arc<cluster::sync::SyncCoordinator> {
+        self.sync_coordinator.clone()
+    }
+
+    pub fn get_cluster_auth(
+        &self,
+    ) -> Arc<tokio::sync::RwLock<auth::ClusterAuthManager>> {
+        self.cluster_auth.clone()
+    }
+
+    pub fn get_namespace_controller(&self) -> Arc<namespace::NamespaceController> {
+        self.namespace_controller.clone()
+    }
+
+    fn get_engine_for_query(
+        &self,
+        storage_type: StorageType,
+        namespace: Option<&str>,
+    ) -> Result<Arc<dyn storage::StorageEngine>> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
             .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
-        
-        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+
+        match namespace {
+            Some(ns_path) if !ns_path.is_empty() && self.config.namespaces.enabled => {
+                let ns = self
+                    .namespace_controller
+                    .get_by_path(ns_path)?
+                    .ok_or_else(|| {
+                        Error::ValidationError(format!("Namespace '{}' not found", ns_path))
+                    })?;
+                let ns_path = ns.path.clone();
+                Ok(Arc::new(namespace::storage::NamespacedStorageEngine::new(
+                    engine.clone(),
+                    self.namespace_controller.clone(),
+                    ns_path,
+                    storage_type,
+                )))
+            }
+            _ => Ok(engine.clone()),
+        }
+    }
+
+    fn resolve_table_name(
+        &self,
+        table: &str,
+        namespace: Option<&str>,
+    ) -> Result<String> {
+        match namespace {
+            Some(ns_path) if !ns_path.is_empty() && self.config.namespaces.enabled => {
+                let ns = self
+                    .namespace_controller
+                    .get_by_path(ns_path)?
+                    .ok_or_else(|| {
+                        Error::ValidationError(format!("Namespace '{}' not found", ns_path))
+                    })?;
+                Ok(namespace::compute_physical_name(&ns.path, table))
+            }
+            _ => Ok(table.to_string()),
+        }
+    }
+
+    pub fn enable_collection_encryption(
+        &self,
+        storage_type: StorageType,
+        collection: &str,
+    ) -> Result<()> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+
+        if let Some(doc_engine) = engine
+            .as_ref()
+            .as_any()
+            .downcast_ref::<storage::document::DocumentEngine>()
+        {
             doc_engine.enable_collection_encryption(collection)
         } else {
             Err(crate::Error::ValidationError(
-                "Collection encryption only supported for Document storage".to_string()
+                "Collection encryption only supported for Document storage".to_string(),
             ))
         }
     }
 
-    pub fn disable_collection_encryption(&self, storage_type: StorageType, collection: &str) -> Result<()> {
-        let engine = self.storage_engines.get(&storage_type)
+    pub fn disable_collection_encryption(
+        &self,
+        storage_type: StorageType,
+        collection: &str,
+    ) -> Result<()> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
             .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
-        
-        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+
+        if let Some(doc_engine) = engine
+            .as_ref()
+            .as_any()
+            .downcast_ref::<storage::document::DocumentEngine>()
+        {
             doc_engine.disable_collection_encryption(collection)
         } else {
             Err(crate::Error::ValidationError(
-                "Collection encryption only supported for Document storage".to_string()
+                "Collection encryption only supported for Document storage".to_string(),
             ))
         }
     }
 
-    pub fn is_collection_encrypted(&self, storage_type: StorageType, collection: &str) -> Result<bool> {
-        let engine = self.storage_engines.get(&storage_type)
+    pub fn is_collection_encrypted(
+        &self,
+        storage_type: StorageType,
+        collection: &str,
+    ) -> Result<bool> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
             .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
-        
-        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+
+        if let Some(doc_engine) = engine
+            .as_ref()
+            .as_any()
+            .downcast_ref::<storage::document::DocumentEngine>()
+        {
             doc_engine.is_collection_encrypted(collection)
         } else {
             Err(crate::Error::ValidationError(
-                "Collection encryption only supported for Document storage".to_string()
+                "Collection encryption only supported for Document storage".to_string(),
             ))
         }
     }
 
     pub fn get_encrypted_collections(&self, storage_type: StorageType) -> Result<Vec<String>> {
-        let engine = self.storage_engines.get(&storage_type)
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
             .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
-        
-        if let Some(doc_engine) = engine.as_ref().as_any().downcast_ref::<storage::document::DocumentEngine>() {
+
+        if let Some(doc_engine) = engine
+            .as_ref()
+            .as_any()
+            .downcast_ref::<storage::document::DocumentEngine>()
+        {
             doc_engine.get_encrypted_collections()
         } else {
             Err(crate::Error::ValidationError(
-                "Collection encryption only supported for Document storage".to_string()
+                "Collection encryption only supported for Document storage".to_string(),
             ))
         }
+    }
+
+    /// Start a background task that periodically builds and commits blocks
+    /// from the mempool. Runs every `interval_ms` milliseconds.
+    pub fn start_background_producer(&self, interval_ms: u64) {
+        let consensus = self.consensus_engine.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+            loop {
+                interval.tick().await;
+                match consensus.build_and_commit_block().await {
+                    Ok(Some(block)) => {
+                        tracing::info!(
+                            "Background producer committed block at height {}",
+                            block.height
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!("Background producer error: {}", e);
+                    }
+                }
+            }
+        });
+        *self.producer_handle.lock().unwrap() = Some(handle);
     }
 }

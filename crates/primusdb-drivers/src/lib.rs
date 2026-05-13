@@ -1,9 +1,8 @@
 use async_trait::async_trait;
-use primusdb_core::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
+use primusdb_core::{Query, QueryOperation, Result, StorageType};
 use primusdb_error::Error;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Common interface for all PrimusDB drivers
 #[async_trait]
@@ -92,6 +91,7 @@ pub trait PrimusDBDriver {
 }
 
 /// HTTP-based driver for client-server mode
+#[derive(Clone)]
 pub struct HTTPDriver {
     client: Client,
     base_url: String,
@@ -149,10 +149,12 @@ impl PrimusDBDriver for HTTPDriver {
             .json(&query)
             .send()
             .await
-            .map_err(|e| Error::RequestError(e))?;
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
-        let api_response: APIResponse<serde_json::Value> =
-            response.json().await.map_err(|e| Error::RequestError(e))?;
+        let api_response: APIResponse<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
         if api_response.success {
             api_response
@@ -351,10 +353,12 @@ impl PrimusDBDriver for HTTPDriver {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::RequestError(e))?;
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
-        let api_response: APIResponse<Vec<serde_json::Value>> =
-            response.json().await.map_err(|e| Error::RequestError(e))?;
+        let api_response: APIResponse<Vec<serde_json::Value>> = response
+            .json()
+            .await
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
         if api_response.success {
             api_response
@@ -390,10 +394,12 @@ impl PrimusDBDriver for HTTPDriver {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::RequestError(e))?;
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
-        let api_response: APIResponse<serde_json::Value> =
-            response.json().await.map_err(|e| Error::RequestError(e))?;
+        let api_response: APIResponse<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|e| Error::RequestError(e.to_string()))?;
 
         if api_response.success {
             api_response

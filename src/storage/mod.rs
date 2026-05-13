@@ -13,7 +13,7 @@ for multiple storage engines optimized for different data access patterns.
 
 ## Storage Engine Types
 
-```
+```text
 Storage Engine Matrix
 ═══════════════════════════════════════════════════════════════
 
@@ -41,7 +41,7 @@ Storage Engine Interfaces:
 ## Usage Examples
 
 ### Creating Tables
-```rust
+```ignore
 use primusdb::storage::{Schema, Field, FieldType, Index};
 
 // Define a document collection schema
@@ -81,7 +81,7 @@ storage_engine.create_table("users", &user_schema).await?;
 ```
 
 ### Data Operations
-```rust
+```ignore
 // Insert data
 let user_data = serde_json::json!({
     "id": "user123",
@@ -255,7 +255,8 @@ pub trait StorageEngine: Send + Sync {
     ///
     /// # Arguments
     /// * `table` - Name of the table/collection to truncate
-    async fn truncate_table(&self, table: &str) -> Result<()>;
+    /// * `cascade` - If true, also truncate dependent tables (for relational engine with FK references)
+    async fn truncate_table(&self, table: &str, cascade: bool) -> Result<()>;
 
     /// Get metadata information about a table/collection
     ///
@@ -273,7 +274,7 @@ pub trait StorageEngine: Send + Sync {
 /// The schema is used for data validation, query optimization, and storage layout.
 ///
 /// # Schema Components
-/// ```
+/// ```text
 /// Schema
 /// ├── Fields        - Column definitions with types and constraints
 /// ├── Indexes       - Performance optimization structures
@@ -376,6 +377,45 @@ pub enum FieldType {
     /// Best for: Nested data, flexible schemas, document storage
     /// Storage: BSON-like format with path indexing
     Json,
+
+    /// 16-bit signed integer
+    SmallInt,
+
+    /// 64-bit signed integer
+    BigInt,
+
+    /// Fixed-point decimal with precision and scale
+    Decimal(u64, u64),
+
+    /// Variable-length string with maximum length
+    Varchar(u64),
+
+    /// Fixed-length string
+    Char(u64),
+
+    /// Full timestamp with timezone
+    Timestamp,
+
+    /// Time without date component
+    Time,
+
+    /// UUID/GUID type
+    Uuid,
+
+    /// Enumeration with allowed values
+    Enum(Vec<String>),
+
+    /// Auto-incrementing 32-bit integer
+    Serial,
+
+    /// Auto-incrementing 64-bit integer
+    BigSerial,
+
+    /// Monetary amount
+    Money,
+
+    /// Time interval
+    Interval,
 }
 
 /// Index definition for query performance optimization
@@ -459,8 +499,23 @@ pub enum DistanceMetric {
     Manhattan,
 }
 
+/// Actions to take on foreign key violation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReferentialAction {
+    /// Prevent the operation (default)
+    Restrict,
+    /// Cascade the operation to referencing rows
+    Cascade,
+    /// Set foreign key columns to NULL
+    SetNull,
+    /// Set foreign key columns to their default values
+    SetDefault,
+    /// Check at end of transaction (same as RESTRICT in immediate mode)
+    NoAction,
+}
+
 /// Data integrity constraint definition
-///
+
 /// Constraints enforce data quality and referential integrity rules.
 /// They prevent invalid data from being inserted and maintain consistency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,6 +551,10 @@ pub enum ConstraintType {
         references_table: String,
         /// Field in the referenced table (usually primary key)
         references_field: String,
+        /// Action on delete of referenced row
+        on_delete: ReferentialAction,
+        /// Action on update of referenced row
+        on_update: ReferentialAction,
     },
 
     /// Unique constraint - prevents duplicate values in specified fields
@@ -516,6 +575,22 @@ pub enum ConstraintType {
     /// Ensures required fields always have values
     /// Can be combined with default values
     NotNull,
+
+    /// Default value constraint
+    /// Specifies a default value for the field when not provided
+    DefaultValue {
+        /// The default value
+        value: serde_json::Value,
+    },
+
+    /// Generated/computed column constraint
+    /// Value is computed from an expression
+    Generated {
+        /// Expression that computes the value
+        expression: String,
+        /// Whether the column is stored (true) or virtual (false)
+        stored: bool,
+    },
 }
 
 /// Metadata information about a table/collection
@@ -538,6 +613,105 @@ pub struct TableInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Timestamp when the table was last modified
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Sequence definition for auto-incrementing values
+///
+/// Sequences generate unique numeric values, typically used for SERIAL columns
+/// and custom auto-incrementing identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sequence {
+    /// Sequence name
+    pub name: String,
+    /// Current value
+    pub current_value: i64,
+    /// Increment step
+    pub increment: i64,
+    /// Minimum value
+    pub min_value: i64,
+    /// Maximum value
+    pub max_value: i64,
+    /// Whether the sequence wraps around
+    pub cycle: bool,
+    /// Cache size for performance
+    pub cache_size: u64,
+    /// Owner table (optional)
+    pub owned_by: Option<String>,
+}
+
+/// View definition for virtual tables
+///
+/// A View is a stored query that acts like a virtual table.
+/// It can reference one or more tables and provides a window into the data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct View {
+    /// View name
+    pub name: String,
+    /// SQL-like query definition stored as JSON conditions
+    pub query_definition: serde_json::Value,
+    /// Columns exposed by the view
+    pub columns: Vec<String>,
+    /// Whether this view is materialized
+    pub materialized: bool,
+    /// Referenced tables
+    pub referenced_tables: Vec<String>,
+}
+
+/// Trigger timing - when the trigger fires
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TriggerTiming {
+    /// Fire before the event
+    Before,
+    /// Fire after the event
+    After,
+    /// Instead of the event (for views)
+    InsteadOf,
+}
+
+/// Trigger event - what causes the trigger to fire
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TriggerEvent {
+    /// Trigger on INSERT
+    Insert,
+    /// Trigger on UPDATE
+    Update,
+    /// Trigger on DELETE
+    Delete,
+    /// Trigger on INSERT OR UPDATE OR DELETE
+    All,
+}
+
+/// Trigger operation type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TriggerOperation {
+    /// Execute a function
+    Function(String),
+    /// Execute raw SQL
+    Execute(String),
+    /// Raise a notice/error
+    Raise(String),
+}
+
+/// Trigger definition for automated actions
+///
+/// A Trigger automatically executes a function or action
+/// when a specified event occurs on a table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trigger {
+    /// Trigger name
+    pub name: String,
+    /// Table the trigger is on
+    pub table_name: String,
+    /// When the trigger fires
+    pub timing: TriggerTiming,
+    /// What event fires the trigger
+    pub event: TriggerEvent,
+    /// What the trigger does
+    pub operation: TriggerOperation,
+    /// Whether the trigger is enabled
+    pub enabled: bool,
+    /// For UPDATE triggers, specific columns to watch
+    pub columns: Option<Vec<String>>,
 }
 
 /// Performance and usage metrics for storage operations

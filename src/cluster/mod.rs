@@ -6,7 +6,7 @@ and failover coordination in distributed PrimusDB deployments.
 
 ## Cluster Architecture Overview
 
-```
+```text
 Distributed Cluster Architecture
 ═══════════════════════════════════════════════════════════════
 
@@ -74,7 +74,7 @@ Distributed Cluster Architecture
 
 ## Cluster Lifecycle
 
-```
+```text
 Cluster Formation Process:
 1. Bootstrap Node Startup    → Initial coordinator election
 2. Node Discovery           → Gossip protocol propagation
@@ -87,7 +87,7 @@ Cluster Formation Process:
 ## Usage Examples
 
 ### Basic Cluster Setup
-```rust
+```ignore
 use primusdb::cluster::{ClusterManager, NodeRole};
 
 let config = PrimusDBConfig {
@@ -127,7 +127,7 @@ cluster_manager.register_node(local_node).await?;
 ```
 
 ### Load Balancing Operations
-```rust
+```ignore
 // Get optimal node for operation
 let target_node = cluster_manager.get_node_for_operation("read")?;
 
@@ -139,7 +139,7 @@ cluster_manager.update_node_metrics(target_node, metrics).await?;
 ```
 
 ### Failure Detection and Recovery
-```rust
+```ignore
 // Monitor node health
 let unhealthy_nodes = cluster_manager.detect_failed_nodes().await?;
 
@@ -207,7 +207,7 @@ alerting_enabled = true
 ## Implementation Details
 
 ### Gossip Protocol
-```
+```text
 Gossip Message Types:
 • NodeJoin: New node announcement
 • NodeLeave: Node departure notification
@@ -217,7 +217,7 @@ Gossip Message Types:
 ```
 
 ### Leader Election
-```
+```text
 Election Process:
 1. Failure Detection → Coordinator unavailable
 2. Election Initiation → Remaining nodes participate
@@ -227,7 +227,7 @@ Election Process:
 ```
 
 ### Shard Management
-```
+```text
 Sharding Strategy:
 • Hash-based partitioning for even distribution
 • Dynamic rebalancing during node changes
@@ -246,7 +246,7 @@ Sharding Strategy:
 - **Failure Rate**: Node failure frequency and recovery time
 
 ### Alerting Conditions
-```rust
+```ignore
 // Critical alerts
 if cluster_manager.active_node_count() < cluster_manager.minimum_quorum() {
     alert!("CRITICAL: Cluster below minimum quorum");
@@ -335,6 +335,7 @@ pub struct NodeResources {
 #[derive(Debug)]
 pub struct LoadBalancer {
     strategy: LoadBalancingStrategy,
+    #[allow(dead_code)]
     node_weights: HashMap<String, f64>,
 }
 

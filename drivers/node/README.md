@@ -1,4 +1,4 @@
-# PrimusDB Node.js Driver
+# PrimusDB Node.js Driver v1.2.2-alpha
 
 Node.js client library for PrimusDB - Hybrid Database Engine supporting columnar, vector, document, and relational storage with AI/ML capabilities.
 

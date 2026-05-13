@@ -395,6 +395,7 @@ async fn handle_embedded_mode(cli: Cli) -> Result<()> {
             node_id: "cli-embedded".to_string(),
             discovery_servers: vec![],
         },
+        namespaces: Default::default(),
     };
     let primusdb = Arc::new(PrimusDB::new(config)?);
 
@@ -882,6 +883,7 @@ async fn execute_crud_operation(
         data: data.and_then(|d| serde_json::from_str(&d).ok()),
         limit,
         offset,
+        namespace: None,
     };
 
     match primusdb.execute_query(query).await {
@@ -930,6 +932,7 @@ async fn execute_advanced_operation(
         data: data.and_then(|d| serde_json::from_str(&d).ok()),
         limit: None,
         offset: None,
+        namespace: None,
     };
 
     match primusdb.execute_query(query).await {
@@ -964,6 +967,7 @@ async fn execute_table_info_operation(
         data: None,
         limit: Some(0), // No data, just info
         offset: None,
+        namespace: None,
     };
 
     match primusdb.execute_query(query).await {

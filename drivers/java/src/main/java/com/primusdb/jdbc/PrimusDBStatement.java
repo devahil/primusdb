@@ -4,6 +4,7 @@ import java.sql.*;
 import okhttp3.*;
 import com.google.gson.*;
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.util.List;
 import java.util.ArrayList;
 
@@ -66,22 +67,16 @@ public class PrimusDBStatement implements Statement {
     @Override
     public int executeUpdate(String sql) throws SQLException {
         checkClosed();
+        String upperSql = sql.trim().toUpperCase();
 
-        if (sql.toUpperCase().startsWith("INSERT")) {
-            // Simple INSERT parsing
-            String table = extractTableName(sql);
-            String values = extractValues(sql);
-
-            try {
+        try {
+            if (upperSql.startsWith("INSERT")) {
+                String table = extractTableName(sql);
+                String values = extractValues(sql);
                 String url = connection.getBaseUrl() + "/api/v1/query";
                 String jsonBody = gson.toJson(new QueryRequest("document", "Create", table, null, values, null, null));
-
                 RequestBody body = RequestBody.create(jsonBody, MediaType.parse("application/json"));
-                Request request = new Request.Builder()
-                    .url(url)
-                    .post(body)
-                    .build();
-
+                Request request = new Request.Builder().url(url).post(body).build();
                 try (Response response = httpClient.newCall(request).execute()) {
                     if (response.isSuccessful()) {
                         String responseBody = response.body().string();
@@ -91,12 +86,179 @@ public class PrimusDBStatement implements Statement {
                         throw new SQLException("Insert failed: " + response.message());
                     }
                 }
-            } catch (IOException e) {
-                throw new SQLException("Network error: " + e.getMessage(), e);
+            } else if (upperSql.startsWith("UPDATE")) {
+                String table = extractTableName(sql);
+                String url = connection.getBaseUrl() + "/api/v1/query";
+                JsonObject data = new JsonObject();
+                data.addProperty("storage_type", "document");
+                data.addProperty("operation", "Update");
+                data.addProperty("table", table);
+                String jsonBody = gson.toJson(data);
+                RequestBody body = RequestBody.create(jsonBody, MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(body).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Update failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("DELETE")) {
+                String table = extractTableName(sql);
+                String url = connection.getBaseUrl() + "/api/v1/query";
+                JsonObject data = new JsonObject();
+                data.addProperty("storage_type", "document");
+                data.addProperty("operation", "Delete");
+                data.addProperty("table", table);
+                String jsonBody = gson.toJson(data);
+                RequestBody body = RequestBody.create(jsonBody, MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(body).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Delete failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("ALTER TABLE")) {
+                String table = extractAlterTableName(sql);
+                if (upperSql.contains("ADD COLUMN") || upperSql.contains("ADD")) {
+                    String columnDef = extractAfterKeyword(sql, "ADD COLUMN", "ADD");
+                    JsonObject field = new JsonObject();
+                    field.addProperty("name", extractColumnName(columnDef));
+                    field.addProperty("type", extractColumnType(columnDef));
+                    String url = connection.getBaseUrl() + "/api/v1/ddl/relational/" + table + "/column/add";
+                    RequestBody body = RequestBody.create(field.toString(), MediaType.parse("application/json"));
+                    Request request = new Request.Builder().url(url).post(body).build();
+                    try (Response response = httpClient.newCall(request).execute()) {
+                        if (response.isSuccessful()) return 1;
+                        else throw new SQLException("Add column failed: " + response.message());
+                    }
+                } else if (upperSql.contains("DROP COLUMN") || upperSql.contains("DROP")) {
+                    String columnName = extractColumnName(extractAfterKeyword(sql, "DROP COLUMN", "DROP"));
+                    String url = connection.getBaseUrl() + "/api/v1/ddl/relational/" + table + "/column/" + columnName;
+                    Request request = new Request.Builder().url(url).delete().build();
+                    try (Response response = httpClient.newCall(request).execute()) {
+                        if (response.isSuccessful()) return 1;
+                        else throw new SQLException("Drop column failed: " + response.message());
+                    }
+                } else if (upperSql.contains("MODIFY COLUMN") || upperSql.contains("MODIFY")) {
+                    String columnDef = extractAfterKeyword(sql, "MODIFY COLUMN", "MODIFY");
+                    JsonObject field = new JsonObject();
+                    field.addProperty("name", extractColumnName(columnDef));
+                    field.addProperty("type", extractColumnType(columnDef));
+                    String url = connection.getBaseUrl() + "/api/v1/ddl/relational/" + table + "/column";
+                    RequestBody body = RequestBody.create(field.toString(), MediaType.parse("application/json"));
+                    Request request = new Request.Builder().url(url).put(body).build();
+                    try (Response response = httpClient.newCall(request).execute()) {
+                        if (response.isSuccessful()) return 1;
+                        else throw new SQLException("Modify column failed: " + response.message());
+                    }
+                } else if (upperSql.contains("RENAME TO") || upperSql.contains("RENAME")) {
+                    String newName = extractAfterKeyword(sql, "RENAME TO", "RENAME").trim();
+                    JsonObject data = new JsonObject();
+                    data.addProperty("new_name", newName);
+                    String url = connection.getBaseUrl() + "/api/v1/ddl/relational/" + table + "/rename";
+                    RequestBody body = RequestBody.create(data.toString(), MediaType.parse("application/json"));
+                    Request request = new Request.Builder().url(url).post(body).build();
+                    try (Response response = httpClient.newCall(request).execute()) {
+                        if (response.isSuccessful()) return 1;
+                        else throw new SQLException("Rename table failed: " + response.message());
+                    }
+                } else {
+                    throw new SQLFeatureNotSupportedException("ALTER TABLE operation not supported: " + sql);
+                }
+            } else if (upperSql.startsWith("CREATE SEQUENCE")) {
+                String seqName = extractAfterKeyword(sql, "CREATE SEQUENCE", "SEQUENCE").trim().split("\\s+")[0];
+                JsonObject sequence = new JsonObject();
+                sequence.addProperty("name", seqName);
+                String url = connection.getBaseUrl() + "/api/v1/sequence/relational";
+                RequestBody body = RequestBody.create(sequence.toString(), MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(body).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Create sequence failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("DROP SEQUENCE")) {
+                String seqName = extractAfterKeyword(sql, "DROP SEQUENCE", "SEQUENCE").trim().split("\\s+")[0];
+                String url = connection.getBaseUrl() + "/api/v1/sequence/relational/" + seqName;
+                Request request = new Request.Builder().url(url).delete().build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Drop sequence failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("CREATE VIEW")) {
+                String viewName = extractAfterKeyword(sql, "CREATE VIEW", "VIEW").trim().split("\\s+")[0];
+                String queryDef = extractViewQuery(sql);
+                JsonObject view = new JsonObject();
+                view.addProperty("name", viewName);
+                view.addProperty("query_definition", queryDef);
+                String url = connection.getBaseUrl() + "/api/v1/view/relational";
+                RequestBody body = RequestBody.create(view.toString(), MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(body).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Create view failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("DROP VIEW")) {
+                String viewName = extractAfterKeyword(sql, "DROP VIEW", "VIEW").trim().split("\\s+")[0];
+                String url = connection.getBaseUrl() + "/api/v1/view/relational/" + viewName;
+                Request request = new Request.Builder().url(url).delete().build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Drop view failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("CREATE TRIGGER")) {
+                String[] parts = extractTriggerParts(sql);
+                String trigName = parts[0];
+                String trigTable = parts[1];
+                JsonObject trigger = new JsonObject();
+                trigger.addProperty("name", trigName);
+                trigger.addProperty("table_name", trigTable);
+                trigger.addProperty("timing", "AFTER");
+                trigger.addProperty("event", "INSERT");
+                trigger.addProperty("operation", "EXECUTE");
+                String url = connection.getBaseUrl() + "/api/v1/trigger/relational/" + trigTable;
+                RequestBody body = RequestBody.create(trigger.toString(), MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(body).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Create trigger failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("DROP TRIGGER")) {
+                String rest = upperSql.substring("DROP TRIGGER".length()).trim();
+                String trigName = rest.split("\\s+")[0];
+                int onIdx = rest.toUpperCase().indexOf("ON");
+                String trigTable = "public";
+                if (onIdx != -1) {
+                    trigTable = rest.substring(onIdx + 2).trim().split("\\s+")[0];
+                }
+                String url = connection.getBaseUrl() + "/api/v1/trigger/relational/" + trigTable + "/" + trigName;
+                Request request = new Request.Builder().url(url).delete().build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Drop trigger failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("TRUNCATE")) {
+                String table = extractTableName(sql);
+                boolean cascade = upperSql.contains("CASCADE");
+                String url = connection.getBaseUrl() + "/api/v1/crud/relational/" + table + "/truncate";
+                JsonObject body = new JsonObject();
+                body.addProperty("cascade", cascade);
+                RequestBody reqBody = RequestBody.create(body.toString(), MediaType.parse("application/json"));
+                Request request = new Request.Builder().url(url).post(reqBody).build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Truncate failed: " + response.message());
+                }
+            } else if (upperSql.startsWith("DROP TABLE")) {
+                String table = extractTableName(sql);
+                String url = connection.getBaseUrl() + "/api/v1/crud/relational/" + table;
+                Request request = new Request.Builder().url(url).delete().build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) return 1;
+                    else throw new SQLException("Drop table failed: " + response.message());
+                }
+            } else {
+                throw new SQLFeatureNotSupportedException("SQL operation not supported: " + sql);
             }
+        } catch (IOException e) {
+            throw new SQLException("Network error: " + e.getMessage(), e);
         }
-
-        throw new SQLFeatureNotSupportedException("UPDATE/DELETE not yet implemented");
     }
 
     @Override
@@ -171,6 +333,73 @@ public class PrimusDBStatement implements Statement {
             return sql.substring(valuesIndex + 6).trim();
         }
         return "{}";
+    }
+
+    private String extractAlterTableName(String sql) {
+        // ALTER TABLE table_name ...
+        String upperSql = sql.toUpperCase();
+        int alterIdx = upperSql.indexOf("ALTER TABLE");
+        if (alterIdx != -1) {
+            int tableStart = alterIdx + 11;
+            while (tableStart < sql.length() && sql.charAt(tableStart) == ' ') tableStart++;
+            int tableEnd = sql.indexOf(" ", tableStart);
+            if (tableEnd == -1) tableEnd = sql.length();
+            // Handle quoted identifiers
+            String name = sql.substring(tableStart, tableEnd).trim();
+            if (name.startsWith("\"") || name.startsWith("`")) name = name.substring(1, name.length() - 1);
+            return name;
+        }
+        return "unknown";
+    }
+
+    private String extractAfterKeyword(String sql, String primaryKeyword, String fallbackKeyword) {
+        String upperSql = sql.toUpperCase();
+        int idx = upperSql.indexOf(primaryKeyword);
+        if (idx == -1) idx = upperSql.indexOf(fallbackKeyword);
+        if (idx != -1) {
+            int start = idx + (primaryKeyword.equals(fallbackKeyword) || idx == upperSql.indexOf(primaryKeyword) ? primaryKeyword.length() : fallbackKeyword.length());
+            return sql.substring(start).trim();
+        }
+        return "";
+    }
+
+    private String extractColumnName(String columnDef) {
+        String trimmed = columnDef.trim().split("\\s+")[0];
+        if (trimmed.startsWith("\"") || trimmed.startsWith("`")) trimmed = trimmed.substring(1, trimmed.length() - 1);
+        return trimmed;
+    }
+
+    private String extractColumnType(String columnDef) {
+        String[] parts = columnDef.trim().split("\\s+");
+        if (parts.length > 1) return parts[1];
+        return "TEXT";
+    }
+
+    private String extractViewQuery(String sql) {
+        String upperSql = sql.toUpperCase();
+        int asIdx = upperSql.indexOf(" AS ");
+        if (asIdx != -1) {
+            return sql.substring(asIdx + 4).trim();
+        }
+        return sql;
+    }
+
+    private String[] extractTriggerParts(String sql) {
+        String upperSql = sql.toUpperCase();
+        // CREATE TRIGGER name ON table ...
+        int trigIdx = upperSql.indexOf("CREATE TRIGGER");
+        int onIdx = upperSql.indexOf(" ON ");
+        String name = "unknown";
+        String table = "public";
+        if (trigIdx != -1 && onIdx != -1) {
+            int nameStart = trigIdx + 14;
+            name = sql.substring(nameStart, onIdx).trim().split("\\s+")[0];
+            int tableStart = onIdx + 4;
+            int tableEnd = sql.indexOf(" ", tableStart);
+            if (tableEnd == -1) tableEnd = sql.length();
+            table = sql.substring(tableStart, tableEnd).trim();
+        }
+        return new String[]{name, table};
     }
 
     // Minimal implementations for other methods

@@ -7,7 +7,7 @@ for clustered cache environments.
 
 ## Architecture Overview
 
-```
+```text
 Cache Consensus Engine Architecture
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -68,7 +68,7 @@ Cache Consensus Engine Architecture
 ## Usage Examples
 
 ### Basic Consensus Setup
-```rust
+```ignore
 use primusdb::cache::consensus::{CacheConsensusEngine, ConsensusConfig};
 
 // Configure consensus engine
@@ -88,7 +88,7 @@ let mut consensus = CacheConsensusEngine::new(consensus_config).await?;
 ```
 
 ### Consensus-Based Cache Operations
-```rust
+```ignore
 // Validate cache operation with consensus
 let operation = CacheOperation::Put {
     key: "user:123".to_string(),
@@ -107,7 +107,7 @@ if validation.is_valid {
 ```
 
 ### Integrity Verification
-```rust
+```ignore
 // Verify cache cluster integrity
 let integrity_report = consensus.verify_cluster_integrity().await?;
 println!("Cluster integrity: {}%", integrity_report.integrity_score);
@@ -120,7 +120,7 @@ if poisoning_report.attacks_detected > 0 {
 ```
 
 ### Consensus Monitoring
-```rust
+```ignore
 // Get consensus statistics
 let stats = consensus.get_statistics().await?;
 println!("Consensus success rate: {:.2}%", stats.success_rate);
@@ -131,7 +131,7 @@ println!("Active validators: {}", stats.active_validators);
 ## Consensus Protocols
 
 ### 1. Pre-Operation Validation
-```rust
+```ignore
 // Before executing any cache operation
 let proposal = OperationProposal {
     operation: cache_operation,
@@ -146,7 +146,7 @@ if consensus_result.approved {
 ```
 
 ### 2. Post-Operation Verification
-```rust
+```ignore
 // After executing cache operation
 let verification = consensus.verify_execution(operation_id).await?;
 if !verification.integrity_maintained {
@@ -156,7 +156,7 @@ if !verification.integrity_maintained {
 ```
 
 ### 3. Continuous Integrity Monitoring
-```rust
+```ignore
 // Background integrity checking
 consensus.start_integrity_monitoring().await?;
 
@@ -200,7 +200,7 @@ loop {
 ## Configuration Options
 
 ### ConsensusConfig
-```rust
+```ignore
 pub struct ConsensusConfig {
     pub validators: Vec<String>,              // Validator node addresses
     pub quorum_size: usize,                   // Required consensus votes
@@ -215,7 +215,7 @@ pub struct ConsensusConfig {
 ## Integration Points
 
 ### With Cache Cluster
-```rust
+```ignore
 // Consensus validates all cluster operations
 let cluster_operation = ClusterCacheOperation {
     operation: CacheOperation::Put { key, data },
@@ -229,7 +229,7 @@ if consensus_validation.approved {
 ```
 
 ### With Node Manager
-```rust
+```ignore
 // Node manager uses consensus for cluster decisions
 let scaling_decision = node_manager.propose_scaling(new_node_count).await?;
 let consensus_approval = consensus.validate_scaling_decision(scaling_decision).await?;
@@ -243,9 +243,7 @@ for distributed cache operations, preventing data poisoning and ensuring
 100% operational reliability in clustered environments.
 */
 
-use super::cache::{CacheEntry, CacheError};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]

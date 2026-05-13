@@ -7,7 +7,7 @@ keys for mutual authentication and secure communication.
 
 ## Architecture
 
-```
+```text
 Cluster Authentication System
 ══════════════════════════════════════════════════════════════════════
 
@@ -50,7 +50,7 @@ Cluster Authentication System
 └─────────────────────────────────────────────────────────────────┘
 */
 use argon2::password_hash::{rand_core::OsRng, SaltString};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::{Argon2, PasswordHasher};
 use chrono::{DateTime, Duration, Utc};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
@@ -200,15 +200,15 @@ impl ClusterAuthManager {
     pub fn initialize_genesis(&mut self, password: &str) -> crate::Result<GenesisBlock> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
-        
+
         let genesis_key_hash = argon2
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| crate::Error::CryptoError(format!("Genesis key hashing failed: {}", e)))?
             .to_string();
 
         let (private_key, public_key) = Self::generate_keypair()?;
-        
-        let private_key_hash = {
+
+        let _private_key_hash = {
             let mut hasher = Sha256::new();
             hasher.update(private_key.as_bytes());
             hex::encode(hasher.finalize())
@@ -226,7 +226,7 @@ impl ClusterAuthManager {
         };
 
         let block_id = format!("genesis_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        
+
         let genesis_block = GenesisBlock {
             block_id: block_id.clone(),
             network_id: self.config.network_id.clone(),
@@ -244,7 +244,12 @@ impl ClusterAuthManager {
                     region: None,
                     datacenter: None,
                     capabilities: vec!["read".to_string(), "write".to_string()],
-                    storage_types: vec!["columnar".to_string(), "vector".to_string(), "document".to_string(), "relational".to_string()],
+                    storage_types: vec![
+                        "columnar".to_string(),
+                        "vector".to_string(),
+                        "document".to_string(),
+                        "relational".to_string(),
+                    ],
                     total_storage_gb: 1000,
                     available_storage_gb: 900,
                     cpu_cores: 8,
@@ -259,20 +264,26 @@ impl ClusterAuthManager {
                 max_validators: 21,
                 fault_tolerance: 0.33,
             },
-            previous_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            previous_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         };
 
-        let block_hash = self.compute_block_hash(&genesis_block)?;
-        
-        let mut final_block = genesis_block.clone();
-        
+        let _block_hash = self.compute_block_hash(&genesis_block)?;
+
+        let final_block = genesis_block.clone();
+
         self.genesis_key = Some(genesis_key);
         self.genesis_block = Some(final_block);
 
         Ok(genesis_block)
     }
 
-    pub fn join_network(&mut self, node_id: String, metadata: NodeMetadata, password: &str) -> crate::Result<NodeIdentity> {
+    pub fn join_network(
+        &mut self,
+        node_id: String,
+        metadata: NodeMetadata,
+        password: &str,
+    ) -> crate::Result<NodeIdentity> {
         let expected_hash = {
             let mut hasher = Sha256::new();
             hasher.update(password.as_bytes());
@@ -280,13 +291,19 @@ impl ClusterAuthManager {
         };
 
         if self.nodes.contains_key(&node_id) {
-            return Err(crate::Error::ClusterError("Node already exists".to_string()));
+            return Err(crate::Error::ClusterError(
+                "Node already exists".to_string(),
+            ));
         }
 
-        let (private_key, public_key) = Self::generate_keypair()?;
+        let (_private_key, public_key) = Self::generate_keypair()?;
 
-        let cert_id = format!("cert_{}_{}", node_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        
+        let cert_id = format!(
+            "cert_{}_{}",
+            node_id,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
         let certificate = NodeCertificate {
             cert_id: cert_id.clone(),
             node_id: node_id.clone(),
@@ -319,15 +336,26 @@ impl ClusterAuthManager {
         Ok(identity)
     }
 
-    pub fn authenticate_node(&self, node_id: &str, challenge: &str, response: &str) -> crate::Result<bool> {
-        let expected_hash = self.valid_node_signatures.get(node_id)
+    pub fn authenticate_node(
+        &self,
+        node_id: &str,
+        challenge: &str,
+        response: &str,
+    ) -> crate::Result<bool> {
+        let expected_hash = self
+            .valid_node_signatures
+            .get(node_id)
             .ok_or_else(|| crate::Error::AuthenticationError("Node not registered".to_string()))?;
 
-        let identity = self.nodes.get(node_id)
+        let identity = self
+            .nodes
+            .get(node_id)
             .ok_or_else(|| crate::Error::ClusterError("Node not found".to_string()))?;
 
         if identity.status == NodeStatus::Offline {
-            return Err(crate::Error::AuthenticationError("Node is offline".to_string()));
+            return Err(crate::Error::AuthenticationError(
+                "Node is offline".to_string(),
+            ));
         }
 
         let expected_response = {
@@ -344,30 +372,35 @@ impl ClusterAuthManager {
         self.rng.fill(&mut challenge_bytes).map_err(|e| {
             crate::Error::CryptoError(format!("Failed to generate challenge: {}", e))
         })?;
-        
+
         Ok(hex::encode(&challenge_bytes))
     }
 
     pub fn update_node_status(&mut self, node_id: &str, status: NodeStatus) -> crate::Result<()> {
-        let node = self.nodes.get_mut(node_id)
+        let node = self
+            .nodes
+            .get_mut(node_id)
             .ok_or_else(|| crate::Error::ClusterError("Node not found".to_string()))?;
-        
+
         node.status = status;
         node.last_heartbeat = Utc::now();
-        
+
         Ok(())
     }
 
     pub fn revoke_node(&mut self, node_id: &str) -> crate::Result<()> {
         if let Some(identity) = self.nodes.get(node_id) {
-            self.revoked_certs.insert(identity.certificate.cert_id.clone(), Utc::now());
+            self.revoked_certs
+                .insert(identity.certificate.cert_id.clone(), Utc::now());
         }
-        
-        let node = self.nodes.get_mut(node_id)
+
+        let node = self
+            .nodes
+            .get_mut(node_id)
             .ok_or_else(|| crate::Error::ClusterError("Node not found".to_string()))?;
-        
+
         node.status = NodeStatus::Offline;
-        
+
         Ok(())
     }
 
@@ -394,8 +427,9 @@ impl ClusterAuthManager {
 
         let block = self.genesis_block.as_ref().unwrap();
         let computed_hash = self.compute_block_hash(block)?;
-        
-        Ok(computed_hash == block.previous_hash || computed_hash.starts_with(&block.previous_hash[..8]))
+
+        Ok(computed_hash == block.previous_hash
+            || computed_hash.starts_with(&block.previous_hash[..8]))
     }
 
     fn generate_keypair() -> crate::Result<(String, String)> {
@@ -403,9 +437,9 @@ impl ClusterAuthManager {
         let rng = ring::rand::SystemRandom::new();
         rng.fill(&mut private_key_bytes)
             .map_err(|e| crate::Error::CryptoError(format!("Failed to generate key: {}", e)))?;
-        
+
         let private_key = hex::encode(&private_key_bytes);
-        
+
         let mut hasher = Sha256::new();
         hasher.update(&private_key_bytes);
         hasher.update(b"public_key_derivation");
@@ -418,7 +452,7 @@ impl ClusterAuthManager {
         let mut hasher = Sha256::new();
         hasher.update(data.as_bytes());
         hasher.update(_private_key.as_bytes());
-        
+
         Ok(hex::encode(hasher.finalize()))
     }
 
@@ -430,7 +464,7 @@ impl ClusterAuthManager {
         hasher.update(block.created_at.to_rfc3339().as_bytes());
         hasher.update(block.genesis_key.public_key.as_bytes());
         hasher.update(block.previous_hash.as_bytes());
-        
+
         Ok(hex::encode(hasher.finalize()))
     }
 
@@ -474,7 +508,9 @@ pub struct ClusterAuthService {
 impl ClusterAuthService {
     pub fn new(config: ClusterAuthConfig) -> crate::Result<Self> {
         Ok(Self {
-            manager: std::sync::Arc::new(tokio::sync::RwLock::new(ClusterAuthManager::new(config)?)),
+            manager: std::sync::Arc::new(tokio::sync::RwLock::new(ClusterAuthManager::new(
+                config,
+            )?)),
         })
     }
 
@@ -483,7 +519,10 @@ impl ClusterAuthService {
         manager.initialize_genesis(password)
     }
 
-    pub async fn join_network(&self, request: NodeRegistrationRequest) -> crate::Result<NodeIdentity> {
+    pub async fn join_network(
+        &self,
+        request: NodeRegistrationRequest,
+    ) -> crate::Result<NodeIdentity> {
         let mut manager = self.manager.write().await;
         manager.join_network(request.node_id, request.metadata, &request.password)
     }
@@ -491,10 +530,10 @@ impl ClusterAuthService {
     pub async fn authenticate_node(&self, request: NodeAuthRequest) -> crate::Result<bool> {
         let manager = self.manager.read().await;
         let challenge = manager.generate_auth_challenge()?;
-        
+
         drop(manager);
-        
-        let mut manager = self.manager.write().await;
+
+        let manager = self.manager.write().await;
         manager.authenticate_node(&request.node_id, &challenge, &request.challenge_response)
     }
 

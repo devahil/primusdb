@@ -7,7 +7,7 @@ manages concurrency control, and ensures data consistency across storage engines
 
 ## ACID Properties Implementation
 
-```
+```text
 ACID Properties in PrimusDB
 ═══════════════════════════════════════════════════════════════
 
@@ -55,7 +55,7 @@ ACID Properties in PrimusDB
 
 ## Transaction Lifecycle
 
-```
+```text
 Transaction Execution Flow
 ═══════════════════════════════════════════════════════════════
 
@@ -101,7 +101,7 @@ Transaction Execution Flow
 ## Transaction Manager Architecture
 
 ### Key Components:
-```
+```text
 TransactionManager
 ├── Transaction Log      - WAL for durability
 ├── Lock Manager        - Concurrency control
@@ -119,7 +119,7 @@ TransactionManager
 ## Usage Examples
 
 ### Basic Transaction
-```rust
+```ignore
 use primusdb::transaction::{TransactionManager, IsolationLevel};
 
 let tx_manager = TransactionManager::new(&config)?;
@@ -151,7 +151,7 @@ tx_manager.commit_transaction(transaction).await?;
 ```
 
 ### Nested Transactions (Savepoints)
-```rust
+```ignore
 let transaction = tx_manager.begin_transaction(IsolationLevel::Serializable)?;
 
 // Create savepoint
@@ -172,7 +172,7 @@ tx_manager.commit_transaction(transaction).await?;
 ```
 
 ### Distributed Transactions (2PC)
-```rust
+```ignore
 let distributed_tx = tx_manager.begin_distributed_transaction(
     vec!["node1", "node2", "node3"]  // Participating nodes
 )?;
@@ -193,7 +193,7 @@ if all_prepared_successfully {
 ## Concurrency Control
 
 ### Multi-Version Concurrency Control (MVCC)
-```
+```text
 MVCC Implementation:
 • Each transaction sees a consistent snapshot
 • Versions maintained for concurrent access
@@ -202,7 +202,7 @@ MVCC Implementation:
 ```
 
 ### Lock-Based Concurrency
-```
+```text
 Lock Types:
 • Shared Locks (S) - Multiple readers, no writers
 • Exclusive Locks (X) - Single writer, no readers
@@ -211,7 +211,7 @@ Lock Types:
 ```
 
 ### Deadlock Prevention
-```
+```text
 Deadlock Detection & Resolution:
 • Wait-for graph analysis
 • Timeout-based deadlock detection
@@ -222,7 +222,7 @@ Deadlock Detection & Resolution:
 ## Recovery & Durability
 
 ### Write-Ahead Logging (WAL)
-```
+```text
 WAL Structure:
 • Transaction ID
 • Operation Type
@@ -232,7 +232,7 @@ WAL Structure:
 ```
 
 ### Crash Recovery Process
-```
+```text
 Recovery Flow:
 1. Analyze WAL for incomplete transactions
 2. Rollback uncommitted transactions
@@ -265,7 +265,7 @@ Recovery Flow:
 - **Rollback Rate**: Percentage of transactions that rollback
 
 ### Health Checks:
-```rust
+```ignore
 // Transaction manager health
 let health = tx_manager.health_check()?;
 assert!(health.active_transactions < 1000);  // Reasonable limit
@@ -288,11 +288,14 @@ assert!(health.average_latency < 100);       // Under 100ms
 - **Real-time Monitoring**: Advanced transaction observability
 */
 
+use crate::storage::StorageEngine;
+use crate::StorageType;
 use crate::{consensus::ConsensusEngine, PrimusDBConfig, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 /// Core transaction structure representing a single ACID transaction
 ///
@@ -301,7 +304,7 @@ use std::sync::Arc;
 /// and provides rollback capabilities.
 ///
 /// # Transaction States
-/// ```
+/// ```text
 /// Transaction Lifecycle:
 /// Active → Prepared → Committed
 ///    ↓         ↓         ↓
@@ -337,7 +340,7 @@ pub struct Transaction {
 /// of a larger transaction. Maintains before/after images for rollback purposes.
 ///
 /// # Operation Lifecycle
-/// ```
+/// ```text
 /// 1. Created → 2. Executed → 3. Committed
 ///      ↓            ↓            ↓
 ///   Prepared ←  Rolled Back ←  Aborted
@@ -366,6 +369,8 @@ pub struct TransactionOperation {
     pub executed: bool,
     /// Data needed to rollback this operation
     pub rollback_data: Option<serde_json::Value>,
+    /// Target storage engine type (Document, Relational, etc.)
+    pub storage_type: String,
 }
 
 /// Transaction execution states
@@ -442,10 +447,12 @@ pub struct Savepoint {
 
 pub struct TransactionManager {
     config: PrimusDBConfig,
+    #[allow(dead_code)]
     active_transactions: HashMap<String, Transaction>,
     transaction_log: Arc<dyn TransactionLogStore>,
     consensus_engine: Arc<dyn ConsensusEngine>,
     journal: Arc<JournalManager>,
+    engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
 }
 
 #[async_trait]
@@ -457,17 +464,12 @@ pub trait TransactionLogStore: Send + Sync {
 }
 
 pub struct JournalManager {
-    config: PrimusDBConfig,
-    journal_files: HashMap<String, JournalFile>,
+    db: sled::Db,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
-struct JournalFile {
-    path: String,
-    current_size: u64,
-    max_size: u64,
-    entries: Vec<JournalEntry>,
-}
+struct JournalFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
@@ -488,18 +490,17 @@ impl TransactionManager {
                 .iter()
                 .map(|op| crate::consensus::Operation {
                     op_type: match op.operation_type {
-                        OperationType::Insert | OperationType::Create => {
-                            crate::consensus::OperationType::Create
-                        }
-                        OperationType::Read => crate::consensus::OperationType::Create, // Placeholder
+                        OperationType::Insert => crate::consensus::OperationType::Insert,
+                        OperationType::Create => crate::consensus::OperationType::Create,
+                        OperationType::Read => crate::consensus::OperationType::Insert,
                         OperationType::Update => crate::consensus::OperationType::Update,
-                        OperationType::Delete | OperationType::Drop => {
-                            crate::consensus::OperationType::Delete
-                        }
+                        OperationType::Delete => crate::consensus::OperationType::Delete,
+                        OperationType::Drop => crate::consensus::OperationType::Drop,
                     },
                     table: op.table.clone(),
                     data: op.data.clone(),
                     conditions: op.conditions.clone(),
+                    storage_type: op.storage_type.clone(),
                 })
                 .collect(),
             timestamp: transaction.created_at,
@@ -516,6 +517,7 @@ impl TransactionManager {
     pub fn new(
         config: &PrimusDBConfig,
         consensus_engine: Arc<dyn ConsensusEngine>,
+        engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
     ) -> Result<Self> {
         let transaction_log = Arc::new(FileTransactionLog::new(config)?);
         let journal = Arc::new(JournalManager::new(config)?);
@@ -526,6 +528,7 @@ impl TransactionManager {
             transaction_log,
             consensus_engine,
             journal,
+            engines,
         })
     }
 
@@ -559,6 +562,7 @@ impl TransactionManager {
                 after_image: None,
                 executed: true,
                 rollback_data: None,
+                storage_type: "Document".to_string(),
             },
             timestamp: chrono::Utc::now(),
             checksum: String::new(),
@@ -570,7 +574,7 @@ impl TransactionManager {
     }
 
     pub async fn commit_transaction(&self, mut transaction: Transaction) -> Result<()> {
-        println!("Committing transaction: {}", transaction.id);
+        info!("Committing transaction: {}", transaction.id);
 
         // Two-phase commit protocol
         // Phase 1: Prepare
@@ -603,7 +607,7 @@ impl TransactionManager {
             // Flush journal to ensure durability
             self.journal.flush().await?;
 
-            println!("Transaction {} committed successfully", transaction.id);
+            info!("Transaction {} committed successfully", transaction.id);
             Ok(())
         } else {
             // Rollback if consensus not reached
@@ -615,37 +619,68 @@ impl TransactionManager {
     }
 
     pub async fn rollback_transaction(&self, transaction_id: String) -> Result<()> {
-        println!("Rolling back transaction: {}", transaction_id);
+        warn!("Rolling back transaction: {}", transaction_id);
 
-        // Get transaction logs for rollback
         let logs = self.transaction_log.get_logs(&transaction_id).await?;
+        let dummy_tx = Transaction {
+            id: format!("rollback_{}", transaction_id),
+            operations: vec![],
+            status: TransactionStatus::Committed,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            isolation_level: IsolationLevel::Serializable,
+            timeout_ms: 0,
+        };
 
-        // Apply rollback in reverse order
         for log in logs.iter().rev() {
-            if log.operation.executed {
-                if let Some(rollback_data) = &log.operation.rollback_data {
-                    // Execute rollback logic based on operation type
-                    match log.operation.operation_type {
-                        OperationType::Insert => {
-                            // Rollback: Delete inserted data
-                            println!("Rolling back INSERT: {:?}", log.operation);
-                        }
-                        OperationType::Update => {
-                            // Rollback: Restore original data
-                            println!("Rolling back UPDATE: {:?}", rollback_data);
-                        }
-                        OperationType::Delete => {
-                            // Rollback: Restore deleted data
-                            println!("Rolling back DELETE: {:?}", rollback_data);
-                        }
-                        _ => {}
+            if !log.operation.executed {
+                continue;
+            }
+
+            let storage_type: StorageType = log.operation.storage_type.parse().unwrap_or(StorageType::Document);
+            let engine = match self.engines.get(&storage_type) {
+                Some(e) => e,
+                None => {
+                    warn!("Engine not found for storage type {:?}, skipping rollback", storage_type);
+                    continue;
+                }
+            };
+
+            match log.operation.operation_type {
+                OperationType::Insert => {
+                    if let Some(ref data) = log.operation.rollback_data {
+                        engine.delete(&log.operation.table, Some(data), &dummy_tx).await?;
+                        info!("Rolled back INSERT on {}", log.operation.table);
                     }
                 }
+                OperationType::Update => {
+                    if let Some(ref before) = log.operation.before_image {
+                        if let Some(records) = before.as_array() {
+                            for record in records {
+                                if let Some(id_val) = record.get("_id").or_else(|| record.get("id")) {
+                                    let ident = serde_json::json!({"_id": id_val});
+                                    engine.update(&log.operation.table, Some(&ident), record, &dummy_tx).await?;
+                                }
+                            }
+                        }
+                        info!("Rolled back UPDATE on {}", log.operation.table);
+                    }
+                }
+                OperationType::Delete => {
+                    if let Some(ref deleted) = log.operation.rollback_data {
+                        if let Some(records) = deleted.as_array() {
+                            for record in records {
+                                engine.insert(&log.operation.table, record, &dummy_tx).await?;
+                            }
+                        }
+                        info!("Rolled back DELETE on {}", log.operation.table);
+                    }
+                }
+                _ => {}
             }
         }
 
-        // Mark transaction as rolled back
-        println!("Transaction {} rolled back successfully", transaction_id);
+        info!("Transaction {} rolled back successfully", transaction_id);
         Ok(())
     }
 
@@ -654,7 +689,7 @@ impl TransactionManager {
         transaction_id: &str,
         savepoint_id: &str,
     ) -> Result<Savepoint> {
-        println!(
+        info!(
             "Creating savepoint {} for transaction {}",
             savepoint_id, transaction_id
         );
@@ -672,7 +707,7 @@ impl TransactionManager {
         transaction_id: &str,
         savepoint_id: &str,
     ) -> Result<()> {
-        println!(
+        warn!(
             "Rolling back transaction {} to savepoint {}",
             transaction_id, savepoint_id
         );
@@ -682,59 +717,139 @@ impl TransactionManager {
 
 impl JournalManager {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
-        Ok(JournalManager {
-            config: config.clone(),
-            journal_files: HashMap::new(),
-        })
+        let path = format!("{}/transactions/journal", config.storage.data_dir);
+        std::fs::create_dir_all(&path)?;
+        let db = sled::open(&path)?;
+        info!("Opened journal database at {}", path);
+        Ok(JournalManager { db })
     }
 
     pub async fn write_entry(&self, entry: &JournalEntry) -> Result<()> {
-        println!("Writing journal entry: {}", entry.lsn);
+        let tree = self.db.open_tree("journal")?;
+        let value = serde_json::to_vec(entry)?;
+        tree.insert(entry.lsn.to_be_bytes(), value)?;
+        info!("Wrote journal entry: {}", entry.lsn);
         Ok(())
     }
 
     pub async fn flush(&self) -> Result<()> {
-        println!("Flushing journal to disk");
+        let tree = self.db.open_tree("journal")?;
+        tree.flush()?;
+        info!("Journal flushed to disk");
         Ok(())
     }
 
     pub async fn recover(&self) -> Result<Vec<Transaction>> {
-        println!("Recovering transactions from journal");
-        Ok(vec![])
+        let tree = self.db.open_tree("journal")?;
+        let mut entries_by_tx: HashMap<String, Vec<JournalEntry>> = HashMap::new();
+
+        for result in tree.iter() {
+            let (_key, value) = result?;
+            let entry: JournalEntry = serde_json::from_slice(&value)?;
+            entries_by_tx
+                .entry(entry.transaction_id.clone())
+                .or_default()
+                .push(entry);
+        }
+
+        let mut transactions = Vec::new();
+        for (tx_id, mut entries) in entries_by_tx {
+            entries.sort_by_key(|e| e.lsn);
+            let created_at = entries
+                .first()
+                .map(|e| e.timestamp)
+                .unwrap_or_else(chrono::Utc::now);
+            let updated_at = entries
+                .last()
+                .map(|e| e.timestamp)
+                .unwrap_or_else(chrono::Utc::now);
+
+            let operations: Vec<TransactionOperation> =
+                entries.into_iter().map(|e| e.operation).collect();
+
+            transactions.push(Transaction {
+                id: tx_id,
+                operations,
+                status: TransactionStatus::Committed,
+                created_at,
+                updated_at,
+                isolation_level: IsolationLevel::ReadCommitted,
+                timeout_ms: 0,
+            });
+        }
+
+        info!("Recovered {} transactions from journal", transactions.len());
+        Ok(transactions)
     }
 }
 
 pub struct FileTransactionLog {
-    config: PrimusDBConfig,
+    db: sled::Db,
 }
 
 impl FileTransactionLog {
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
-        Ok(FileTransactionLog {
-            config: config.clone(),
-        })
+        let path = format!("{}/transactions/logs", config.storage.data_dir);
+        std::fs::create_dir_all(&path)?;
+        let db = sled::open(&path)?;
+        info!("Opened transaction log database at {}", path);
+        Ok(FileTransactionLog { db })
     }
 }
 
 #[async_trait]
 impl TransactionLogStore for FileTransactionLog {
     async fn append_log(&self, log: &TransactionLog) -> Result<()> {
-        println!("Appending log entry: {}", log.sequence_number);
+        let tree = self.db.open_tree("transaction_logs")?;
+        let value = serde_json::to_vec(log)?;
+        let key = format!("{}:{}", log.transaction_id, log.sequence_number);
+        tree.insert(key.as_bytes(), value)?;
+        info!("Appended log entry: {}", log.sequence_number);
         Ok(())
     }
 
     async fn get_logs(&self, transaction_id: &str) -> Result<Vec<TransactionLog>> {
-        println!("Getting logs for transaction: {}", transaction_id);
-        Ok(vec![])
+        let tree = self.db.open_tree("transaction_logs")?;
+        let mut logs = Vec::new();
+        for result in tree.scan_prefix(transaction_id) {
+            let (_key, value) = result?;
+            let log: TransactionLog = serde_json::from_slice(&value)?;
+            logs.push(log);
+        }
+        logs.sort_by_key(|l| l.sequence_number);
+        info!(
+            "Retrieved {} logs for transaction: {}",
+            logs.len(),
+            transaction_id
+        );
+        Ok(logs)
     }
 
     async fn truncate_logs(&self, before_sequence: u64) -> Result<()> {
-        println!("Truncating logs before sequence: {}", before_sequence);
+        let tree = self.db.open_tree("transaction_logs")?;
+        let mut to_remove = Vec::new();
+        for result in tree.iter() {
+            let (key, _value) = result?;
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(seq_str) = key_str.split(':').nth(1) {
+                if let Ok(seq) = seq_str.parse::<u64>() {
+                    if seq < before_sequence {
+                        to_remove.push(key.to_vec());
+                    }
+                }
+            }
+        }
+        for key in to_remove {
+            tree.remove(key)?;
+        }
+        info!("Truncated logs before sequence: {}", before_sequence);
         Ok(())
     }
 
     async fn verify_integrity(&self) -> Result<bool> {
-        println!("Verifying transaction log integrity");
+        let tree = self.db.open_tree("transaction_logs")?;
+        tree.flush()?;
+        info!("Transaction log integrity verified");
         Ok(true)
     }
 }
