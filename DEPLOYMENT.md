@@ -1,7 +1,7 @@
 # PrimusDB Deployment Guide
 =========================
 
-This guide covers deploying PrimusDB v1.2.2-alpha in various environments, from single-node installations to large-scale distributed clusters.
+This guide covers deploying PrimusDB v1.3.0-alpha in various environments, from single-node installations to large-scale federated clusters.
 
 ## Quick Start Deployment
 
@@ -785,4 +785,69 @@ global:
     health_checks: true
 ```
 
-This deployment guide provides comprehensive instructions for deploying PrimusDB in any environment, from development to enterprise production clusters.
+### Federation Deployment
+
+#### Multi-Cluster Setup
+```yaml
+# Cluster US (Coordinator)
+cluster-us:
+  server:
+    host: 10.0.0.1
+    port: 8080
+  federation:
+    enabled: true
+    federation_id: "global-fed"
+    cluster_id: "cluster-us"
+    region: "us-east-1"
+    discovery: ["10.0.0.2:8080", "10.0.0.3:8080"]
+
+# Cluster EU
+cluster-eu:
+  server:
+    host: 10.0.0.2
+    port: 8080
+  federation:
+    enabled: true
+    federation_id: "global-fed"
+    cluster_id: "cluster-eu"
+    region: "eu-west-1"
+    discovery: ["10.0.0.1:8080", "10.0.0.3:8080"]
+
+# Cluster Asia
+cluster-asia:
+  server:
+    host: 10.0.0.3
+    port: 8080
+  federation:
+    enabled: true
+    federation_id: "global-fed"
+    cluster_id: "cluster-asia"
+    region: "ap-southeast-1"
+    discovery: ["10.0.0.1:8080", "10.0.0.2:8080"]
+```
+
+```bash
+# Start federated cluster nodes
+primusdb-server --host 0.0.0.0 --port 8080 \
+  --federation-id global-fed --cluster-id cluster-us --region us-east-1 \
+  --federation-discovery cluster-eu:8080,cluster-asia:8080
+```
+
+#### DataDomain Replication
+After starting federated clusters, create DataDomains to replicate data:
+
+```bash
+# Create a global DataDomain for user data
+curl -X POST http://cluster-us:8080/api/v1/federation/domains \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "global-users",
+    "description": "User profiles replicated across all regions",
+    "replication_mode": "Quorum",
+    "storage_types": ["document"],
+    "collections": ["users"],
+    "member_clusters": ["cluster-us", "cluster-eu", "cluster-asia"]
+  }'
+```
+
+This deployment guide provides comprehensive instructions for deploying PrimusDB in any environment, from development to enterprise federated clusters.

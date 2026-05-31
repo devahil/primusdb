@@ -302,11 +302,12 @@ assert!(health.network_connectivity > 0.8); // 80% connected
 
 use crate::{PrimusDBConfig, Result};
 use async_trait::async_trait;
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Core trait defining the consensus protocol interface
 ///
@@ -417,10 +418,64 @@ pub struct Transaction {
     pub operations: Vec<Operation>,
     /// Timestamp when transaction was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Cryptographic signature proving transaction authenticity
+    /// Cryptographic signature proving transaction authenticity (hex-encoded Ed25519)
     pub signature: String,
     /// ID of the node that proposed this transaction
     pub proposer: String,
+    /// Public key of the proposer (hex-encoded Ed25519 verifying key)
+    pub public_key: String,
+}
+
+impl Transaction {
+    /// Create a canonical payload for signing (excludes signature field).
+    fn canonical_payload(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            id: &'a str,
+            operations: &'a [Operation],
+            timestamp: &'a chrono::DateTime<chrono::Utc>,
+            proposer: &'a str,
+            public_key: &'a str,
+        }
+        let p = Payload {
+            id: &self.id,
+            operations: &self.operations,
+            timestamp: &self.timestamp,
+            proposer: &self.proposer,
+            public_key: &self.public_key,
+        };
+        serde_json::to_vec(&p).unwrap_or_default()
+    }
+
+    /// Sign this transaction with an Ed25519 signing key.
+    pub fn sign(&mut self, signing_key: &SigningKey) -> Result<()> {
+        let payload = self.canonical_payload();
+        let sig = signing_key.sign(&payload);
+        self.signature = hex::encode(sig.to_bytes());
+        self.public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        Ok(())
+    }
+
+    /// Verify the Ed25519 signature on this transaction.
+    pub fn verify_signature(&self) -> Result<bool> {
+        if self.signature.is_empty() || self.public_key.is_empty() {
+            return Ok(false);
+        }
+        let sig_bytes = hex::decode(&self.signature)
+            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let pk_bytes = hex::decode(&self.public_key)
+            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes)
+            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let pk = VerifyingKey::from_bytes(
+            &pk_bytes.try_into().map_err(|_| {
+                crate::Error::CryptoError("invalid public key length".to_string())
+            })?,
+        )
+        .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let payload = self.canonical_payload();
+        Ok(pk.verify(&payload, &sig).is_ok())
+    }
 }
 
 /// Individual database operation within a transaction
@@ -780,9 +835,46 @@ impl HyperledgerStyleConsensus {
         format!("{:x}", sha2::Sha256::digest(serialized.as_bytes()))
     }
 
-    fn validate_transaction_signature(&self, _transaction: &Transaction) -> bool {
-        // Implementation for digital signature validation
-        true // Placeholder
+    fn validate_transaction_signature(&self, transaction: &Transaction) -> bool {
+        // If no signature is present, allow only if the proposer is the local node (genesis/trusted)
+        if transaction.signature.is_empty() || transaction.public_key.is_empty() {
+            warn!("Transaction {} has no signature — rejecting", transaction.id);
+            return false;
+        }
+
+        let sig_bytes = match hex::decode(&transaction.signature) {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("Transaction {} has invalid hex signature", transaction.id);
+                return false;
+            }
+        };
+        let pk_bytes = match hex::decode(&transaction.public_key) {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("Transaction {} has invalid hex public key", transaction.id);
+                return false;
+            }
+        };
+
+        let sig = match ed25519_dalek::Signature::from_slice(&sig_bytes) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        let pk = match VerifyingKey::from_bytes(
+            &pk_bytes.try_into().unwrap_or_default(),
+        ) {
+            Ok(pk) => pk,
+            Err(_) => return false,
+        };
+
+        let payload = transaction.canonical_payload();
+        let result = pk.verify(&payload, &sig).is_ok();
+        if !result {
+            warn!("Transaction {} has invalid signature", transaction.id);
+        }
+        result
     }
 
     #[allow(dead_code)]

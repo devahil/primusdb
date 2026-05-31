@@ -1,7 +1,7 @@
 # PrimusDB API Reference
 =====================
 
-This document provides comprehensive reference for PrimusDB's REST API (v1.2.3-alpha), including all endpoints, request/response formats, error codes, and usage examples.
+This document provides comprehensive reference for PrimusDB's REST API (v1.3.1-alpha), including all endpoints, request/response formats, error codes, and usage examples.
 
 ## API Overview
 
@@ -970,6 +970,8 @@ Remove a user binding from a namespace.
 
 ## Cluster Management
 
+## Cluster Gateway Management
+
 ### GET /api/v1/cluster/status
 Get cluster status information.
 
@@ -998,20 +1000,38 @@ Get cluster status information.
 }
 ```
 
-### POST /api/v1/cluster/nodes
-Register a new node in the cluster.
+### GET /api/v1/cluster/nodes
+List all registered cluster nodes.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {"node_id": "node1", "address": "10.0.0.1:8080", "status": "active"},
+    {"node_id": "node2", "address": "10.0.0.2:8080", "status": "active"}
+  ]
+}
+```
+
+### POST /api/v1/cluster/node/register
+Register a new node in the cluster (REST-style DTO).
 
 **Request Body:**
 ```json
 {
   "node_id": "node_006",
-  "address": "10.0.0.6:8080",
-  "role": "worker",
-  "resources": {
-    "cpu_cores": 8,
-    "memory_gb": 32,
-    "storage_gb": 1000
-  }
+  "host": "10.0.0.6",
+  "port": 8080,
+  "shards": []
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {"node_id": "node_006", "status": "registered"}
 }
 ```
 
@@ -1024,8 +1044,170 @@ Remove a node from the cluster.
   "success": true,
   "data": {
     "node_id": "node_006",
-    "removed_at": "2024-01-10T12:00:00Z",
-    "data_migration_status": "completed"
+    "removed_at": "2024-01-10T12:00:00Z"
+  }
+}
+```
+
+### POST /api/v1/cluster/route
+Route a request through the cluster gateway.
+
+**Request Body:**
+```json
+{
+  "strategy": "LeastLoaded",
+  "required_shard": null
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "target": "node2:8080",
+    "strategy": "LeastLoaded"
+  }
+}
+```
+
+### GET /api/v1/cluster/metrics
+Get gateway metrics (total requests, routed, failed, circuit breaks, latency).
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "total_requests": 15000,
+    "routed_requests": 14850,
+    "failed_requests": 150,
+    "circuit_breaks": 3,
+    "avg_latency_ms": 12.5,
+    "p99_latency_ms": 45.0
+  }
+}
+```
+
+## Federation Management
+
+### GET /api/v1/federation/status
+Get federation health status.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "federation_id": "my-fed",
+    "local_cluster": "cluster-us",
+    "healthy_clusters": 3,
+    "total_clusters": 3,
+    "health_ratio": 1.0
+  }
+}
+```
+
+### GET /api/v1/federation/clusters
+List all member clusters in the federation.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "cluster_id": "cluster-us",
+      "address": "10.0.0.1:8080",
+      "status": "Healthy",
+      "region": "us-east",
+      "avg_latency_ms": 5.2
+    },
+    {
+      "cluster_id": "cluster-eu",
+      "address": "10.0.0.2:8080",
+      "status": "Healthy",
+      "region": "eu-west",
+      "avg_latency_ms": 85.0
+    }
+  ]
+}
+```
+
+### GET /api/v1/federation/domains
+List all DataDomains.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "name": "global-users",
+      "description": "User data across all clusters",
+      "replication_mode": "Quorum",
+      "member_clusters": ["cluster-us", "cluster-eu", "cluster-asia"],
+      "collections": ["users"],
+      "tables": []
+    }
+  ]
+}
+```
+
+### POST /api/v1/federation/domains
+Create a new DataDomain.
+
+**Request Body:**
+```json
+{
+  "name": "global-users",
+  "description": "User data across all clusters",
+  "replication_mode": "Quorum",
+  "storage_types": ["document", "relational"],
+  "collections": ["users"],
+  "tables": ["orders"],
+  "member_clusters": ["cluster-us", "cluster-eu", "cluster-asia"]
+}
+```
+
+### POST /api/v1/federation/domains/{name}/join
+Join this cluster to a DataDomain.
+
+**Request Body:**
+```json
+{
+  "collections": ["users", "profiles"],
+  "storage_types": ["document"],
+  "replication_mode": "Async"
+}
+```
+
+### POST /api/v1/federation/domains/{name}/leave
+Leave a DataDomain.
+
+**Request Body:** `{}`
+
+### POST /api/v1/federation/domains/{name}/balance
+Trigger rebalance for a DataDomain.
+
+**Request Body:** `{}`
+
+### GET /api/v1/federation/metrics
+Get federation metrics.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "federation_id": "my-fed",
+    "healthy_clusters": 3,
+    "suspected_clusters": 0,
+    "offline_clusters": 0,
+    "total_domains": 2,
+    "domains": [
+      {"name": "global-users", "member_count": 3, "healthy_members": 3}
+    ]
   }
 }
 ```
@@ -1235,17 +1417,37 @@ Disable encryption for a document collection.
 
 ## Key-Value Store (CouchDB-Compatible API)
 
-### PUT /api/v1/kv/{database}
+All Key-Value endpoints support an optional `?namespace=` query parameter for namespace isolation. When namespaces are enabled (default), the database name is resolved through the namespace hierarchy, ensuring multi-tenant data isolation.
+
+### PUT /api/v1/kv/{database}?namespace={ns}
 Create a new Key-Value database.
 
-### GET /api/v1/kv/{database}
+**Query Parameters:**
+- `namespace` (optional): Namespace path (e.g., `myorg.production`)
+
+---
+
+### GET /api/v1/kv/{database}?namespace={ns}
 Get database information (doc count, size, etc.).
 
-### DELETE /api/v1/kv/{database}
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### DELETE /api/v1/kv/{database}?namespace={ns}
 Delete a Key-Value database and all its documents.
 
-### PUT /api/v1/kv/{database}/{doc_id}
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### PUT /api/v1/kv/{database}/{doc_id}?namespace={ns}
 Create or update a document.
+
+**Query Parameters:**
+- `namespace` (optional): Namespace path
 
 **Request Body:**
 ```json
@@ -1257,17 +1459,41 @@ Create or update a document.
 }
 ```
 
-### GET /api/v1/kv/{database}/{doc_id}
+---
+
+### GET /api/v1/kv/{database}/{doc_id}?namespace={ns}
 Get a document by ID.
 
-### DELETE /api/v1/kv/{database}/{doc_id}?rev={rev}
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### DELETE /api/v1/kv/{database}/{doc_id}?rev={rev}&namespace={ns}
 Delete a document (requires current revision).
 
-### GET /api/v1/kv/{database}/_all_docs
+**Query Parameters:**
+- `rev` (required): Current document revision
+- `namespace` (optional): Namespace path
+
+---
+
+### GET /api/v1/kv/{database}/_all_docs?namespace={ns}
 List all documents. Supports `?include_docs=true`, `?limit=`, `?skip=`.
 
-### POST /api/v1/kv/{database}/_find
+**Query Parameters:**
+- `include_docs` (optional): Include full document bodies (`true`/`false`)
+- `limit` (optional): Maximum number of rows
+- `skip` (optional): Number of rows to skip
+- `namespace` (optional): Namespace path
+
+---
+
+### POST /api/v1/kv/{database}/_find?namespace={ns}
 Find documents using Mango-style query selectors.
+
+**Query Parameters:**
+- `namespace` (optional): Namespace path
 
 **Request Body:**
 ```json
@@ -1279,8 +1505,13 @@ Find documents using Mango-style query selectors.
 }
 ```
 
-### POST /api/v1/kv/{database}/_bulk_docs
+---
+
+### POST /api/v1/kv/{database}/_bulk_docs?namespace={ns}
 Insert or update multiple documents in bulk.
+
+**Query Parameters:**
+- `namespace` (optional): Namespace path
 
 **Request Body:**
 ```json
@@ -1290,8 +1521,13 @@ Insert or update multiple documents in bulk.
 }
 ```
 
-### POST /api/v1/kv/{database}/_index
+---
+
+### POST /api/v1/kv/{database}/_index?namespace={ns}
 Create a new index for Mango queries.
+
+**Query Parameters:**
+- `namespace` (optional): Namespace path
 
 **Request Body:**
 ```json
@@ -1301,20 +1537,45 @@ Create a new index for Mango queries.
 }
 ```
 
-### GET /api/v1/kv/{database}/_index
+---
+
+### GET /api/v1/kv/{database}/_index?namespace={ns}
 List all indexes in the database.
 
-### POST /api/v1/kv/{database}/_compact
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### POST /api/v1/kv/{database}/_compact?namespace={ns}
 Compact the database to reclaim space.
 
-### POST /api/v1/kv/{database}/_ensure_full_commit
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### POST /api/v1/kv/{database}/_ensure_full_commit?namespace={ns}
 Ensure all writes are flushed to disk.
 
-### GET /api/v1/kv/{database}/_rev_limit
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### GET /api/v1/kv/{database}/_rev_limit?namespace={ns}
 Get the revision limit for conflict resolution.
 
-### PUT /api/v1/kv/{database}/_rev_limit
+**Query Parameters:**
+- `namespace` (optional): Namespace path
+
+---
+
+### PUT /api/v1/kv/{database}/_rev_limit?namespace={ns}
 Set the revision limit.
+
+**Query Parameters:**
+- `namespace` (optional): Namespace path
 
 **Request Body:**
 ```json
@@ -1363,6 +1624,77 @@ Set the revision limit.
 - `PREDICTION_FAILED`: ML prediction failed
 - `TRAINING_FAILED`: Model training failed
 - `INVALID_MODEL_FORMAT`: Model format invalid
+
+## Backup & Restore
+
+PrimusDB backup uses a structured binary format with Blake3 checksum verification.
+
+### CLI Backup
+```bash
+# Full database backup
+primusdb backup --destination /path/to/backup
+
+# Client mode
+primusdb --mode client --server http://localhost:8080 backup
+```
+
+**Backup Format:**
+- Magic header: `PRIMUSDBBACKUP` (13 bytes)
+- Manifest: Version, timestamp, engine metadata
+- Data segments: Typed payloads per storage engine (columnar, vector, document, relational, key-value)
+- Schema & index definitions preserved
+- Embedded WAL entries for transaction consistency
+- Blake3 checksum per segment for integrity
+
+### CLI Restore
+```bash
+primusdb restore --source /path/to/backup
+
+# Client mode
+primusdb --mode client --server http://localhost:8080 restore
+```
+
+The restore process validates the magic header, verifies all Blake3 checksums, and reconstructs engines + indexes + WAL.
+
+---
+
+## Blockchain Audit Ledger
+
+The blockchain audit ledger provides an immutable transaction trail. Operations are available through the Rust API (no dedicated REST endpoints; the ledger is accessed programmatically):
+
+```rust
+use primusdb::blockchain::AuditLedger;
+
+// Append transactions to the ledger
+ledger.append_block(transactions)?;
+
+// Verify chain integrity
+let report = ledger.verify_chain()?;
+
+// Look up a transaction
+if let Some(tx) = ledger.get_transaction("tx_123")? {
+    println!("Found: {:?}", tx);
+}
+
+// List all blocks
+for block in ledger.list_blocks()? {
+    println!("Block {}: {}", block.index, block.block_hash);
+}
+```
+
+### Transaction Signing
+
+Transactions can be cryptographically signed with Ed25519:
+
+```rust
+use primusdb::types::Transaction;
+
+let mut tx = Transaction::new(/* ... */);
+let keypair = ed25519_dalek::Keypair::generate(&mut OsRng);
+tx.sign(&keypair);
+
+assert!(tx.verify_signature());
+```
 
 ## SDK Examples
 

@@ -13,43 +13,30 @@ for all database operations, AI/ML functionality, and administrative tasks.
 
 ## API Architecture
 
-```
+```ignore
 REST API Architecture
-═══════════════════════════════════════════════════════════════
 
-┌─────────────────────────────────────────────────────────┐
-│                    HTTP Layer                           │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Axum Web Framework                             │    │
-│  │  • Async request handling                        │    │
-│  │  • Type-safe routing                             │    │
-│  │  • Middleware support                            │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Request Processing                             │    │
-│  │  • JSON serialization                            │    │
-│  │  • Input validation                              │    │
-│  │  • Error handling                                │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+    HTTP Layer - Axum Web Framework
+    ├── Async request handling
+    ├── Type-safe routing
+    └── Middleware pipeline
 
-┌─────────────────────────────────────────────────────────┐
-│                 Business Logic Layer                    │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Query Translation                              │    │
-│  │  • HTTP → Database queries                       │    │
-│  │  • Parameter mapping                             │    │
-│  │  • Transaction management                        │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Response Formatting                            │    │
-│  │  • JSON response generation                      │    │
-│  │  • Error response handling                       │    │
-│  │  • HTTP status code mapping                      │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+    API Controllers
+    ├── CRUD operations
+    ├── Advanced operations (AI/ML, clustering)
+    ├── Transaction management
+    └── Cluster management
+
+    Business Logic Layer
+    ├── Request validation
+    ├── Data transformation
+    ├── Authorization checks
+    └── Response formatting
+
+    Storage Engine Interface
+    ├── All 5 storage engines
+    ├── Transaction coordination
+    └── Data routing
 ```
 
 ## API Endpoints Overview
@@ -232,6 +219,7 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 pub struct AppState {
     pub primusdb: Arc<PrimusDB>,
     pub auth_service: Arc<AuthService>,
+    pub cluster_gateway: Option<Arc<crate::cluster::ClusterGateway>>,
 }
 
 /// Standardized API response format for all endpoints
@@ -273,7 +261,7 @@ impl<T> APIResponse<T> {
     /// A properly formatted success response
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// let response = APIResponse::success(vec![user1, user2]);
     /// assert!(response.success);
     /// assert!(response.error.is_none());
@@ -296,8 +284,8 @@ impl<T> APIResponse<T> {
     /// A properly formatted error response
     ///
     /// # Example
-    /// ```rust
-    /// let response = APIResponse::error("Table not found".to_string());
+    /// ```ignore
+    /// let response: APIResponse<String> = APIResponse::error("Something went wrong".to_string());
     /// assert!(!response.success);
     /// assert!(response.data.is_none());
     /// ```
@@ -411,12 +399,305 @@ pub struct UqlRequest {
     pub params: Option<serde_json::Value>,
 }
 
+// ---- Cluster Gateway Handlers ----
+
+#[derive(Debug, Deserialize)]
+struct ClusterRouteRequest {
+    shard_key: Option<String>,
+    preferred_nodes: Option<Vec<String>>,
+}
+
+fn with_gateway<'a>(
+    state: &'a AppState,
+) -> std::result::Result<&'a crate::cluster::ClusterGateway, (StatusCode, &'static str)> {
+    state.cluster_gateway.as_ref().map(|g| g.as_ref()).ok_or((StatusCode::SERVICE_UNAVAILABLE, "Cluster gateway not configured"))
+}
+
+async fn cluster_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let gateway = with_gateway(&state)?;
+    let metrics = gateway.get_metrics().await;
+    let nodes = gateway.get_nodes().await;
+
+    let status = serde_json::json!({
+        "node_id": gateway.node_id,
+        "strategy": format!("{:?}", metrics.strategy),
+        "total_requests": metrics.total_requests,
+        "routed_requests": metrics.routed_requests,
+        "failed_requests": metrics.failed_requests,
+        "circuit_breaks_triggered": metrics.circuit_breaks_triggered,
+        "avg_latency_ms": metrics.avg_latency_ms,
+        "p99_latency_ms": metrics.p99_latency_ms,
+        "active_nodes": metrics.active_nodes,
+        "healthy_nodes": metrics.healthy_nodes,
+        "registered_nodes": nodes.len(),
+    });
+
+    Ok(Json(APIResponse::success(status)))
+}
+
+async fn cluster_nodes_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<Vec<crate::cluster::GatewayNode>>>, (StatusCode, &'static str)> {
+    let gateway = with_gateway(&state)?;
+    let nodes = gateway.get_nodes().await;
+    Ok(Json(APIResponse::success(nodes)))
+}
+
+async fn cluster_route_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ClusterRouteRequest>,
+) -> Json<APIResponse<Option<crate::cluster::RouteDecision>>> {
+    let gateway = match with_gateway(&state) {
+        Ok(g) => g,
+        Err((_code, msg)) => {
+            return Json(APIResponse {
+                success: false,
+                data: None,
+                error: Some(msg.to_string()),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    };
+    let preferred = request.preferred_nodes.as_ref().map(|v| v.as_slice());
+    match gateway.get_route(request.shard_key.as_deref(), preferred).await {
+        Ok(route) => Json(APIResponse::success(Some(route))),
+        Err(e) => Json(APIResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+            timestamp: chrono::Utc::now(),
+        }),
+    }
+}
+
+async fn cluster_metrics_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<crate::cluster::GatewayMetrics>>, (StatusCode, &'static str)> {
+    let gateway = with_gateway(&state)?;
+    let metrics = gateway.get_metrics().await;
+    Ok(Json(APIResponse::success(metrics)))
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterNodeRequest {
+    node_id: String,
+    host: String,
+    port: u16,
+    shards: Vec<String>,
+}
+
+async fn cluster_register_node_handler(
+    State(state): State<Arc<AppState>>,
+    Json(node): Json<RegisterNodeRequest>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let gateway = with_gateway(&state)?;
+    gateway.register_node(&node.node_id, &node.host, node.port, node.shards).await;
+    Ok(Json(APIResponse::success(serde_json::json!({"status": "registered"}))))
+}
+
+async fn cluster_remove_node_handler(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let gateway = with_gateway(&state)?;
+    gateway.remove_node(&node_id).await;
+    Ok(Json(APIResponse::success(serde_json::json!({"status": "removed"}))))
+}
+
+// ---- Federation Handlers ----
+
+async fn federation_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let fed = state.primusdb.get_federation_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Federation not configured"))?;
+    let online = fed.get_cluster_count().await;
+    let clusters = fed.get_online_clusters().await;
+    let domains = fed.local_domains.read().await.clone();
+
+    let status = serde_json::json!({
+        "federation_id": fed.config.federation_id,
+        "cluster_id": fed.config.cluster_id,
+        "region": fed.config.region,
+        "clusters_online": online,
+        "clusters_total": fed.members.read().await.len(),
+        "domains": domains,
+        "members": clusters.iter().map(|c| serde_json::json!({
+            "cluster_id": c.cluster_id,
+            "address": c.address,
+            "port": c.port,
+            "alive_count": c.alive_count,
+            "domains": c.domains,
+            "region": c.region,
+            "avg_latency_ms": c.avg_latency_ms,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(Json(APIResponse::success(status)))
+}
+
+async fn federation_clusters_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<Vec<crate::cluster::rpc::FedClusterInfo>>>, (StatusCode, &'static str)> {
+    let fed = state.primusdb.get_federation_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Federation not configured"))?;
+    let clusters = fed.get_online_clusters().await;
+    Ok(Json(APIResponse::success(clusters)))
+}
+
+async fn federation_domains_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<Vec<crate::cluster::DataDomain>>>, (StatusCode, &'static str)> {
+    let primusdb = &state.primusdb;
+    let dm = primusdb.get_domain_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Domain manager not configured"))?;
+    let domains = dm.list_domains().await;
+    Ok(Json(APIResponse::success(domains)))
+}
+
+#[derive(serde::Deserialize)]
+struct CreateDomainRequest {
+    name: String,
+    description: Option<String>,
+    replication_mode: Option<String>,
+    storage_types: Vec<String>,
+    collections: Vec<String>,
+    tables: Vec<String>,
+    member_clusters: Vec<String>,
+}
+
+async fn federation_create_domain_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateDomainRequest>,
+) -> std::result::Result<Json<APIResponse<crate::cluster::DataDomain>>, (StatusCode, &'static str)> {
+    let primusdb = &state.primusdb;
+    let dm = primusdb.get_domain_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Domain manager not configured"))?;
+    let mode = crate::cluster::DomainReplicationMode::from_str(
+        req.replication_mode.as_deref().unwrap_or("sync")
+    );
+    let domain = dm.create_domain(
+        &req.name,
+        req.description.as_deref().unwrap_or(""),
+        mode,
+        req.storage_types,
+        req.collections,
+        req.tables,
+        req.member_clusters,
+    ).await.map_err(|_e| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create domain"))?;
+    Ok(Json(APIResponse::success(domain)))
+}
+
+async fn federation_balance_domain_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let primusdb = &state.primusdb;
+    let dm = primusdb.get_domain_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Domain manager not configured"))?;
+    let plans = dm.check_balance().await;
+    let domain_plans: Vec<_> = plans.into_iter().filter(|p| p.domain_name == name).collect();
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "domain": name,
+        "plans": domain_plans.iter().map(|p| serde_json::json!({
+            "reason": p.reason,
+            "moves": p.moves.iter().map(|m| serde_json::json!({
+                "collection": m.collection,
+                "from_cluster": m.from_cluster,
+                "to_cluster": m.to_cluster,
+                "estimated_cost": m.estimated_cost,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    }))))
+}
+
+#[derive(serde::Deserialize)]
+struct DomainJoinRequest {
+    collections: Option<Vec<String>>,
+    storage_types: Option<Vec<String>>,
+    replication_mode: Option<String>,
+}
+
+async fn federation_join_domain_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<DomainJoinRequest>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let fed = state.primusdb.get_federation_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Federation not configured"))?;
+    let ack = fed.join_domain(
+        &name,
+        req.collections.unwrap_or_default(),
+        req.storage_types.unwrap_or_default(),
+        req.replication_mode.as_deref().unwrap_or("sync"),
+    ).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to join domain"))?;
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "domain": name,
+        "accepted": ack.accepted,
+        "members": ack.members,
+        "status": "joined"
+    }))))
+}
+
+async fn federation_leave_domain_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let fed = state.primusdb.get_federation_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Federation not configured"))?;
+    fed.leave_domain(&name).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to leave domain"))?;
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "domain": name,
+        "status": "left"
+    }))))
+}
+
+async fn federation_metrics_handler(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<APIResponse<serde_json::Value>>, (StatusCode, &'static str)> {
+    let fed = state.primusdb.get_federation_manager()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Federation not configured"))?;
+    let online = fed.get_cluster_count().await;
+    let total = fed.members.read().await.len();
+    let domains = fed.local_domains.read().await.len();
+
+    let gw_metrics = if let Some(ref g) = state.cluster_gateway {
+        Some(g.get_metrics().await)
+    } else {
+        None
+    };
+
+    let metrics = serde_json::json!({
+        "federation": {
+            "clusters_online": online,
+            "clusters_total": total,
+            "domains_count": domains,
+            "healthy_ratio": if total > 0 { online as f64 / total as f64 } else { 0.0 },
+        },
+        "gateway": gw_metrics.map(|m| serde_json::json!({
+            "total_requests": m.total_requests,
+            "routed_requests": m.routed_requests,
+            "failed_requests": m.failed_requests,
+            "circuit_breaks": m.circuit_breaks_triggered,
+            "avg_latency_ms": m.avg_latency_ms,
+            "p99_latency_ms": m.p99_latency_ms,
+        })),
+    });
+    Ok(Json(APIResponse::success(metrics)))
+}
+
 pub struct APIServer {
     app: Router,
 }
 
 impl APIServer {
-    pub fn new(primusdb: Arc<PrimusDB>, auth_service: Arc<AuthService>) -> Self {
+    pub fn new(
+        primusdb: Arc<PrimusDB>,
+        auth_service: Arc<AuthService>,
+        cluster_gateway: Option<Arc<crate::cluster::ClusterGateway>>,
+    ) -> Self {
         let app = Router::new()
             // Root API endpoint
             .route("/api/v1", get(api_root))
@@ -467,6 +748,7 @@ impl APIServer {
             )
             // Transaction Operations
             .route("/api/v1/transaction/begin", post(begin_transaction))
+            .route("/api/v1/transaction/:id/execute", post(execute_transaction))
             .route("/api/v1/transaction/:id/commit", post(commit_transaction))
             .route(
                 "/api/v1/transaction/:id/rollback",
@@ -604,6 +886,22 @@ impl APIServer {
             .route("/api/v1/namespaces/:path/users", get(list_namespace_user_bindings))
             .route("/api/v1/namespaces/:path/users", post(add_namespace_user_binding))
             .route("/api/v1/namespaces/:path/users/:user_id", delete(remove_namespace_user_binding))
+            // Cluster Gateway Endpoints (v1.3.0-alpha)
+            .route("/api/v1/cluster/status", get(cluster_status_handler))
+            .route("/api/v1/cluster/nodes", get(cluster_nodes_handler))
+            .route("/api/v1/cluster/route", post(cluster_route_handler))
+            .route("/api/v1/cluster/metrics", get(cluster_metrics_handler))
+            .route("/api/v1/cluster/node/register", post(cluster_register_node_handler))
+            .route("/api/v1/cluster/node/:node_id", delete(cluster_remove_node_handler))
+            // Federation Endpoints (v1.3.0-alpha)
+            .route("/api/v1/federation/status", get(federation_status_handler))
+            .route("/api/v1/federation/clusters", get(federation_clusters_handler))
+            .route("/api/v1/federation/domains", get(federation_domains_handler).post(federation_create_domain_handler))
+            .route("/api/v1/federation/domains/:name/join", post(federation_join_domain_handler))
+            .route("/api/v1/federation/domains/:name/leave", post(federation_leave_domain_handler))
+            .route("/api/v1/federation/domains/:name/balance", post(federation_balance_domain_handler))
+            // Global Observability
+            .route("/api/v1/federation/metrics", get(federation_metrics_handler))
             // Middleware
             .layer(TraceLayer::new_for_http())
             .layer(CompressionLayer::new())
@@ -611,6 +909,7 @@ impl APIServer {
             .with_state(Arc::new(AppState {
                 primusdb,
                 auth_service,
+                cluster_gateway,
             }));
 
         APIServer { app }
@@ -761,6 +1060,7 @@ async fn api_root() -> Json<serde_json::Value> {
             },
             "transaction": {
                 "begin": "POST /api/v1/transaction/begin",
+                "execute": "POST /api/v1/transaction/{id}/execute",
                 "commit": "POST /api/v1/transaction/{id}/commit",
                 "rollback": "POST /api/v1/transaction/{id}/rollback"
             },
@@ -836,7 +1136,7 @@ async fn system_status(State(_state): State<Arc<AppState>>) -> Json<APIResponse<
 }
 
 async fn prometheus_metrics(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
-    let metrics = format!(
+    let base = format!(
         r#"# HELP primusdb_up PrimusDB service availability
 # TYPE primusdb_up gauge
 primusdb_up 1
@@ -873,31 +1173,6 @@ primusdb_http_request_duration_seconds_bucket{{le="+Inf"}} 0
 primusdb_http_request_duration_seconds_sum 0
 primusdb_http_request_duration_seconds_count 0
 
-# HELP primusdb_rate_limit_exceeded Rate limit exceeded
-# TYPE primusdb_rate_limit_exceeded counter
-primusdb_rate_limit_exceeded_total 0
-
-# HELP primusdb_error_total Total errors by type
-# TYPE primusdb_error_total counter
-primusdb_error_total{{type="validation"}} 0
-primusdb_error_total{{type="database"}} 0
-primusdb_error_total{{type="network"}} 0
-primusdb_error_total{{type="authentication"}} 0
-
-# HELP primusdb_active_connections Current active connections
-# TYPE primusdb_active_connections gauge
-primusdb_active_connections 0
-
-# HELP primusdb_memory_usage_bytes Current memory usage
-# TYPE primusdb_memory_usage_bytes gauge
-primusdb_memory_usage_bytes 0
-
-# HELP primusdb_cpu_usage_percent Current CPU usage percentage
-# TYPE primusdb_cpu_usage_percent gauge
-primusdb_cpu_usage_percent 0.0
-primusdb_storage_operations_total{{engine="document"}} 0
-primusdb_storage_operations_total{{engine="relational"}} 0
-
 # HELP primusdb_cache_operations_total Total cache operations
 # TYPE primusdb_cache_operations_total counter
 primusdb_cache_operations_total{{operation="get"}} 0
@@ -911,7 +1186,8 @@ primusdb_cache_operations_total{{operation="delete"}} 0
             .as_secs()
     );
 
-    Ok(metrics)
+    let federation_metrics = crate::metrics::get_metrics().encode();
+    Ok(base + "\n" + &federation_metrics)
 }
 
 async fn cluster_health(
@@ -1227,29 +1503,94 @@ async fn cluster_data(
 }
 
 // Transaction Operations (placeholders)
-async fn begin_transaction() -> Json<APIResponse<serde_json::Value>> {
-    Json(APIResponse::success(serde_json::json!({
-        "transaction_id": format!("tx_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
-        "status": "started"
-    })))
+async fn begin_transaction(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let transaction = state.primusdb.transaction_manager.begin_transaction().await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "transaction_id": transaction.id,
+        "status": "started",
+        "isolation_level": "ReadCommitted",
+        "timeout_ms": 30000,
+    }))))
 }
 
 async fn commit_transaction(
+    State(state): State<Arc<AppState>>,
     Path(transaction_id): Path<String>,
-) -> Json<APIResponse<serde_json::Value>> {
-    Json(APIResponse::success(serde_json::json!({
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let tx = crate::transaction::Transaction {
+        id: transaction_id.clone(),
+        operations: vec![],
+        status: crate::transaction::TransactionStatus::Active,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+        timeout_ms: 0,
+        ..Default::default()
+    };
+    state.primusdb.transaction_manager.commit_transaction(tx).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(APIResponse::success(serde_json::json!({
         "transaction_id": transaction_id,
         "status": "committed"
-    })))
+    }))))
 }
 
 async fn rollback_transaction(
+    State(state): State<Arc<AppState>>,
     Path(transaction_id): Path<String>,
-) -> Json<APIResponse<serde_json::Value>> {
-    Json(APIResponse::success(serde_json::json!({
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    state.primusdb.transaction_manager.rollback_transaction(transaction_id.clone()).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(APIResponse::success(serde_json::json!({
         "transaction_id": transaction_id,
         "status": "rolled_back"
-    })))
+    }))))
+}
+
+async fn execute_transaction(
+    State(_state): State<Arc<AppState>>,
+    Path(transaction_id): Path<String>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    use crate::transaction::{OperationType, TransactionOperation};
+    let storage_type = request.get("storage_type").and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let operation = request.get("operation").and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let table = request.get("table").and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let data = request.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    let conditions = request.get("conditions").cloned();
+
+    let op_type = match operation.to_lowercase().as_str() {
+        "create" | "insert" => OperationType::Insert,
+        "update" => OperationType::Update,
+        "delete" => OperationType::Delete,
+        "read" => OperationType::Read,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let op = TransactionOperation {
+        id: format!("{}_{}", transaction_id, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
+        operation_type: op_type,
+        table: table.to_string(),
+        data,
+        conditions,
+        before_image: None,
+        after_image: None,
+        executed: false,
+        rollback_data: None,
+        storage_type: storage_type.to_string(),
+    };
+
+    Ok(Json(APIResponse::success(serde_json::json!({
+        "transaction_id": transaction_id,
+        "operation_id": op.id,
+        "status": "pending"
+    }))))
 }
 
 // Table Operations (placeholders)
@@ -1898,180 +2239,326 @@ async fn info_schema_constraints(
 
 // ==================== Key-Value (CouchDB-compatible) API ====================
 
-async fn kv_get_db_info(Path(db): Path<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "db_name": db,
-        "doc_count": 0,
-        "doc_del_count": 0,
-        "sizes": {"active": 0, "external": 0, "file": 0},
-        "update_seq": 0,
-        "purge_seq": 0,
-        "disk_format_version": 6,
-        "fragmentation": 0,
-        "indexes": 0,
-        "security": {},
-        "compact_running": false,
-        "cluster": {"q": 8, "n": 3, "w": 2, "r": 2}
-    }))
+// ── Key-Value Database Operations (CouchDB-compatible API) ──
+
+fn kv_state_err() -> (StatusCode, &'static str) {
+    (StatusCode::SERVICE_UNAVAILABLE, "Key-Value engine not available")
 }
 
-async fn kv_create_db(Path(db): Path<String>) -> Json<APIResponse<serde_json::Value>> {
-    Json(APIResponse::success(serde_json::json!({
-        "ok": true,
-        "id": db
-    })))
+fn resolve_kv_ns(
+    state: &AppState,
+    namespace: Option<&str>,
+    db: &str,
+) -> std::result::Result<String, (StatusCode, &'static str)> {
+    match namespace {
+        Some(ns) if !ns.is_empty() && state.primusdb.config().namespaces.enabled => {
+            match state
+                .primusdb
+                .get_namespace_controller()
+                .resolve_physical_name(ns, StorageType::KeyValue, db)
+            {
+                Ok(name) => Ok(name),
+                Err(_) => {
+                    Err((StatusCode::BAD_REQUEST, "Namespace or resource not found"))
+                }
+            }
+        }
+        _ => Ok(db.to_string()),
+    }
 }
 
-async fn kv_delete_db(Path(_db): Path<String>) -> Json<APIResponse<serde_json::Value>> {
-    Json(APIResponse::success(serde_json::json!({
-        "ok": true
-    })))
+async fn kv_get_db_info(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let info = engine.get_db_info(&db).map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    Ok(Json(info))
+}
+
+async fn kv_create_db(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let engine = state.primusdb.get_kv_engine().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    engine.create_database(&db).map_err(|_| StatusCode::CONFLICT)?;
+    Ok(Json(APIResponse::success(serde_json::json!({"ok": true, "id": db}))))
+}
+
+async fn kv_delete_db(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Result<Json<APIResponse<serde_json::Value>>, StatusCode> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let engine = state.primusdb.get_kv_engine().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    engine.delete_database(&db).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(Json(APIResponse::success(serde_json::json!({"ok": true}))))
 }
 
 async fn kv_all_docs(
-    Path(_db): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let _include_docs = params
-        .get("include_docs")
-        .map(|v| v == "true")
-        .unwrap_or(false);
-    let _limit: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let include_docs = params.get("include_docs").map(|v| v == "true").unwrap_or(false);
+    let limit: Option<usize> = params.get("limit").and_then(|v| v.parse().ok());
     let skip: Option<usize> = params.get("skip").and_then(|v| v.parse().ok());
-
-    Json(serde_json::json!({
-        "total_rows": 0,
-        "offset": skip.unwrap_or(0),
-        "rows": []
-    }))
+    let result = engine.all_docs(&db, include_docs, limit, skip)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    Ok(Json(result))
 }
 
 async fn kv_find(
-    Path(_db): Path<String>,
-    Json(_selector): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "docs": [],
-        "warning": "Query execution not implemented for this engine",
-        "execution_stats": {
-            "documents_examined": 0,
-            "results_returned": 0
-        }
-    }))
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let request = crate::storage::keyvalue::KvFindRequest {
+        selector: body.get("selector").cloned().unwrap_or(serde_json::Value::Null),
+        limit: body.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
+        skip: body.get("skip").and_then(|v| v.as_u64()).map(|v| v as usize),
+        sort: body.get("sort").and_then(|v| v.as_array().cloned()),
+    };
+    let result = engine.find(&db, request)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    Ok(Json(result))
 }
 
-async fn kv_list_indexes(Path(_db): Path<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "indexes": []
-    }))
+async fn kv_list_indexes(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let indexes = engine.list_indexes(&db)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    let index_list: Vec<serde_json::Value> = indexes.into_iter().map(|idx| {
+        serde_json::json!({
+            "name": idx.name,
+            "fields": idx.fields,
+            "selector": idx.selector,
+            "type": "json"
+        })
+    }).collect();
+    Ok(Json(serde_json::json!({
+        "total_rows": index_list.len(),
+        "indexes": index_list
+    })))
 }
 
 async fn kv_create_index(
-    Path(_db): Path<String>,
-    Json(index_def): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let name = index_def
-        .get("name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("default");
-    let fields = index_def
-        .get("index")
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+    let fields: Vec<String> = body.get("index")
         .and_then(|i| i.get("fields"))
         .and_then(|f| f.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-
-    Json(serde_json::json!({
+    let selector = body.get("index").and_then(|i| i.get("selector").cloned());
+    let idx = engine.create_index(&db, &name, fields.clone(), selector)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Failed to create index"))?;
+    Ok(Json(serde_json::json!({
         "ok": true,
-        "id": format!("_design/{}", name),
-        "name": name,
-        "fields": fields
-    }))
+        "id": format!("_design/{}", idx.name),
+        "name": idx.name,
+        "fields": idx.fields
+    })))
 }
 
 async fn kv_bulk_docs(
-    Path(_db): Path<String>,
-    Json(_request): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!([
-        {"id": "sample", "rev": "1-abc", "error": null}
-    ]))
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let docs_val = body.get("docs").cloned().unwrap_or(serde_json::Value::Null);
+    let all_or_nothing = body.get("all_or_nothing").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut kv_docs = Vec::new();
+    if let Some(arr) = docs_val.as_array() {
+        for doc_val in arr {
+            let kv_doc = crate::storage::keyvalue::KvDocument {
+                _id: doc_val.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                _rev: doc_val.get("_rev").and_then(|v| v.as_str()).map(String::from),
+                value: doc_val.clone(),
+                created_at: None,
+                updated_at: None,
+                deleted: doc_val.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false),
+            };
+            kv_docs.push(kv_doc);
+        }
+    }
+
+    let results = engine.bulk_docs(&db, kv_docs, all_or_nothing)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Bulk docs failed"))?;
+    let out: Vec<serde_json::Value> = results.into_iter().map(|r| {
+        serde_json::json!({
+            "id": r.id,
+            "rev": r.rev,
+            "error": r.error,
+        })
+    }).collect();
+    Ok(Json(serde_json::Value::Array(out)))
 }
 
-async fn kv_compact(Path(_db): Path<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true
-    }))
+async fn kv_compact(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let result = engine.compact(&db)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Compact failed"))?;
+    Ok(Json(result))
 }
 
-async fn kv_ensure_full_commit(Path(_db): Path<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "instance_start_time": "0"
-    }))
+async fn kv_ensure_full_commit(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let result = engine.ensure_full_commit(&db)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Flush failed"))?;
+    Ok(Json(result))
 }
 
-async fn kv_get_rev_limit(Path(_db): Path<String>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "rev_limit": 1000
-    }))
+async fn kv_get_rev_limit(
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let limit = engine.get_revision_limit(&db)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    Ok(Json(serde_json::json!({"rev_limit": limit})))
 }
 
 async fn kv_set_rev_limit(
-    Path(_db): Path<String>,
-    Json(limit): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "rev_limit": limit.get("rev_limit").and_then(|v| v.as_u64()).unwrap_or(1000)
-    }))
+    State(state): State<Arc<AppState>>,
+    Path(db): Path<String>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    let limit = body.get("rev_limit").and_then(|v| v.as_u64()).unwrap_or(1000);
+    engine.set_revision_limit(&db, limit)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Database not found"))?;
+    Ok(Json(serde_json::json!({"ok": true, "rev_limit": limit})))
 }
 
-async fn kv_get_document(Path((_db, docid)): Path<(String, String)>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "_id": docid,
-        "_rev": "1-abc",
-        "error": "not_found",
-        "reason": "missing"
-    }))
+async fn kv_get_document(
+    State(state): State<Arc<AppState>>,
+    Path((db, docid)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    match engine.get_document(&db, &docid) {
+        Ok(doc) => {
+            let mut resp = doc.value.clone();
+            resp.as_object_mut().map(|obj| {
+                obj.insert("_id".to_string(), serde_json::json!(doc._id));
+                obj.insert("_rev".to_string(), serde_json::json!(doc._rev));
+                obj.insert("created_at".to_string(), serde_json::json!(doc.created_at));
+                obj.insert("updated_at".to_string(), serde_json::json!(doc.updated_at));
+            });
+            Ok(Json(resp))
+        }
+        Err(_) => Ok(Json(serde_json::json!({
+            "_id": docid,
+            "_rev": "0-0",
+            "error": "not_found",
+            "reason": "missing"
+        }))),
+    }
 }
 
 async fn kv_put_document(
-    Path((_db, docid)): Path<(String, String)>,
-    Json(_doc): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "id": docid,
-        "rev": "1-abc"
-    }))
+    State(state): State<Arc<AppState>>,
+    Path((db, docid)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    match engine.put_document(&db, &docid, body) {
+        Ok(doc) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "id": doc._id,
+            "rev": doc._rev
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "error": "conflict",
+            "reason": e.to_string()
+        }))),
+    }
 }
 
 async fn kv_delete_document(
-    Path((_db, docid)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Path((db, docid)): Path<(String, String)>,
     AxumQuery(params): AxumQuery<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
     let rev = params.get("rev").cloned().unwrap_or_default();
-    Json(serde_json::json!({
-        "ok": true,
-        "id": docid,
-        "rev": format!("2-{}", rev)
-    }))
+    match engine.delete_document(&db, &docid, &rev) {
+        Ok(doc) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "id": doc._id,
+            "rev": doc._rev
+        }))),
+        Err(_) => Ok(Json(serde_json::json!({
+            "error": "conflict",
+            "reason": "Revision mismatch or document not found"
+        }))),
+    }
 }
 
 async fn kv_update_document(
-    Path((_db, docid)): Path<(String, String)>,
-    Json(_doc): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "id": docid,
-        "rev": "2-abc"
-    }))
+    State(state): State<Arc<AppState>>,
+    Path((db, docid)): Path<(String, String)>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    // POST update is identical to PUT: upsert the document
+    let db = resolve_kv_ns(&state, params.get("namespace").map(|s| s.as_str()), &db)?;
+    let engine = state.primusdb.get_kv_engine().ok_or_else(kv_state_err)?;
+    match engine.put_document(&db, &docid, body) {
+        Ok(doc) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "id": doc._id,
+            "rev": doc._rev
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "error": "conflict",
+            "reason": e.to_string()
+        }))),
+    }
 }
 
 // Authentication endpoints
@@ -2683,6 +3170,7 @@ fn parse_storage_type(storage_type: &str) -> Result<StorageType, StatusCode> {
         "vector" => Ok(StorageType::Vector),
         "document" => Ok(StorageType::Document),
         "relational" => Ok(StorageType::Relational),
+        "kv" | "keyvalue" => Ok(StorageType::KeyValue),
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }

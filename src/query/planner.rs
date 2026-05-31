@@ -648,6 +648,7 @@ mod tests {
                 discovery_servers: vec![],
             },
             namespaces: Default::default(),
+            federation: None,
         }
     }
 

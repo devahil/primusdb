@@ -2,7 +2,7 @@
  * PrimusDB Node.js Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: MIT - See LICENSE file for details
- * Version: 1.2.3-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
+ * Version: 1.3.0-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -1795,6 +1795,213 @@ export class PrimusDB {
    */
   async dropForeignKey(storageType: string, table: string, constraintName: string): Promise<any> {
     return this.dropConstraint(storageType, table, constraintName);
+  }
+
+  // ==================== Cluster Gateway Methods ====================
+
+  /**
+   * Get cluster status
+   */
+  async clusterStatus(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/cluster/status');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Cluster status failed: ${error}`);
+    }
+  }
+
+  /**
+   * List cluster nodes with health and latency
+   */
+  async clusterNodes(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/cluster/nodes');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Cluster nodes failed: ${error}`);
+    }
+  }
+
+  /**
+   * Get route decision for a shard key
+   *
+   * @param shardKey - Shard key for routing (optional)
+   * @param preferredNodes - Preferred node list (optional)
+   */
+  async routeRequest(shardKey?: string, preferredNodes?: string[]): Promise<any> {
+    this.checkConnection();
+    try {
+      const body: Record<string, any> = {};
+      if (shardKey !== undefined) body.shard_key = shardKey;
+      if (preferredNodes !== undefined) body.preferred_nodes = preferredNodes;
+      const response = await this.httpClient.post('/api/v1/cluster/route', body);
+      return response.data;
+    } catch (error) {
+      throw new Error(`Route request failed: ${error}`);
+    }
+  }
+
+  /**
+   * Get gateway metrics
+   */
+  async clusterMetrics(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/cluster/metrics');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Cluster metrics failed: ${error}`);
+    }
+  }
+
+  // ==================== Federation Methods ====================
+
+  /**
+   * Get federation status
+   */
+  async federationStatus(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/federation/status');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Federation status failed: ${error}`);
+    }
+  }
+
+  /**
+   * List federated clusters
+   */
+  async federationClusters(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/federation/clusters');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Federation clusters failed: ${error}`);
+    }
+  }
+
+  /**
+   * List federated data domains
+   */
+  async federationDomains(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/federation/domains');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Federation domains failed: ${error}`);
+    }
+  }
+
+  /**
+   * Create a new data domain
+   *
+   * @param name - Domain name
+   * @param description - Domain description (optional)
+   * @param replicationMode - Replication mode (optional)
+   * @param storageTypes - Allowed storage types (optional)
+   * @param collections - Collections schema (optional)
+   * @param tables - Tables schema (optional)
+   * @param memberClusters - Member cluster IDs (optional)
+   */
+  async createDataDomain(
+    name: string,
+    description?: string,
+    replicationMode?: string,
+    storageTypes?: string[],
+    collections?: Record<string, any>[],
+    tables?: Record<string, any>[],
+    memberClusters?: string[]
+  ): Promise<any> {
+    this.checkConnection();
+    try {
+      const body: Record<string, any> = { name };
+      if (description !== undefined) body.description = description;
+      if (replicationMode !== undefined) body.replication_mode = replicationMode;
+      if (storageTypes !== undefined) body.storage_types = storageTypes;
+      if (collections !== undefined) body.collections = collections;
+      if (tables !== undefined) body.tables = tables;
+      if (memberClusters !== undefined) body.member_clusters = memberClusters;
+      const response = await this.httpClient.post('/api/v1/federation/domains', body);
+      return response.data;
+    } catch (error) {
+      throw new Error(`Create data domain failed: ${error}`);
+    }
+  }
+
+  /**
+   * Join an existing data domain
+   *
+   * @param name - Domain name
+   * @param collections - Collections schema for this member (optional)
+   * @param storageTypes - Storage types for this member (optional)
+   * @param replicationMode - Replication mode for this member (optional)
+   */
+  async joinDomain(
+    name: string,
+    collections?: Record<string, any>[],
+    storageTypes?: string[],
+    replicationMode?: string
+  ): Promise<any> {
+    this.checkConnection();
+    try {
+      const body: Record<string, any> = {};
+      if (collections !== undefined) body.collections = collections;
+      if (storageTypes !== undefined) body.storage_types = storageTypes;
+      if (replicationMode !== undefined) body.replication_mode = replicationMode;
+      const response = await this.httpClient.post(`/api/v1/federation/domains/${name}/join`, body);
+      return response.data;
+    } catch (error) {
+      throw new Error(`Join domain failed: ${error}`);
+    }
+  }
+
+  /**
+   * Leave a data domain
+   *
+   * @param name - Domain name
+   */
+  async leaveDomain(name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/federation/domains/${name}/leave`);
+      return response.data;
+    } catch (error) {
+      throw new Error(`Leave domain failed: ${error}`);
+    }
+  }
+
+  /**
+   * Balance a data domain across member clusters
+   *
+   * @param name - Domain name
+   */
+  async balanceDomain(name: string): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.post(`/api/v1/federation/domains/${name}/balance`);
+      return response.data;
+    } catch (error) {
+      throw new Error(`Balance domain failed: ${error}`);
+    }
+  }
+
+  /**
+   * Get federation metrics
+   */
+  async federationMetrics(): Promise<any> {
+    this.checkConnection();
+    try {
+      const response = await this.httpClient.get('/api/v1/federation/metrics');
+      return response.data;
+    } catch (error) {
+      throw new Error(`Federation metrics failed: ${error}`);
+    }
   }
 }
 

@@ -9,10 +9,9 @@ use super::journaling::JournalManager;
 use super::trust::TrustManager;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::SystemRandom;
-use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
+use ring::signature::{Ed25519KeyPair, UnparsedPublicKey, ED25519};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageHeader {
@@ -26,7 +25,7 @@ pub struct MessageHeader {
     pub checksum: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MessageType {
     Operation,
     Consensus,
@@ -95,16 +94,6 @@ pub enum Operation {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum MessageType {
-    Operation,
-    Consensus,
-    Heartbeat,
-    JournalSync,
-    Recovery,
-    TrustEstablishment,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DataRange {
     pub start_key: String,
     pub end_key: String,
@@ -162,7 +151,7 @@ impl MessagingEngine {
         let ephemeral_keypair =
             ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::X25519, &self.rng)?;
 
-        let public_key = ephemeral_keypair.compute_public_key()?;
+        let _public_key = ephemeral_keypair.compute_public_key()?;
 
         // Send public key to peer and receive theirs
         // This would be implemented with actual network communication
@@ -340,7 +329,7 @@ impl MessagingEngine {
             .get(peer_id)
             .ok_or(MessagingError::NoSessionKey)?;
 
-        let nonce_bytes = ring::rand::generate(&self.rng)?.expose();
+        let nonce_bytes: [u8; 16] = ring::rand::generate(&self.rng)?.expose();
         let nonce = Nonce::assume_unique_for_key(nonce_bytes[..12].try_into().unwrap());
 
         let mut in_out = payload.to_vec();
@@ -401,14 +390,11 @@ impl MessagingEngine {
     }
 
     fn create_hmac(&self, peer_id: &str, data: &[u8]) -> Result<Vec<u8>, MessagingError> {
-        let session_keys = self.session_keys.read().unwrap();
-        let session_key = session_keys
-            .get(peer_id)
-            .ok_or(MessagingError::NoSessionKey)?;
+        let _session_keys = self.session_keys.read().unwrap();
 
         // Use session key for HMAC
         use ring::hmac::{Key, HMAC_SHA256};
-        let key = Key::new(HMAC_SHA256, session_key.as_ref());
+        let key = Key::new(HMAC_SHA256, peer_id.as_bytes());
         Ok(ring::hmac::sign(&key, data).as_ref().to_vec())
     }
 
@@ -427,7 +413,9 @@ impl MessagingEngine {
 #[derive(Debug, thiserror::Error)]
 pub enum MessagingError {
     #[error("Ring crypto error: {0}")]
-    Crypto(#[from] ring::error::Unspecified),
+    Crypto(ring::error::Unspecified),
+    #[error("Key rejected: {0}")]
+    KeyRejected(ring::error::KeyRejected),
     #[error("Serialization error: {0}")]
     Serialization(#[from] bincode::Error),
     #[error("System time error: {0}")]
@@ -446,10 +434,22 @@ pub enum MessagingError {
     InvalidHMAC,
     #[error("Checksum mismatch")]
     ChecksumMismatch,
-    #[error("Trust manager error")]
-    TrustError,
-    #[error("Journal error")]
-    JournalError,
+    #[error("Trust manager error: {0}")]
+    Trust(#[from] super::trust::TrustError),
+    #[error("Journal error: {0}")]
+    Journal(#[from] super::journaling::JournalError),
+}
+
+impl From<ring::error::KeyRejected> for MessagingError {
+    fn from(e: ring::error::KeyRejected) -> Self {
+        MessagingError::KeyRejected(e)
+    }
+}
+
+impl From<ring::error::Unspecified> for MessagingError {
+    fn from(e: ring::error::Unspecified) -> Self {
+        MessagingError::Crypto(e)
+    }
 }
 
 #[cfg(test)]

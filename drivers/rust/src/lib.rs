@@ -2,10 +2,10 @@
  * PrimusDB Rust Native Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.2.3-alpha - ER Model parity, cascade truncate, RETURNING, GROUP BY
+ * Version: 1.3.0-alpha - ER Model parity, cascade truncate, RETURNING, GROUP BY
  */
 
-use primusdb::cluster::ClusterStatus;
+use primusdb::cluster::ClusterStatusInfo;
 use primusdb::query::{QueryLanguage, UqlQuery};
 use primusdb::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
 use std::collections::HashMap;
@@ -620,8 +620,33 @@ impl NativeDriver {
     }
 
     /// Get cluster status
-    pub fn get_cluster_status(&self) -> Result<ClusterStatus> {
-        self.db.get_cluster_status()
+    pub async fn get_cluster_status(&self) -> Result<ClusterStatusInfo> {
+        self.db.get_cluster_status().await
+    }
+
+    /// Get list of known cluster nodes with their metadata
+    pub async fn cluster_nodes(&self) -> Result<serde_json::Value> {
+        let status = self.db.get_cluster_status().await?;
+        Ok(serde_json::json!([{
+            "node_id": status.node_id,
+            "health": status.health_status,
+            "is_leader": status.is_leader,
+            "leader_id": status.leader_id,
+            "cluster_size": status.cluster_size,
+            "alive_count": status.alive_count,
+        }]))
+    }
+
+    /// Get route decision for a shard key (in embedded mode, returns self)
+    pub async fn route_request(&self, shard_key: Option<&str>, _preferred_nodes: Option<&[String]>) -> Result<serde_json::Value> {
+        let status = self.db.get_cluster_status().await?;
+        Ok(serde_json::json!({
+            "node_id": status.node_id,
+            "strategy": "local",
+            "shard_key": shard_key,
+            "is_leader": status.is_leader,
+            "health": status.health_status,
+        }))
     }
 
     // ==================== UQL / SQL Execution ====================
@@ -909,6 +934,7 @@ impl NativeDriverBuilder {
                     discovery_servers: vec![],
                 },
                 namespaces: Default::default(),
+                federation: None,
             },
         }
     }
@@ -1141,8 +1167,16 @@ impl Database {
         self.driver.create_table(storage_type, table, schema).await
     }
 
-    pub fn get_cluster_status(&self) -> Result<ClusterStatus> {
-        self.driver.get_cluster_status()
+    pub async fn get_cluster_status(&self) -> Result<ClusterStatusInfo> {
+        self.driver.get_cluster_status().await
+    }
+
+    pub async fn cluster_nodes(&self) -> Result<serde_json::Value> {
+        self.driver.cluster_nodes().await
+    }
+
+    pub async fn route_request(&self, shard_key: Option<&str>, preferred_nodes: Option<&[String]>) -> Result<serde_json::Value> {
+        self.driver.route_request(shard_key, preferred_nodes).await
     }
 }
 
@@ -1184,6 +1218,8 @@ mod tests {
                 node_id: "test-driver".to_string(),
                 discovery_servers: vec![],
             },
+            namespaces: Default::default(),
+            federation: None,
         };
 
         let driver = NativeDriver::new(config).unwrap();
@@ -1227,6 +1263,6 @@ mod tests {
             .unwrap();
 
         // Just test that it builds successfully
-        assert!(driver.db().get_cluster_status().is_ok());
+        assert!(driver.db().get_cluster_status().await.is_ok());
     }
 }

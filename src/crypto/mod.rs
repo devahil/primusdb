@@ -486,11 +486,8 @@ impl CryptoManager {
                 Ok(hex::encode(hash))
             }
             HashAlgorithm::Blake3 => {
-                // Blake3 hash implementation (placeholder - using SHA256 for now)
-                let mut hasher = Sha256::new();
-                hasher.update(data);
-                let hash = hasher.finalize();
-                Ok(hex::encode(hash))
+                let hash = blake3::hash(data);
+                Ok(hex::encode(hash.as_bytes()))
             }
         }
     }

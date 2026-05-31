@@ -396,36 +396,60 @@ async fn handle_embedded_mode(cli: Cli) -> Result<()> {
             discovery_servers: vec![],
         },
         namespaces: Default::default(),
+        federation: None,
     };
     let primusdb = Arc::new(PrimusDB::new(config)?);
 
     match cli.command {
         Commands::Info => {
-            println!("PrimusDB - Hybrid Database Engine (Embedded Mode)");
-            println!("Version: 0.1.0");
-            println!("Mode: Embedded (local instance)");
+            use owo_colors::OwoColorize;
+            let banner = r#"
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   ____       _               _  ____  ____                    ║
+║  |  _ \ _ __(_)_ __ ___   __| ||  _ \| __ )                   ║
+║  | |_) | '__| | '_ ` _ \ / _` || | | |  _ \                   ║
+║  |  __/| |  | | | | | | | (_| || |_| | |_) |                  ║
+║  |_|   |_|  |_|_| |_| |_|\__,_||____/|____/                   ║
+║                                                               ║
+║  Hybrid Database Engine  v1.3.1-alpha                         ║
+║  Multi-Model · Distributed · AI-Native · Blockchain           ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝"#;
+            println!("{}", banner.bright_cyan());
+            println!("  {}  {}\n", "●".green().bold(), "Embedded Mode — ready to use".bold().white());
+
+            for (cat, items) in [
+                ("Storage Engines", &["Columnar (analytics)", "Vector (similarity search)", "Document (JSON)", "Relational (SQL)", "Key-Value"] as &[&str]),
+                ("Distributed", &["Raft Consensus", "SWIM Gossip Membership", "Consistent Hash Sharding", "Sync/Async/Quorum Replication", "ClusterGateway Routing", "Multi-Cluster Federation"]),
+                ("AI/ML", &["LinearRegression (R²)", "LogisticRegression", "K-Means++ Clustering", "Time Series Decomposition", "Anomaly Detection (Z-score)", "Forecast with Confidence", "Pattern Analysis"]),
+                ("Blockchain", &["Immutable Audit Ledger", "SHA-256 Merkle Tree", "Tamper Detection", "Ed25519 Transaction Signatures"]),
+                ("Security", &["AES-256-GCM Encryption", "RBAC with MFA", "Ed25519 Signatures", "X.509 Certificate Trust", "Secure Protocol Layer", "Key Rotation", "Audit Logging"]),
+            ] {
+                println!("  {} {}", "┌─".dimmed(), cat.bold().white());
+                for item in items {
+                    println!("  {}  {}", "│".dimmed(), item.cyan());
+                }
+                println!("  {}", "└─".dimmed());
+                println!();
+            }
+
+            println!("  {}  {}", "Available Commands".bold().underline().white(), "");
             println!();
-            println!("Features implemented:");
-            println!("- Hybrid storage engines (columnar, vector, document, relational)");
-            println!("- Blockchain-style consensus with transaction validation");
-            println!("- AI/ML capabilities (predictions, anomaly detection, clustering)");
-            println!("- Distributed clustering with load balancing");
-            println!("- Enterprise encryption (AES-256-GCM, ChaCha20)");
-            println!("- REST/GraphQL/gRPC APIs");
-            println!("- ACID transactions with rollback");
-            println!("- Real-time analytics and vector search");
-            println!();
-            println!("Available commands:");
-            println!("  info                    - Show this information");
-            println!("  crud create             - Create new records");
-            println!("  crud read               - Read/query records");
-            println!("  crud update             - Update existing records");
-            println!("  crud delete             - Delete records");
-            println!("  advanced analyze        - Analyze data patterns");
-            println!("  advanced predict        - AI predictions");
-            println!("  advanced vector-search  - Vector similarity search");
-            println!("  advanced cluster        - Cluster data analysis");
-            println!("  advanced transaction    - Execute complex transactions");
+            for (cmd, desc) in [
+                ("info", "Show this information"),
+                ("crud create", "Create new records"),
+                ("crud read", "Read/query records"),
+                ("crud update", "Update existing records"),
+                ("crud delete", "Delete records"),
+                ("advanced analyze", "Analyze data patterns"),
+                ("advanced predict", "AI predictions"),
+                ("advanced vector-search", "Vector similarity search"),
+                ("advanced cluster", "Cluster data analysis"),
+                ("advanced transaction", "Execute complex transactions"),
+            ] {
+                println!("  {:30} {}", cmd.green().bold(), desc.dimmed());
+            }
             println!("  advanced table-info     - Get table/collection information");
             println!();
             println!("Storage engines:");
@@ -1002,16 +1026,8 @@ async fn execute_table_info_operation(
 /// Returns InvalidRequest error for unsupported storage types,
 /// with a list of valid options in the error message.
 fn parse_storage_type(storage_type: &str) -> Result<StorageType> {
-    match storage_type {
-        "columnar" => Ok(StorageType::Columnar),
-        "vector" => Ok(StorageType::Vector),
-        "document" => Ok(StorageType::Document),
-        "relational" => Ok(StorageType::Relational),
-        _ => {
-            eprintln!("Invalid storage type. Use: columnar, vector, document, relational");
-            Err(primusdb::Error::InvalidRequest(
-                "Invalid storage type".to_string(),
-            ))
-        }
-    }
+    storage_type.parse::<StorageType>().map_err(|_| {
+        eprintln!("Invalid storage type. Use: columnar, vector, document, relational, kv");
+        primusdb::Error::InvalidRequest("Invalid storage type".to_string())
+    })
 }

@@ -6,14 +6,16 @@
  */
 
 use crate::{
+    crypto::CryptoManager,
     storage::{Schema, StorageEngine, TableInfo},
     PrimusDBConfig, Record, Result,
 };
 use async_trait::async_trait;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +82,7 @@ pub struct KeyValueEngine {
     config: PrimusDBConfig,
     db: sled::Db,
     databases: Arc<RwLock<HashMap<String, KvDatabase>>>,
+    crypto: Option<Arc<Mutex<CryptoManager>>>,
     encrypted_databases: Arc<RwLock<HashMap<String, bool>>>,
 }
 
@@ -95,7 +98,7 @@ pub struct KvDatabase {
 }
 
 impl KeyValueEngine {
-    pub fn new(config: &PrimusDBConfig) -> Result<Self> {
+    pub fn new(config: &PrimusDBConfig, crypto: Option<Arc<Mutex<CryptoManager>>>) -> Result<Self> {
         let path = format!("{}/keyvalue", config.storage.data_dir);
         let db = sled::open(&path)?;
 
@@ -103,6 +106,7 @@ impl KeyValueEngine {
             config: config.clone(),
             db,
             databases: Arc::new(RwLock::new(HashMap::new())),
+            crypto,
             encrypted_databases: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -218,7 +222,89 @@ impl KeyValueEngine {
             )));
         }
 
-        Ok(doc.clone())
+        let mut result = doc.clone();
+        if self.is_encrypted(db_name) {
+            result.value = self.decrypt_value(&result.value)?;
+        }
+
+        Ok(result)
+    }
+
+    fn is_encrypted(&self, db_name: &str) -> bool {
+        self.encrypted_databases
+            .read()
+            .unwrap()
+            .get(db_name)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn encrypt_value(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
+        let crypto = self.crypto.as_ref().ok_or_else(|| {
+            crate::Error::KeyValueError("Encryption enabled but CryptoManager not available".into())
+        })?;
+
+        let mut mgr = crypto.lock().unwrap();
+        let key = mgr.generate_data_key()?;
+
+        let plaintext = serde_json::to_vec(value)
+            .map_err(|e| crate::Error::SerializationError(e))?;
+        let encrypted = mgr.encrypt(&plaintext, &key)?;
+        drop(mgr);
+
+        let engine = base64::engine::general_purpose::STANDARD;
+        Ok(serde_json::json!({
+            "__encrypted__": true,
+            "data": engine.encode(&encrypted.ciphertext),
+            "nonce": engine.encode(&encrypted.nonce),
+            "tag": engine.encode(&encrypted.tag),
+            "key_id": encrypted.key_id,
+            "algorithm": "AES256GCM"
+        }))
+    }
+
+    fn decrypt_value(&self, encrypted_val: &serde_json::Value) -> Result<serde_json::Value> {
+        let crypto_lock = self.crypto.as_ref().ok_or_else(|| {
+            crate::Error::KeyValueError("Encryption enabled but CryptoManager not available".into())
+        })?;
+        let crypto = crypto_lock.lock().unwrap();
+
+        let obj = encrypted_val.as_object().ok_or_else(|| {
+            crate::Error::KeyValueError("Encrypted value is not a JSON object".into())
+        })?;
+
+        if !obj.get("__encrypted__").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(encrypted_val.clone());
+        }
+
+        let engine = base64::engine::general_purpose::STANDARD;
+        let ciphertext = engine.decode(
+            obj.get("data").and_then(|v| v.as_str()).unwrap_or("")
+        ).map_err(|e| crate::Error::KeyValueError(format!("Base64 decode failed: {}", e)))?;
+
+        let nonce = engine.decode(
+            obj.get("nonce").and_then(|v| v.as_str()).unwrap_or("")
+        ).map_err(|e| crate::Error::KeyValueError(format!("Base64 decode failed: {}", e)))?;
+
+        let tag = engine.decode(
+            obj.get("tag").and_then(|v| v.as_str()).unwrap_or("")
+        ).map_err(|e| crate::Error::KeyValueError(format!("Base64 decode failed: {}", e)))?;
+
+        let key_id = obj.get("key_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        let encrypted_data = crate::crypto::EncryptedData {
+            nonce,
+            ciphertext,
+            tag,
+            key_id,
+            algorithm: crate::crypto::EncryptionAlgorithm::AES256GCM,
+        };
+
+        let plaintext = crypto.decrypt(&encrypted_data)
+            .map_err(|e| crate::Error::KeyValueError(format!("Decryption failed: {}", e)))?;
+
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| crate::Error::SerializationError(e))
     }
 
     pub fn put_document(
@@ -255,10 +341,15 @@ impl KeyValueEngine {
         };
 
         let now = chrono::Utc::now().to_rfc3339();
+        let value = if self.is_encrypted(db_name) {
+            self.encrypt_value(&data)?
+        } else {
+            data
+        };
         let document = KvDocument {
             _id: doc_id.to_string(),
             _rev: Some(new_rev),
-            value: data,
+            value,
             created_at: if is_new { Some(now.clone()) } else { None },
             updated_at: Some(now),
             deleted: false,
@@ -503,6 +594,15 @@ impl KeyValueEngine {
         );
 
         Ok(index)
+    }
+
+    pub fn list_indexes(&self, db_name: &str) -> Result<Vec<KvIndex>> {
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+        let indexes = database.indexes.read().unwrap();
+        Ok(indexes.values().cloned().collect())
     }
 
     pub fn find(&self, db_name: &str, request: KvFindRequest) -> Result<serde_json::Value> {
@@ -944,10 +1044,97 @@ impl StorageEngine for KeyValueEngine {
 
     async fn analyze(
         &self,
-        _table: &str,
+        table: &str,
         _conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<String> {
-        Ok("Key-Value analyze not fully implemented".to_string())
+        let db_name = table;
+        let databases = self.databases.read().unwrap();
+        if let Some(database) = databases.get(db_name) {
+            let docs = database.documents.read().unwrap();
+            let doc_count = docs.len();
+            let indexes = database.indexes.read().unwrap();
+            let idx_count = indexes.len();
+            let seq = *database.sequence.read().unwrap();
+            let _field_counts: HashMap<String, u64> = {
+                let mut counts = HashMap::new();
+                for doc in docs.values() {
+                    if let Some(obj) = doc.value.as_object() {
+                        for key in obj.keys() {
+                            *counts.entry(key.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+                counts
+            };
+            let avg_doc_size: f64 = if doc_count > 0 {
+                let total: usize = docs.values().map(|d| {
+                    serde_json::to_string(&d.value).unwrap_or_default().len()
+                }).sum();
+                total as f64 / doc_count as f64
+            } else {
+                0.0
+            };
+            let is_encrypted = self.encrypted_databases.read().unwrap().get(db_name).copied().unwrap_or(false);
+            Ok(serde_json::json!({
+                "database": db_name,
+                "doc_count": doc_count,
+                "index_count": idx_count,
+                "sequence": seq,
+                "avg_doc_size_bytes": avg_doc_size,
+                "encrypted": is_encrypted,
+                "engine": "keyvalue"
+            }).to_string())
+        } else {
+            Ok(serde_json::json!({
+                "database": db_name,
+                "doc_count": 0,
+                "index_count": 0,
+                "sequence": 0,
+                "engine": "keyvalue"
+            }).to_string())
+        }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::Transaction;
+
+    fn test_tx() -> Transaction {
+        Transaction {
+            id: "test".to_string(),
+            operations: vec![],
+            created_at: chrono::Utc::now(),
+            status: crate::transaction::TransactionStatus::Active,
+            updated_at: chrono::Utc::now(),
+            isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+            timeout_ms: 30000,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kv_create_and_select() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = PrimusDBConfig::default();
+        config.storage.data_dir = dir.path().to_str().unwrap().to_string();
+        let engine = KeyValueEngine::new(&config, None).unwrap();
+        let schema = Schema { fields: vec![], indexes: vec![], constraints: vec![] };
+
+        engine.create_table("test_kv", &schema).await.unwrap();
+        let info = engine.table_info("test_kv").await.unwrap();
+        assert_eq!(info.name, "test_kv");
+
+        let data = serde_json::json!({"_id": "doc1", "value": "hello"});
+        let id = engine.insert("test_kv", &data, &test_tx()).await.unwrap();
+        assert!(id > 0);
+
+        let records = engine.select("test_kv", None, 10, 0, &test_tx()).await.unwrap();
+        assert_eq!(records.len(), 1);
+
+        engine.drop_table("test_kv").await.unwrap();
+    }
+
 }

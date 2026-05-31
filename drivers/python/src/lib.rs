@@ -2,11 +2,12 @@
  * PrimusDB Python Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.2.3-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
+ * Version: 1.3.0-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
  */
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use reqwest::Client;
 
 use tokio::runtime::Runtime;
@@ -218,18 +219,291 @@ impl PyPrimusDBDriver {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
 
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
-        
-        serde_json::to_string(&result)
-            .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
-    })
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+
+            serde_json::to_string(&result)
+                .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {}", e)))
+        })
+    }
+
+
+/// Add a column to a relational table
+    fn update(
+        &self,
+        storage_type: &PyStorageType,
+        table: &str,
+        data: &str,
+        conditions: Option<&str>,
+    ) -> PyResult<u64> {
+        let conditions_value = if let Some(cond) = conditions {
+            Some(
+                serde_json::from_str::<serde_json::Value>(cond).map_err(|e| {
+                    PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e))
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let data_value: serde_json::Value = serde_json::from_str(data)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON data: {}", e)))?;
+
+        self.runtime.block_on(async {
+            let url = format!("{}/api/v1/query", self.base_url);
+            let body = serde_json::json!({
+                "storage_type": storage_type.0,
+                "operation": "Update",
+                "table": table,
+                "conditions": conditions_value,
+                "data": data_value
+            });
+
+            let response = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+
+            if let Some(count) = result.get("count").and_then(|c| c.as_u64()) {
+                Ok(count)
+            } else {
+                Ok(0)
+            }
+        })
+    }
+
+    #[pyo3(signature = (storage_type, table, conditions=None))]
+    fn delete(
+        &self,
+        storage_type: &PyStorageType,
+        table: &str,
+        conditions: Option<&str>,
+    ) -> PyResult<u64> {
+        let conditions_value = if let Some(cond) = conditions {
+            Some(
+                serde_json::from_str::<serde_json::Value>(cond).map_err(|e| {
+                    PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e))
+                })?,
+            )
+        } else {
+            None
+        };
+
+        self.runtime.block_on(async {
+            let url = format!("{}/api/v1/query", self.base_url);
+            let body = serde_json::json!({
+                "storage_type": storage_type.0,
+                "operation": "Delete",
+                "table": table,
+                "conditions": conditions_value
+            });
+
+            let response = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+
+            if let Some(count) = result.get("count").and_then(|c| c.as_u64()) {
+                Ok(count)
+            } else {
+                Ok(0)
+            }
+        })
+    }
+
+    // ==================== Cluster Gateway Methods ====================
+
+    fn cluster_status(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/cluster/status", self.base_url);
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            let r: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+            Ok::<_, PyErr>(r)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn cluster_nodes(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/cluster/nodes", self.base_url);
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            let r: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+            Ok::<_, PyErr>(r)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn route_request(&self, shard_key: Option<String>, preferred_nodes: Option<Vec<String>>) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/cluster/route", self.base_url);
+            let body = serde_json::json!({
+                "shard_key": shard_key,
+                "preferred_nodes": preferred_nodes,
+            });
+            let response = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            let r: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+            Ok::<_, PyErr>(r)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn cluster_metrics(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/cluster/metrics", self.base_url);
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            let r: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
+            Ok::<_, PyErr>(r)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    // ── Federation Methods ─────────────────────────────────
+
+    fn federation_status(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/status", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn federation_clusters(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/clusters", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn federation_domains(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/domains", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn create_data_domain(&self, name: &str, storage_types: Vec<String>, collections: Vec<String>,
+        tables: Vec<String>, member_clusters: Vec<String>, description: Option<String>, replication_mode: Option<String>) -> PyResult<PyObject>
+    {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/domains", self.base_url);
+            let body = serde_json::json!({
+                "name": name,
+                "description": description,
+                "replication_mode": replication_mode,
+                "storage_types": storage_types,
+                "collections": collections,
+                "tables": tables,
+                "member_clusters": member_clusters,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn join_domain(&self, name: &str, collections: Option<Vec<String>>, storage_types: Option<Vec<String>>, replication_mode: Option<String>) -> PyResult<PyObject>
+    {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/domains/{}/join", self.base_url, name);
+            let body = serde_json::json!({
+                "collections": collections,
+                "storage_types": storage_types,
+                "replication_mode": replication_mode,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn leave_domain(&self, name: &str) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/domains/{}/leave", self.base_url, name);
+            let response = self.client.post(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn federation_metrics(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/federation/metrics", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok::<_, PyErr>(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
 }
-
-// ==================== DDL / ER Model Operations ====================
-
 /// Add a column to a relational table
 #[pyfunction]
 fn add_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, field: &str) -> PyResult<String> {
@@ -263,9 +537,9 @@ fn add_column(host: &str, port: u16, token: &str, storage_type: &str, table: &st
     })
 }
 
-/// Drop a column from a relational table
-#[pyfunction]
-fn drop_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, column_name: &str) -> PyResult<String> {
+    /// Drop a column from a relational table
+    #[pyfunction]
+    fn drop_column(host: &str, port: u16, token: &str, storage_type: &str, table: &str, column_name: &str) -> PyResult<String> {
     let runtime = Runtime::new()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
     
@@ -1106,106 +1380,6 @@ fn kv_find(host: &str, port: u16, database: &str, selector: &str, token: &str) -
     })
 }
 
-    #[pyo3(signature = (storage_type, table, data, conditions=None))]
-    fn update(
-        &self,
-        storage_type: &PyStorageType,
-        table: &str,
-        data: &str,
-        conditions: Option<&str>,
-    ) -> PyResult<u64> {
-        let conditions_value = if let Some(cond) = conditions {
-            Some(
-                serde_json::from_str::<serde_json::Value>(cond).map_err(|e| {
-                    PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e))
-                })?,
-            )
-        } else {
-            None
-        };
-
-        let data_value: serde_json::Value = serde_json::from_str(data)
-            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON data: {}", e)))?;
-
-        self.runtime.block_on(async {
-            let url = format!("{}/api/v1/query", self.base_url);
-            let body = serde_json::json!({
-                "storage_type": storage_type.0,
-                "operation": "Update",
-                "table": table,
-                "conditions": conditions_value,
-                "data": data_value
-            });
-
-            let response = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
-
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
-
-            if let Some(count) = result.get("count").and_then(|c| c.as_u64()) {
-                Ok(count)
-            } else {
-                Ok(0)
-            }
-        })
-    }
-
-    #[pyo3(signature = (storage_type, table, conditions=None))]
-    fn delete(
-        &self,
-        storage_type: &PyStorageType,
-        table: &str,
-        conditions: Option<&str>,
-    ) -> PyResult<u64> {
-        let conditions_value = if let Some(cond) = conditions {
-            Some(
-                serde_json::from_str::<serde_json::Value>(cond).map_err(|e| {
-                    PyRuntimeError::new_err(format!("Invalid JSON conditions: {}", e))
-                })?,
-            )
-        } else {
-            None
-        };
-
-        self.runtime.block_on(async {
-            let url = format!("{}/api/v1/query", self.base_url);
-            let body = serde_json::json!({
-                "storage_type": storage_type.0,
-                "operation": "Delete",
-                "table": table,
-                "conditions": conditions_value
-            });
-
-            let response = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
-
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?;
-
-            if let Some(count) = result.get("count").and_then(|c| c.as_u64()) {
-                Ok(count)
-            } else {
-                Ok(0)
-            }
-        })
-    }
-}
-
 #[pyclass]
 #[derive(Clone)]
 pub struct PyStorageType(&'static str);
@@ -1241,6 +1415,34 @@ impl PyStorageType {
 
     fn __str__(&self) -> &str {
         self.0
+    }
+}
+
+fn serde_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyObject {
+    match value {
+        serde_json::Value::Null => py.None(),
+        serde_json::Value::Bool(b) => b.into_py(py),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into_py(py)
+            } else if let Some(f) = n.as_f64() {
+                f.into_py(py)
+            } else {
+                py.None()
+            }
+        }
+        serde_json::Value::String(s) => s.as_str().into_py(py),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<PyObject> = arr.iter().map(|v| serde_value_to_py(py, v)).collect();
+            items.into_py(py)
+        }
+        serde_json::Value::Object(obj) => {
+            let dict = PyDict::new(py);
+            for (k, v) in obj {
+                dict.set_item(k.as_str(), serde_value_to_py(py, v)).unwrap_or(());
+            }
+            dict.into()
+        }
     }
 }
 

@@ -1246,6 +1246,10 @@ impl StorageEngine for DocumentEngine {
 
         let collections = self.collections.read().unwrap();
         if let Some(collection) = collections.get(table) {
+            let size_bytes: u64 = collection.documents.values()
+                .filter_map(|doc| serde_json::to_string(&doc).ok())
+                .map(|s| s.len() as u64)
+                .sum();
             Ok(TableInfo {
                 name: table.to_string(),
                 schema: Schema {
@@ -1254,7 +1258,7 @@ impl StorageEngine for DocumentEngine {
                     constraints: vec![],
                 },
                 row_count: collection.documents.len() as u64,
-                size_bytes: 0,
+                size_bytes,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -1263,5 +1267,77 @@ impl StorageEngine for DocumentEngine {
                 "Collection not found".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::Transaction;
+
+    fn test_tx() -> Transaction {
+        Transaction {
+            id: "test".to_string(),
+            operations: vec![],
+            created_at: chrono::Utc::now(),
+            status: crate::transaction::TransactionStatus::Active,
+            updated_at: chrono::Utc::now(),
+            isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+            timeout_ms: 30000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_document_checksum() {
+        let data = serde_json::json!({"name": "alice", "age": 30});
+        let checksum = Document::compute_checksum(&data);
+        assert_eq!(checksum.len(), 64);
+    }
+
+    #[test]
+    fn test_document_new_doc() {
+        let data = serde_json::json!({"name": "bob"});
+        let doc = Document::new_doc("doc_1".to_string(), data.clone(), "node1");
+        assert_eq!(doc.id, "doc_1");
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.data["name"], "bob");
+    }
+
+    #[tokio::test]
+    async fn test_document_insert_and_select() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = PrimusDBConfig::default();
+        config.storage.data_dir = dir.path().to_str().unwrap().to_string();
+        config.cluster.node_id = "test_node".to_string();
+        let engine = DocumentEngine::new(&config).unwrap();
+        let schema = Schema { fields: vec![], indexes: vec![], constraints: vec![] };
+        engine.create_table("test_docs", &schema).await.unwrap();
+
+        let tx = test_tx();
+        let data = serde_json::json!({"title": "test doc", "value": 42});
+        let id = engine.insert("test_docs", &data, &tx).await.unwrap();
+        assert_eq!(id, 1);
+
+        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data["title"], "test doc");
+
+        // Test update
+        let update = serde_json::json!({"value": 99});
+        let updated = engine.update("test_docs", None, &update, &tx).await.unwrap();
+        assert_eq!(updated, 1);
+
+        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
+        assert_eq!(records[0].data["value"], 99);
+
+        // Test delete
+        let deleted = engine.delete("test_docs", None, &tx).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
+        assert_eq!(records.len(), 0);
+
+        engine.drop_table("test_docs").await.unwrap();
     }
 }

@@ -1,6 +1,6 @@
 # PrimusDB Security Guide
 
-This document provides comprehensive security documentation for PrimusDB, including authentication, authorization, encryption, and best practices.
+This document provides comprehensive security documentation for PrimusDB, including authentication, authorization, encryption, Ed25519 digital signatures, blockchain audit ledger, secure protocol, and best practices.
 
 ## Table of Contents
 
@@ -8,10 +8,13 @@ This document provides comprehensive security documentation for PrimusDB, includ
 2. [Authorization & RBAC](#authorization--rbac)
 3. [API Keys](#api-keys)
 4. [Encryption](#encryption)
-5. [Password Policy](#password-policy)
-6. [Session Management](#session-management)
-7. [Rate Limiting](#rate-limiting)
-8. [Security Best Practices](#security-best-practices)
+5. [Ed25519 Digital Signatures](#ed25519-digital-signatures)
+6. [Blockchain Audit Ledger](#blockchain-audit-ledger)
+7. [Secure Communication Protocol](#secure-communication-protocol)
+8. [Password Policy](#password-policy)
+9. [Session Management](#session-management)
+10. [Rate Limiting](#rate-limiting)
+11. [Security Best Practices](#security-best-practices)
 
 ---
 
@@ -208,6 +211,129 @@ openssl req -x509 -newkey rsa:4096 \
 
 ---
 
+## Ed25519 Digital Signatures
+
+PrimusDB supports Ed25519 cryptographic signatures for transaction-level non-repudiation.
+
+### Signing Transactions
+
+Every `Transaction` can be signed using `ed25519-dalek`:
+
+```rust
+use primusdb::types::Transaction;
+use ed25519_dalek::Keypair;
+use rand::rngs::OsRng;
+
+let mut tx = Transaction::new(/* ... */);
+let keypair = Keypair::generate(&mut OsRng);
+tx.sign(&keypair);
+```
+
+The signing process:
+1. Serializes transaction payload to canonical JSON (excluding `signature` field)
+2. Signs with `ed25519-dalek::Keypair::sign()`
+3. Stores `signature` and `public_key` on the transaction
+
+### Verification
+
+```rust
+if tx.verify_signature() {
+    // Signature is valid — transaction originated from claimed signer
+} else {
+    // Signature invalid — possible forgery or tampering
+}
+```
+
+`verify_signature()` recomputes the canonical JSON and uses `ed25519-dalek::PublicKey::verify_strict()` for constant-time verification.
+
+### Benefits
+- **Non-Repudiation**: Signer cannot deny issuing the transaction
+- **Integrity**: Any modification invalidates the signature
+- **Auditability**: Every operation can be traced to its cryptographic author
+
+---
+
+## Blockchain Audit Ledger
+
+PrimusDB includes an immutable, tamper-evident audit ledger providing a cryptographic chain of all transactions.
+
+### Architecture
+
+- **Append-only log**: Blocks are appended sequentially; no deletion or modification
+- **SHA-256 Merkle Tree**: Each block contains a Merkle root of all its transactions
+- **Hash Chain**: Each block includes the hash of the previous block, forming an unbreakable chain
+- **Dual Indexing**: Blocks indexed by namespace and transaction ID for fast lookup
+- **Sled Persistence**: All blocks survive restarts
+
+### Tamper Detection
+
+```rust
+use primusdb::blockchain::AuditLedger;
+
+let ledger = AuditLedger::new(sled_db)?;
+
+// Check chain integrity
+let report = ledger.verify_chain()?;
+if report.is_tampered() {
+    for tamper in report.tampered_blocks() {
+        println!("Block {} tampered: expected {} got {}",
+            tamper.index, tamper.expected_hash, tamper.actual_hash);
+    }
+}
+```
+
+`verify_chain()` recomputes every hash from genesis to head, reporting any discrepancy.
+
+### Use Cases
+- **Compliance**: Prove data integrity to regulators
+- **Forensics**: Trace the history of any record
+- **Monitoring**: Automated integrity checks
+
+---
+
+## Secure Communication Protocol
+
+The protocol layer provides application-level encryption, authentication, and integrity for inter-node communication.
+
+### Protocol Stack
+
+| Layer | Mechanism |
+|-------|-----------|
+| Encryption | AES-256-GCM via `ring::aead` |
+| Auth & Non-Repudiation | Ed25519 signatures via `ed25519-dalek` |
+| Integrity | HMAC-SHA256 |
+| Trust | X.509 certificate verification with CRL revocation |
+| Journaling | Append-only distributed log with sled persistence |
+
+### Message Flow
+
+1. **Encrypt**: Plaintext is encrypted with AES-256-GCM (random 12-byte nonce per message)
+2. **Sign**: Encrypted payload is signed with the sender's Ed25519 key
+3. **HMAC**: HMAC-SHA256 provides additional integrity verification
+4. **Send**: Message transmitted over TCP/TLS
+5. **Verify**: Recipient verifies HMAC, then Ed25519 signature, then decrypts
+
+### Trust Establishment
+
+```rust
+use primusdb::protocol::TrustManager;
+
+let trust = TrustManager::new();
+trust.add_trusted_cert(cert_pem)?;      // Add trusted CA
+trust.revoke_certificate(cert_der)?;    // CRL-style revocation
+
+// Verify a peer's certificate
+if trust.verify_peer(&peer_cert, &peer_sig, &message) {
+    // Peer is authenticated
+}
+```
+
+### Error Recovery
+
+The protocol includes automatic retry with exponential backoff for transient failures, and a distributed journal for crash recovery.
+
+---
+
 ## Password Policy
 
 PrimusDB enforces strong password requirements:
@@ -397,6 +523,10 @@ export PRIMUSDB_DB_ENCRYPTION_KEY="your-encryption-key"
 - [ ] MFA enabled for admin accounts
 - [ ] API keys with appropriate scopes
 - [ ] Regular API key rotation
+- [ ] Ed25519 transaction signatures enabled
+- [ ] Blockchain audit ledger integrity verified
+- [ ] Protocol layer encryption enabled (inter-node)
+- [ ] X.509 certificates configured for node auth
 - [ ] Audit logging enabled
 - [ ] Rate limiting configured
 - [ ] Firewall rules applied
@@ -432,4 +562,4 @@ Monitor these events:
 
 - [API Reference](API_REFERENCE.md) - Complete API documentation
 - [ADMIN.md](ADMIN.md) - Administration guide
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Security architecture
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Security architecture (see Sections 18-19 for signing & protocol)

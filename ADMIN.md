@@ -1,7 +1,7 @@
 # PrimusDB Administration Manual
 ===============================
 
-This manual covers system administration tasks for PrimusDB v1.1.0+ deployments.
+This manual covers system administration tasks for PrimusDB v1.3.0+ deployments.
 
 ## System Requirements
 
@@ -366,6 +366,92 @@ kill -TERM $(pidof primusdb-server)
 
 # Force removal (if needed)
 curl -X DELETE http://coordinator:8080/api/v1/cluster/nodes/node2
+```
+
+### Cluster Gateway
+The ClusterGateway provides smart load balancing with 6 routing strategies (RoundRobin, LeastLoaded, LowestLatency, ShardAware, Random, DomainAware) and circuit breaker (5 failures → 30s reset).
+
+```bash
+# Check gateway status
+curl http://localhost:8080/api/v1/cluster/status
+
+# List registered nodes
+curl http://localhost:8080/api/v1/cluster/nodes
+
+# Route a request (with strategy selection)
+curl -X POST http://localhost:8080/api/v1/cluster/route \
+  -H "Content-Type: application/json" \
+  -d '{"strategy": "LeastLoaded"}'
+
+# Register a node via gateway
+curl -X POST http://localhost:8080/api/v1/cluster/node/register \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "node3", "host": "10.0.0.3", "port": 8080, "shards": []}'
+
+# Remove a node via gateway
+curl -X DELETE http://localhost:8080/api/v1/cluster/nodes/node3
+
+# View gateway metrics
+curl http://localhost:8080/api/v1/cluster/metrics
+```
+
+## Federation Management
+
+### Federation Configuration
+```toml
+[federation]
+enabled = true
+federation_id = "my-federation"
+cluster_id = "cluster-us"
+region = "us-east"
+discovery = ["fed-peer1:8080", "fed-peer2:8080"]
+```
+
+### Starting a Federated Server
+```bash
+primusdb-server --host 0.0.0.0 --port 8080 \
+  --federation-id my-fed --cluster-id cluster-us --region us-east \
+  --federation-discovery fed-peer1:8081,fed-peer2:8081
+```
+
+### Federation Admin Commands
+```bash
+# Check federation status
+curl http://localhost:8080/api/v1/federation/status
+
+# List all member clusters
+curl http://localhost:8080/api/v1/federation/clusters
+
+# List DataDomains
+curl http://localhost:8080/api/v1/federation/domains
+
+# Create a DataDomain
+curl -X POST http://localhost:8080/api/v1/federation/domains \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "global-users",
+    "description": "Replicated user data",
+    "replication_mode": "Quorum",
+    "member_clusters": ["cluster-us", "cluster-eu"]
+  }'
+
+# Join a DataDomain
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/join \
+  -H "Content-Type: application/json" \
+  -d '{"collections": ["users"], "storage_types": ["document"]}'
+
+# Leave a DataDomain
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/leave \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Rebalance a DataDomain
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/balance \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# View federation metrics
+curl http://localhost:8080/api/v1/federation/metrics
 ```
 
 ## Troubleshooting

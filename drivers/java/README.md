@@ -9,7 +9,7 @@ JDBC driver for PrimusDB - Enterprise-grade hybrid database engine supporting co
 ## 🚀 Features
 
 - **JDBC 4.2 Compliance**: Full JDBC specification support
-- **Enterprise Ready**: Connection pooling, prepared statements, metadata
+- **Enterprise Ready**: Connection pooling, **PreparedStatement with full batch** (setInt, setString, setDouble, setBoolean, setLong, setFloat, setNull + addBatch/executeBatch), metadata
 - **Multi-Storage Support**: Columnar, vector, document, and relational operations
 - **AI/ML Integration**: Built-in predictions and clustering through JDBC
 - **High Performance**: Reactive HTTP client with connection pooling

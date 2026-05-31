@@ -2,7 +2,7 @@
  * PrimusDB - Hybrid Database Engine
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.2.0-alpha
+ * Version: 1.3.0-alpha
  */
 
 /*!
@@ -144,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             node_id: "local_node".to_string(),
             discovery_servers: vec![],
         },
+        federation: None,
     };
 
     // Create and start PrimusDB instance
@@ -183,8 +184,9 @@ pub mod consensus;
 pub mod crypto;
 pub mod drivers;
 pub mod error;
+pub mod metrics;
 pub mod namespace;
-// pub mod protocol; // Temporarily disabled for compilation
+pub mod protocol;
 pub mod query;
 pub mod storage;
 pub mod transaction;
@@ -228,6 +230,7 @@ pub use cache::*;
 ///         node_id: "local_node".to_string(),
 ///         discovery_servers: vec![],
 ///     },
+///     federation: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +245,9 @@ pub struct PrimusDBConfig {
     pub cluster: ClusterConfig,
     /// Namespace configuration for multi-model isolation
     pub namespaces: namespace::NamespaceConfig,
+    /// (Optional) Federation configuration for multi-cluster SuperScalar mode
+    /// When set, enables cluster-of-clusters federation
+    pub federation: Option<cluster::FederationConfig>,
 }
 
 /// Configuration for storage-related settings
@@ -375,7 +381,7 @@ pub struct PrimusDB {
     /// Consensus engine for distributed operations
     consensus_engine: Arc<dyn consensus::ConsensusEngine>,
     /// Transaction manager for ACID operations
-    transaction_manager: Arc<transaction::TransactionManager>,
+    pub transaction_manager: Arc<transaction::TransactionManager>,
     /// AI/ML engine for analytics and predictions
     ai_engine: Arc<ai::AIEngine>,
     /// UQL engine for unified queries across all storage engines
@@ -390,6 +396,12 @@ pub struct PrimusDB {
     namespace_controller: Arc<namespace::NamespaceController>,
     /// Background block producer handle
     producer_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Federation manager for cross-cluster orchestration (optional)
+    federation_manager: Option<Arc<cluster::FederationManager>>,
+    /// Data domain manager for cross-cluster replication domains (optional)
+    domain_manager: Option<Arc<cluster::DataDomainManager>>,
+    /// Key-Value storage engine (CouchDB-compatible API)
+    kv_engine: Option<Arc<storage::keyvalue::KeyValueEngine>>,
 }
 
 /// Types of storage engines available in PrimusDB
@@ -421,11 +433,11 @@ impl std::str::FromStr for StorageType {
     type Err = crate::Error;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "Columnar" => Ok(StorageType::Columnar),
-            "Vector" => Ok(StorageType::Vector),
-            "Document" => Ok(StorageType::Document),
-            "Relational" => Ok(StorageType::Relational),
-            "KeyValue" => Ok(StorageType::KeyValue),
+            "Columnar" | "columnar" => Ok(StorageType::Columnar),
+            "Vector" | "vector" => Ok(StorageType::Vector),
+            "Document" | "document" => Ok(StorageType::Document),
+            "Relational" | "relational" => Ok(StorageType::Relational),
+            "KeyValue" | "keyvalue" | "kv" => Ok(StorageType::KeyValue),
             _ => Err(crate::Error::ValidationError(format!("Unknown storage type: {}", s))),
         }
     }
@@ -586,12 +598,16 @@ impl PrimusDB {
             StorageType::Relational,
             Arc::new(storage::relational::RelationalEngine::new(&config_clone)?),
         );
-        storage_engines.insert(
-            StorageType::KeyValue,
-            Arc::new(storage::keyvalue::KeyValueEngine::new(&config_clone)?),
-        );
 
         let crypto_manager = Arc::new(crypto::CryptoManager::new(&config_clone.security)?);
+        let kv_crypto = Arc::new(std::sync::Mutex::new(crypto::CryptoManager::new(&config_clone.security)?));
+        let kv_engine_raw = storage::keyvalue::KeyValueEngine::new(&config_clone, Some(kv_crypto))?;
+        let kv_engine: Arc<storage::keyvalue::KeyValueEngine> = Arc::new(kv_engine_raw);
+        storage_engines.insert(
+            StorageType::KeyValue,
+            kv_engine.clone() as Arc<dyn storage::StorageEngine>,
+        );
+
         let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(
             &config_clone,
             storage_engines.clone(),
@@ -613,7 +629,10 @@ impl PrimusDB {
             Arc::new(RwLock::new(uql_engines)),
         ));
 
-        let cluster_manager = Arc::new(RwLock::new(cluster::ClusterManager::new(&config_clone)?));
+        let bind_addr: std::net::SocketAddr = format!("{}:{}", config_clone.network.bind_address, config_clone.network.port)
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:8080".parse().unwrap());
+        let cluster_manager = Arc::new(RwLock::new(cluster::ClusterManager::new(&config_clone.cluster, bind_addr)?));
         let sync_config = cluster::sync::SyncConfig {
             replication_factor: 3,
             sync_interval_ms: 100,
@@ -625,9 +644,18 @@ impl PrimusDB {
             max_clock_drift_ms: 5000,
             merkle_sync: true,
         };
+        let sync_clients: Arc<std::sync::RwLock<HashMap<String, Arc<cluster::rpc::RpcClient>>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let sync_db = {
+            let data_dir = format!("{}/sync", config_clone.storage.data_dir);
+            std::fs::create_dir_all(&data_dir).ok();
+            sled::open(&data_dir).ok()
+        };
         let sync_coordinator = Arc::new(cluster::sync::SyncCoordinator::new(
             sync_config,
             config_clone.cluster.node_id.clone(),
+            sync_clients,
+            sync_db,
         )?);
 
         let cluster_auth = Arc::new(tokio::sync::RwLock::new(
@@ -638,6 +666,18 @@ impl PrimusDB {
         if config.namespaces.enabled {
             namespace_controller.init()?;
         }
+
+        // Initialize federation components if configured
+        let (federation_manager, domain_manager) = if let Some(ref fed_config) = config.federation {
+            let fed = Arc::new(cluster::FederationManager::new(fed_config.clone()));
+            let dm = Arc::new(
+                cluster::DataDomainManager::new(config.cluster.node_id.clone())
+                    .with_federation(fed.clone())
+            );
+            (Some(fed), Some(dm))
+        } else {
+            (None, None)
+        };
 
         Ok(PrimusDB {
             config,
@@ -652,7 +692,108 @@ impl PrimusDB {
             cluster_auth,
             namespace_controller,
             producer_handle: Mutex::new(None),
+            federation_manager,
+            domain_manager,
+            kv_engine: Some(kv_engine),
         })
+    }
+
+    pub fn get_federation_manager(&self) -> Option<Arc<cluster::FederationManager>> {
+        self.federation_manager.clone()
+    }
+
+    pub fn set_federation_manager(&mut self, mgr: Arc<cluster::FederationManager>) {
+        self.federation_manager = Some(mgr);
+    }
+
+    pub fn get_domain_manager(&self) -> Option<Arc<cluster::DataDomainManager>> {
+        self.domain_manager.clone()
+    }
+
+    pub fn set_domain_manager(&mut self, mgr: Arc<cluster::DataDomainManager>) {
+        self.domain_manager = Some(mgr);
+    }
+
+    pub fn get_kv_engine(&self) -> Option<Arc<storage::keyvalue::KeyValueEngine>> {
+        self.kv_engine.clone()
+    }
+
+    /// After a successful write, replicate the data to every DataDomain whose
+    /// storage type + table match.  Failures are only logged — the original
+    /// write has already succeeded.
+    async fn replicate_write_to_domains(
+        &self,
+        storage_type: &str,
+        table: &str,
+        data: &serde_json::Value,
+    ) {
+        let Some(ref dm) = self.domain_manager else { return };
+        if data.is_null() { return; }
+
+        let domains = dm.find_matching_domains(storage_type, table).await;
+        if domains.is_empty() { return; }
+
+        let cluster_id = &self.config.cluster.node_id;
+        let data_bytes = match serde_json::to_vec(data) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to serialize data for cross-cluster replication: {e}");
+                return;
+            }
+        };
+
+        for domain_name in &domains {
+            let key = extract_record_key(data);
+            let start = std::time::Instant::now();
+            match dm
+                .replicate_cross_cluster(domain_name, storage_type, table, &key, &data_bytes, cluster_id)
+                .await
+            {
+                Ok(_) => {
+                    crate::metrics::record_replication(start.elapsed().as_secs_f64());
+                }
+                Err(e) => {
+                    crate::metrics::record_replication_failure();
+                    tracing::warn!(
+                        "Cross-cluster replication failed for domain '{domain_name}': {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Start federation background tasks (announce + heartbeat loops).
+    /// Should be called after the cluster has been started.
+    pub async fn start_federation(&self) {
+        if let Some(fed) = &self.federation_manager {
+            let address = self.config.network.bind_address.clone();
+            let port = self.config.network.port;
+            let node_id = self.config.cluster.node_id.clone();
+            fed.clone().start_background_tasks(address, port, node_id, 1).await;
+
+            // Periodic Prometheus metrics update (every 30 s)
+            let fed_metrics = self.federation_manager.clone();
+            let dm_metrics = self.domain_manager.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let online = match &fed_metrics {
+                        Some(f) => f.get_cluster_count().await,
+                        None => 0,
+                    };
+                    let total = match &fed_metrics {
+                        Some(f) => f.members.read().await.len(),
+                        None => 0,
+                    };
+                    let domain_count = match &dm_metrics {
+                        Some(d) => d.domains.read().await.len(),
+                        None => 0,
+                    };
+                    crate::metrics::update_federation_metrics(online, total, domain_count);
+                }
+            });
+        }
     }
 
     pub fn config(&self) -> &PrimusDBConfig {
@@ -754,6 +895,14 @@ impl PrimusDB {
         });
 
         let count = engine.insert(query.table.as_str(), &data, transaction).await?;
+
+        // Cross-cluster replication
+        self.replicate_write_to_domains(
+            &query.storage_type.to_string(),
+            &query.table,
+            &data,
+        ).await;
+
         Ok(QueryResult::Insert(count))
     }
 
@@ -818,6 +967,14 @@ impl PrimusDB {
                 transaction,
             )
             .await?;
+
+        // Cross-cluster replication
+        self.replicate_write_to_domains(
+            &query.storage_type.to_string(),
+            &query.table,
+            &data,
+        ).await;
+
         Ok(QueryResult::Update(count))
     }
 
@@ -857,6 +1014,14 @@ impl PrimusDB {
         let count = engine
             .delete(query.table.as_str(), query.conditions.as_ref(), transaction)
             .await?;
+
+        // Cross-cluster replication (send deleted records)
+        self.replicate_write_to_domains(
+            &query.storage_type.to_string(),
+            &query.table,
+            &serde_json::json!(deleted_records),
+        ).await;
+
         Ok(QueryResult::Delete(count))
     }
 
@@ -1163,9 +1328,9 @@ impl PrimusDB {
             .await
     }
 
-    pub fn get_cluster_status(&self) -> Result<cluster::ClusterStatus> {
+    pub async fn get_cluster_status(&self) -> Result<cluster::ClusterStatusInfo> {
         let cm = self.cluster_manager.read().unwrap();
-        Ok(cm.get_cluster_status())
+        Ok(cm.get_cluster_status().await)
     }
 
     pub fn get_cluster_manager(&self) -> Arc<RwLock<cluster::ClusterManager>> {
@@ -1347,4 +1512,27 @@ impl PrimusDB {
         });
         *self.producer_handle.lock().unwrap() = Some(handle);
     }
+}
+
+/// Try to extract a short record identifier from a JSON value for use as
+/// the replication key.  Checks common fields (`_id`, `id`, `key`, `name`);
+/// falls back to a truncated UUID.
+fn extract_record_key(data: &serde_json::Value) -> String {
+    if let Some(obj) = data.as_object() {
+        for field in &["_id", "id", "key", "name", "email", "product_id", "customer_id"] {
+            if let Some(val) = obj.get(*field) {
+                if let Some(s) = val.as_str() {
+                    return s.to_string();
+                }
+                if val.is_number() {
+                    return format!("{}", val);
+                }
+            }
+        }
+    } else if let Some(arr) = data.as_array() {
+        if let Some(first) = arr.first() {
+            return extract_record_key(first);
+        }
+    }
+    uuid::Uuid::new_v4().to_string()
 }

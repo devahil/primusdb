@@ -292,6 +292,7 @@ use crate::storage::StorageEngine;
 use crate::StorageType;
 use crate::{consensus::ConsensusEngine, PrimusDBConfig, Result};
 use async_trait::async_trait;
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -332,6 +333,93 @@ pub struct Transaction {
     pub isolation_level: IsolationLevel,
     /// Timeout in milliseconds (0 = no timeout)
     pub timeout_ms: u64,
+    /// Optional Ed25519 signature over the serialized transaction payload
+    pub signature: Option<String>,
+    /// Optional public key (hex-encoded) that produced the signature
+    pub public_key: Option<String>,
+}
+
+impl Default for Transaction {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            operations: Vec::new(),
+            status: TransactionStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            isolation_level: IsolationLevel::ReadCommitted,
+            timeout_ms: 0,
+            signature: None,
+            public_key: None,
+        }
+    }
+}
+
+impl Transaction {
+    /// Sign the transaction payload with an Ed25519 signing key.
+    ///
+    /// Serializes the core transaction fields (id, operations, status, created_at,
+    /// isolation_level, timeout_ms) as canonical JSON and signs them.
+    pub fn sign(&mut self, signing_key: &SigningKey) -> crate::Result<()> {
+        let payload = self.serializable_payload();
+        let signature = signing_key.sign(&payload);
+        self.signature = Some(hex::encode(signature.to_bytes()));
+        self.public_key = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        Ok(())
+    }
+
+    /// Verify the Ed25519 signature on this transaction.
+    ///
+    /// Returns `true` if the signature is valid for the serialized payload
+    /// under the stored `public_key`, or `false` if either is missing.
+    pub fn verify(&self) -> crate::Result<bool> {
+        let sig_hex = match &self.signature {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let pk_hex = match &self.public_key {
+            Some(pk) => pk,
+            None => return Ok(false),
+        };
+        let sig_bytes =
+            hex::decode(sig_hex).map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let pk_bytes =
+            hex::decode(pk_hex).map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+
+        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes)
+            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+        let pk = VerifyingKey::from_bytes(
+            &pk_bytes.try_into().map_err(|_| {
+                crate::Error::CryptoError("invalid public key length".to_string())
+            })?,
+        )
+        .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
+
+        let payload = self.serializable_payload();
+        Ok(pk.verify(&payload, &sig).is_ok())
+    }
+
+    /// Canonical serialization used for signing and verification.
+    fn serializable_payload(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            id: &'a str,
+            operations: &'a [TransactionOperation],
+            status: &'a TransactionStatus,
+            created_at: &'a chrono::DateTime<chrono::Utc>,
+            isolation_level: &'a IsolationLevel,
+            timeout_ms: u64,
+        }
+        let p = Payload {
+            id: &self.id,
+            operations: &self.operations,
+            status: &self.status,
+            created_at: &self.created_at,
+            isolation_level: &self.isolation_level,
+            timeout_ms: self.timeout_ms,
+        };
+        serde_json::to_vec(&p).unwrap_or_default()
+    }
 }
 
 /// Individual operation within a transaction
@@ -377,9 +465,10 @@ pub struct TransactionOperation {
 ///
 /// Represents the current status of a transaction throughout its lifecycle.
 /// Used for monitoring, recovery, and coordination purposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum TransactionStatus {
     /// Transaction is actively executing operations
+    #[default]
     Active,
     /// Transaction has been successfully committed
     Committed,
@@ -395,14 +484,15 @@ pub enum TransactionStatus {
 ///
 /// Defines how concurrent transactions interact and what anomalies are prevented.
 /// Higher isolation levels provide stronger consistency guarantees but reduce performance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum IsolationLevel {
+    /// Prevents dirty reads but allows non-repeatable reads and phantom reads
+    /// Good balance between performance and consistency
+    #[default]
+    ReadCommitted,
     /// Lowest isolation level - allows dirty reads, non-repeatable reads, and phantom reads
     /// Best performance but weakest consistency guarantees
     ReadUncommitted,
-    /// Prevents dirty reads but allows non-repeatable reads and phantom reads
-    /// Good balance between performance and consistency
-    ReadCommitted,
     /// Prevents dirty reads and non-repeatable reads but allows phantom reads
     /// Stronger consistency for applications requiring consistent reads
     RepeatableRead,
@@ -447,8 +537,7 @@ pub struct Savepoint {
 
 pub struct TransactionManager {
     config: PrimusDBConfig,
-    #[allow(dead_code)]
-    active_transactions: HashMap<String, Transaction>,
+    active_transactions: std::sync::RwLock<HashMap<String, Transaction>>,
     transaction_log: Arc<dyn TransactionLogStore>,
     consensus_engine: Arc<dyn ConsensusEngine>,
     journal: Arc<JournalManager>,
@@ -504,13 +593,17 @@ impl TransactionManager {
                 })
                 .collect(),
             timestamp: transaction.created_at,
-            signature: {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(format!("{:?}", transaction).as_bytes());
-                let hash = hasher.finalize();
-                format!("sha256:{:x}", hash)
-            },
+            signature: transaction
+                .signature
+                .clone()
+                .unwrap_or_else(|| {
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(format!("{:?}", transaction).as_bytes());
+                    let hash = hasher.finalize();
+                    format!("sha256:{:x}", hash)
+                }),
+            public_key: transaction.public_key.clone().unwrap_or_default(),
             proposer: self.config.cluster.node_id.clone(),
         }
     }
@@ -524,7 +617,7 @@ impl TransactionManager {
 
         Ok(TransactionManager {
             config: config.clone(),
-            active_transactions: HashMap::new(),
+            active_transactions: std::sync::RwLock::new(HashMap::new()),
             transaction_log,
             consensus_engine,
             journal,
@@ -546,6 +639,7 @@ impl TransactionManager {
             updated_at: chrono::Utc::now(),
             isolation_level: IsolationLevel::ReadCommitted,
             timeout_ms: 30000, // 30 seconds default
+            ..Default::default()
         };
 
         // Log transaction start
@@ -569,6 +663,11 @@ impl TransactionManager {
         };
 
         self.transaction_log.append_log(&log_entry).await?;
+
+        // Store in active transactions
+        if let Ok(mut active) = self.active_transactions.write() {
+            active.insert(transaction_id.clone(), transaction.clone());
+        }
 
         Ok(transaction)
     }
@@ -607,6 +706,11 @@ impl TransactionManager {
             // Flush journal to ensure durability
             self.journal.flush().await?;
 
+            // Remove from active transactions
+            if let Ok(mut active) = self.active_transactions.write() {
+                active.remove(&transaction.id);
+            }
+
             info!("Transaction {} committed successfully", transaction.id);
             Ok(())
         } else {
@@ -630,6 +734,7 @@ impl TransactionManager {
             updated_at: chrono::Utc::now(),
             isolation_level: IsolationLevel::Serializable,
             timeout_ms: 0,
+            ..Default::default()
         };
 
         for log in logs.iter().rev() {
@@ -775,6 +880,7 @@ impl JournalManager {
                 updated_at,
                 isolation_level: IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
+                ..Default::default()
             });
         }
 

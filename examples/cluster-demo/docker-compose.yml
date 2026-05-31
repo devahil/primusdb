@@ -1,0 +1,147 @@
+# ─────────────────────────────────────────────────────────
+# PrimusDB Cluster Demo — Docker Compose
+# ─────────────────────────────────────────────────────────
+# Architecture:
+#   Nginx      :8080   →  Load balancer facade
+#   Coordinator :8081   →  Leader node (Raft coordinator)
+#   Worker1     :8082   →  Worker node
+#   Worker2     :8083   →  Worker node
+#   Fed-Peer    :8084   →  Federation peer (cluster-of-clusters)
+#   Seeder      —        One-shot seed data injector
+# ─────────────────────────────────────────────────────────
+
+services:
+
+  # ── Cluster Nodes ──────────────────────────────────────
+
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: examples/cluster-demo/Dockerfile
+    container_name: primusdb-coordinator
+    hostname: coordinator
+    ports: ["8081:8081"]
+    volumes:
+      - primusdb_coordinator:/data
+      - ./config/coordinator.toml:/etc/primusdb/primusdb.toml:ro
+    command: ["--config", "/etc/primusdb/primusdb.toml"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [primusdb-net]
+
+  worker1:
+    build:
+      context: ../..
+      dockerfile: examples/cluster-demo/Dockerfile
+    container_name: primusdb-worker1
+    hostname: worker1
+    ports: ["8082:8082"]
+    volumes:
+      - primusdb_worker1:/data
+      - ./config/worker1.toml:/etc/primusdb/primusdb.toml:ro
+    command: ["--config", "/etc/primusdb/primusdb.toml"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on: [coordinator]
+    networks: [primusdb-net]
+
+  worker2:
+    build:
+      context: ../..
+      dockerfile: examples/cluster-demo/Dockerfile
+    container_name: primusdb-worker2
+    hostname: worker2
+    ports: ["8083:8083"]
+    volumes:
+      - primusdb_worker2:/data
+      - ./config/worker2.toml:/etc/primusdb/primusdb.toml:ro
+    command: ["--config", "/etc/primusdb/primusdb.toml"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on: [coordinator]
+    networks: [primusdb-net]
+
+  # ── Federation Peer (cluster-of-clusters demo) ─────────
+
+  fed-peer:
+    build:
+      context: ../..
+      dockerfile: examples/cluster-demo/Dockerfile
+    container_name: primusdb-fed-peer
+    hostname: fed-peer
+    ports: ["8084:8084"]
+    volumes:
+      - primusdb_fedpeer:/data
+      - ./config/fed-peer.toml:/etc/primusdb/primusdb.toml:ro
+    command: ["--config", "/etc/primusdb/primusdb.toml"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8084/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on: [coordinator, worker1, worker2]
+    networks: [primusdb-net]
+
+  # ── Seed Service ───────────────────────────────────────
+
+  seeder:
+    image: debian:bookworm-slim
+    container_name: primusdb-seeder
+    depends_on:
+      coordinator: { condition: service_healthy }
+      worker1:     { condition: service_healthy }
+      worker2:     { condition: service_healthy }
+      fed-peer:    { condition: service_healthy }
+    volumes:
+      - ./seed:/seed:ro
+    command: >
+      bash -c "
+        apt-get update -qq && apt-get install -y -qq curl python3 openssl jq > /dev/null 2>&1 &&
+        bash /seed/seed.sh &&
+        bash /seed/federation.sh &&
+        echo '' &&
+        echo '╔══════════════════════════════════════════╗' &&
+        echo '║  All done!  Happy exploring!            ║' &&
+        echo '╚══════════════════════════════════════════╝' &&
+        tail -f /dev/null
+      "
+    networks: [primusdb-net]
+
+  # ── Nginx Facade (Swarm / K8s ingress simulation) ─────
+
+  gateway:
+    image: nginx:alpine
+    container_name: primusdb-gateway
+    hostname: gateway
+    ports: ["8080:8080"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      coordinator: { condition: service_healthy }
+      worker1:     { condition: service_healthy }
+      worker2:     { condition: service_healthy }
+      fed-peer:    { condition: service_healthy }
+    networks: [primusdb-net]
+
+networks:
+  primusdb-net:
+    driver: bridge
+
+volumes:
+  primusdb_coordinator:
+  primusdb_worker1:
+  primusdb_worker2:
+  primusdb_fedpeer:

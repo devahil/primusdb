@@ -752,24 +752,14 @@ pub mod columnar;
 /// Flexible JSON document storage with dynamic indexing,
 /// schema validation, and path-based queries.
 pub mod document;
-
-/// Relational storage engine implementation
-///
-/// Traditional SQL table storage with ACID transactions,
-/// foreign key constraints, and relational algebra operations.
 pub mod relational;
-
-/// Vector storage engine implementation
-///
-/// High-performance similarity search with FAISS-style indexing,
-/// SIMD operations, and multiple distance metrics.
 pub mod vector;
+pub mod keyvalue;
 
 /// Key-Value storage engine implementation (CouchDB-compatible)
 ///
 /// Document-oriented key-value storage with _id, _rev support,
 /// bulk operations, views, and Mango query syntax.
-pub mod keyvalue;
 
 /*
 Storage Module Hierarchy:

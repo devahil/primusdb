@@ -1,14 +1,11 @@
 package com.primusdb.jdbc;
 
 import java.sql.*;
+import java.util.Iterator;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import java.util.Iterator;
 
-/**
- * JDBC ResultSet implementation for PrimusDB
- */
 public class PrimusDBResultSet implements ResultSet {
 
     private final JsonArray results;
@@ -20,9 +17,6 @@ public class PrimusDBResultSet implements ResultSet {
     public PrimusDBResultSet(JsonArray results) {
         this.results = results;
         this.iterator = results.iterator();
-        if (iterator.hasNext()) {
-            this.currentRow = iterator.next().getAsJsonObject();
-        }
     }
 
     @Override
@@ -96,14 +90,12 @@ public class PrimusDBResultSet implements ResultSet {
         return closed;
     }
 
-    // Minimal implementations
     private void checkClosed() throws SQLException {
         if (closed) {
             throw new SQLException("ResultSet is closed");
         }
     }
 
-    // Stub implementations for other methods
     @Override public boolean wasNull() throws SQLException { return false; }
     @Override public String getString(int columnIndex) throws SQLException { return getString("col" + columnIndex); }
     @Override public boolean getBoolean(int columnIndex) throws SQLException { return getBoolean("col" + columnIndex); }
@@ -120,14 +112,10 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public java.io.InputStream getAsciiStream(int columnIndex) throws SQLException { return null; }
     @Override public java.io.InputStream getUnicodeStream(int columnIndex) throws SQLException { return null; }
     @Override public java.io.InputStream getBinaryStream(int columnIndex) throws SQLException { return null; }
-    @Override public String getString(int columnIndex) throws SQLException { return getString("col" + columnIndex); }
-    @Override public boolean getBoolean(int columnIndex) throws SQLException { return getBoolean("col" + columnIndex); }
     @Override public byte getByte(String columnLabel) throws SQLException { return 0; }
     @Override public short getShort(String columnLabel) throws SQLException { return 0; }
-    @Override public int getInt(String columnLabel) throws SQLException { return getInt(columnLabel); }
     @Override public long getLong(String columnLabel) throws SQLException { return 0; }
     @Override public float getFloat(String columnLabel) throws SQLException { return 0; }
-    @Override public double getDouble(String columnLabel) throws SQLException { return getDouble(columnLabel); }
     @Override public byte[] getBytes(String columnLabel) throws SQLException { return null; }
     @Override public java.sql.Date getDate(String columnLabel) throws SQLException { return null; }
     @Override public java.sql.Time getTime(String columnLabel) throws SQLException { return null; }
@@ -140,7 +128,9 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public java.io.Reader getCharacterStream(int columnIndex) throws SQLException { return null; }
     @Override public java.io.Reader getCharacterStream(String columnLabel) throws SQLException { return null; }
     @Override public java.math.BigDecimal getBigDecimal(int columnIndex) throws SQLException { return null; }
+    @SuppressWarnings("deprecation") @Override public java.math.BigDecimal getBigDecimal(int columnIndex, int scale) throws SQLException { return null; }
     @Override public java.math.BigDecimal getBigDecimal(String columnLabel) throws SQLException { return null; }
+    @SuppressWarnings("deprecation") @Override public java.math.BigDecimal getBigDecimal(String columnLabel, int scale) throws SQLException { return null; }
     @Override public SQLWarning getWarnings() throws SQLException { return null; }
     @Override public void clearWarnings() throws SQLException {}
     @Override public String getCursorName() throws SQLException { return null; }
@@ -166,8 +156,14 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public void updateTime(int columnIndex, java.sql.Time x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateTimestamp(int columnIndex, java.sql.Timestamp x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateAsciiStream(int columnIndex, java.io.InputStream x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateAsciiStream(int columnIndex, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateBinaryStream(int columnIndex, java.io.InputStream x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBinaryStream(int columnIndex, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateCharacterStream(int columnIndex, java.io.Reader x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateCharacterStream(int columnIndex, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBinaryStream(int columnIndex, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateAsciiStream(int columnIndex, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateCharacterStream(int columnIndex, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateObject(int columnIndex, Object x, int scaleOrLength) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateObject(int columnIndex, Object x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateNull(String columnLabel) throws SQLException { throw new SQLFeatureNotSupportedException(); }
@@ -185,8 +181,14 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public void updateTime(String columnLabel, java.sql.Time x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateTimestamp(String columnLabel, java.sql.Timestamp x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateAsciiStream(String columnLabel, java.io.InputStream x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateAsciiStream(String columnLabel, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateAsciiStream(String columnLabel, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateBinaryStream(String columnLabel, java.io.InputStream x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBinaryStream(String columnLabel, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBinaryStream(String columnLabel, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateCharacterStream(String columnLabel, java.io.Reader x, int length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateCharacterStream(String columnLabel, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateCharacterStream(String columnLabel, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateObject(String columnLabel, Object x, int scaleOrLength) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateObject(String columnLabel, Object x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void insertRow() throws SQLException { throw new SQLFeatureNotSupportedException(); }
@@ -197,13 +199,18 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public void moveToInsertRow() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void moveToCurrentRow() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public Statement getStatement() throws SQLException { return null; }
-    @Override public java.io.InputStream getUnicodeStream(int columnIndex) throws SQLException { return null; }
-    @Override public java.io.InputStream getUnicodeStream(String columnLabel) throws SQLException { return null; }
-    @Override public java.io.InputStream getBinaryStream(int columnIndex) throws SQLException { return null; }
-    @Override public java.io.InputStream getBinaryStream(String columnLabel) throws SQLException { return null; }
     @Override public boolean absolute(int row) throws SQLException { return false; }
     @Override public boolean relative(int rows) throws SQLException { return false; }
     @Override public boolean previous() throws SQLException { return false; }
+    @Override public int getRow() throws SQLException { return 0; }
+    @Override public boolean first() throws SQLException { return false; }
+    @Override public boolean last() throws SQLException { return false; }
+    @Override public boolean isBeforeFirst() throws SQLException { return false; }
+    @Override public boolean isAfterLast() throws SQLException { return false; }
+    @Override public boolean isFirst() throws SQLException { return false; }
+    @Override public boolean isLast() throws SQLException { return false; }
+    @Override public void beforeFirst() throws SQLException {}
+    @Override public void afterLast() throws SQLException {}
     @Override public void setFetchDirection(int direction) throws SQLException {}
     @Override public int getFetchDirection() throws SQLException { return FETCH_FORWARD; }
     @Override public void setFetchSize(int rows) throws SQLException {}
@@ -217,8 +224,16 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public void updateRef(String columnLabel, java.sql.Ref x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateBlob(int columnIndex, java.sql.Blob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateBlob(String columnLabel, java.sql.Blob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBlob(int columnIndex, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBlob(String columnLabel, java.io.InputStream x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBlob(int columnIndex, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateBlob(String columnLabel, java.io.InputStream x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateClob(int columnIndex, java.sql.Clob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateClob(String columnLabel, java.sql.Clob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateClob(int columnIndex, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateClob(String columnLabel, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateClob(int columnIndex, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateClob(String columnLabel, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateArray(int columnIndex, java.sql.Array x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateArray(String columnLabel, java.sql.Array x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public java.sql.Ref getRef(int columnIndex) throws SQLException { return null; }
@@ -240,6 +255,32 @@ public class PrimusDBResultSet implements ResultSet {
     @Override public void updateRowId(int columnIndex, java.sql.RowId x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public void updateRowId(String columnLabel, java.sql.RowId x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public int getHoldability() throws SQLException { return CLOSE_CURSORS_AT_COMMIT; }
+    @Override public void updateNClob(int columnIndex, java.sql.NClob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNClob(String columnLabel, java.sql.NClob x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNClob(int columnIndex, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNClob(String columnLabel, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNClob(int columnIndex, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNClob(String columnLabel, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNCharacterStream(int columnIndex, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNCharacterStream(String columnLabel, java.io.Reader x, long length) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNCharacterStream(int columnIndex, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNCharacterStream(String columnLabel, java.io.Reader x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNString(int columnIndex, String x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateNString(String columnLabel, String x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public java.io.Reader getNCharacterStream(int columnIndex) throws SQLException { return null; }
+    @Override public java.io.Reader getNCharacterStream(String columnLabel) throws SQLException { return null; }
+    @Override public java.sql.NClob getNClob(int columnIndex) throws SQLException { return null; }
+    @Override public java.sql.NClob getNClob(String columnLabel) throws SQLException { return null; }
+    @Override public String getNString(int columnIndex) throws SQLException { return null; }
+    @Override public String getNString(String columnLabel) throws SQLException { return null; }
+    @Override public void updateObject(int columnIndex, Object x, java.sql.SQLType targetSqlType, int scaleOrLength) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateObject(String columnLabel, Object x, java.sql.SQLType targetSqlType, int scaleOrLength) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateObject(int columnIndex, Object x, java.sql.SQLType targetSqlType) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateObject(String columnLabel, Object x, java.sql.SQLType targetSqlType) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public java.sql.SQLXML getSQLXML(int columnIndex) throws SQLException { return null; }
+    @Override public java.sql.SQLXML getSQLXML(String columnLabel) throws SQLException { return null; }
+    @Override public void updateSQLXML(int columnIndex, java.sql.SQLXML x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public void updateSQLXML(String columnLabel, java.sql.SQLXML x) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return false; }
     @Override public <T> T unwrap(Class<T> iface) throws SQLException { throw new SQLFeatureNotSupportedException(); }
 }

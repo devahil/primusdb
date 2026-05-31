@@ -1,7 +1,7 @@
 # PrimusDB User Manual
 ===================
 
-This manual provides comprehensive guidance for users working with PrimusDB v1.2.3-alpha databases.
+This manual provides comprehensive guidance for users working with PrimusDB v1.3.0-alpha databases.
 
 ## Authentication
 
@@ -880,6 +880,75 @@ primusdb-cli crud read --storage-type document --table users --limit 10 --offset
 ### Sorting (API)
 ```bash
 curl "http://localhost:8080/api/v1/crud/columnar/sales?sort=amount&order=desc&limit=10"
+```
+
+## Cluster Gateway Operations
+
+### Check Cluster Status
+```bash
+curl http://localhost:8080/api/v1/cluster/status
+```
+
+### List Nodes
+```bash
+curl http://localhost:8080/api/v1/cluster/nodes
+```
+
+### Route a Request
+```bash
+curl -X POST http://localhost:8080/api/v1/cluster/route \
+  -H "Content-Type: application/json" \
+  -d '{"strategy": "LeastLoaded"}'
+```
+
+## Federation Operations
+
+### Check Federation Status
+```bash
+curl http://localhost:8080/api/v1/federation/status
+```
+
+### List Federated Clusters
+```bash
+curl http://localhost:8080/api/v1/federation/clusters
+```
+
+### List DataDomains
+```bash
+curl http://localhost:8080/api/v1/federation/domains
+```
+
+### Create DataDomain
+```bash
+curl -X POST http://localhost:8080/api/v1/federation/domains \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "global-users",
+    "replication_mode": "Quorum",
+    "member_clusters": ["cluster-us", "cluster-eu"]
+  }'
+```
+
+### Join a DataDomain
+```bash
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/join \
+  -H "Content-Type: application/json" \
+  -d '{"collections": ["users"], "storage_types": ["document"]}'
+```
+
+### Leave a DataDomain
+```bash
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/leave
+```
+
+### Rebalance a DataDomain
+```bash
+curl -X POST http://localhost:8080/api/v1/federation/domains/global-users/balance
+```
+
+### Federation Metrics
+```bash
+curl http://localhost:8080/api/v1/federation/metrics
 ```
 
 ## Error Handling

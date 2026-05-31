@@ -6,7 +6,7 @@ managing connections, message routing, and protocol state.
 */
 
 use super::journaling::JournalManager;
-use super::messaging::{MessageType, MessagingEngine, Operation, SecureMessage};
+use super::messaging::{MessagingEngine, Operation, SecureMessage};
 use super::recovery::RecoveryManager;
 use super::trust::TrustManager;
 use std::collections::HashMap;
@@ -151,6 +151,6 @@ pub enum HandlerError {
     Io(#[from] std::io::Error),
     #[error("Serialization error: {0}")]
     Serialization(#[from] bincode::Error),
-    #[error("Messaging error")]
-    MessagingError,
+    #[error("Messaging error: {0}")]
+    Messaging(#[from] super::messaging::MessagingError),
 }

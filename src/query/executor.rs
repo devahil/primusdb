@@ -416,6 +416,7 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
+                ..Default::default()
             };
 
             let records = block_on_sync(async {
@@ -804,6 +805,7 @@ impl QueryExecutor {
                             updated_at: chrono::Utc::now(),
                             isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                             timeout_ms: 0,
+                            ..Default::default()
                         };
                         if let Ok(right_records) = block_on_sync(async {
                             engine
@@ -1096,6 +1098,7 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
+                ..Default::default()
             };
 
             let count =
@@ -1164,6 +1167,7 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
+                ..Default::default()
             };
 
             let count = block_on_sync(async {
@@ -1215,6 +1219,7 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
+                ..Default::default()
             };
 
             let count = block_on_sync(async {

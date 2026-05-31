@@ -4,6 +4,7 @@ import java.sql.*;
 import okhttp3.*;
 import com.google.gson.*;
 import java.io.IOException;
+import java.util.Properties;
 
 /**
  * JDBC Connection implementation for PrimusDB
@@ -46,7 +47,8 @@ public class PrimusDBConnection implements java.sql.Connection {
 
     @Override
     public PreparedStatement prepareStatement(String sql) throws SQLException {
-        throw new SQLFeatureNotSupportedException("Prepared statements not yet implemented");
+        checkClosed();
+        return new PrimusDBPreparedStatement(this, sql);
     }
 
     @Override
@@ -158,6 +160,8 @@ public class PrimusDBConnection implements java.sql.Connection {
     @Override public Blob createBlob() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public NClob createNClob() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public SQLXML createSQLXML() throws SQLException { throw new SQLFeatureNotSupportedException(); }
+    @Override public String getSchema() throws SQLException { return database; }
+    @Override public void setSchema(String schema) throws SQLException { }
     @Override public boolean isValid(int timeout) throws SQLException { return !closed; }
     @Override public void setClientInfo(String name, String value) throws SQLClientInfoException {}
     @Override public void setClientInfo(Properties properties) throws SQLClientInfoException {}

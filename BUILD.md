@@ -1,6 +1,6 @@
 # PrimusDB Build and Compilation Guide
 
-This guide covers building PrimusDB v1.2.2-alpha from source, including all dependencies, compilation options, and troubleshooting.
+This guide covers building PrimusDB v1.3.0-alpha from source, including all dependencies, compilation options, and troubleshooting.
 
 ## Prerequisites
 

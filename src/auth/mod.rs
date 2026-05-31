@@ -118,6 +118,7 @@ pub enum ResourceType {
     Vector,
     Document,
     Relational,
+    KeyValue,
     Namespace,
     Cluster,
     Admin,

@@ -69,6 +69,7 @@ class PrimusDBClient:
         """Close the connection to the server."""
         if self._session:
             await self._session.close()
+            self._session = None
             self._connected = False
 
     async def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -259,21 +260,88 @@ class PrimusDBClient:
 
     async def cluster(self, storage_type: StorageType, table: str,
                      params: Optional[Dict] = None) -> Dict:
-        """
-        Perform data clustering analysis.
-
-        Args:
-            storage_type: Type of storage engine
-            table: Name of the table/collection
-            params: Clustering parameters
-
-        Returns:
-            Clustering results
-        """
         endpoint = f"advanced/cluster/{storage_type.value}/{table}"
         payload = params or {"algorithm": "kmeans", "clusters": 5}
-
         return await self._request("POST", endpoint, payload)
+
+    # ==================== Cluster Gateway Methods ====================
+
+    async def cluster_status(self) -> Dict:
+        endpoint = "cluster/status"
+        return await self._request("GET", endpoint)
+
+    async def cluster_nodes(self) -> List[Dict]:
+        endpoint = "cluster/nodes"
+        return await self._request("GET", endpoint)
+
+    async def route_request(self, shard_key: Optional[str] = None,
+                            preferred_nodes: Optional[List[str]] = None) -> Dict:
+        payload = {}
+        if shard_key is not None:
+            payload["shard_key"] = shard_key
+        if preferred_nodes is not None:
+            payload["preferred_nodes"] = preferred_nodes
+        endpoint = "cluster/route"
+        return await self._request("POST", endpoint, payload)
+
+    async def cluster_metrics(self) -> Dict:
+        endpoint = "cluster/metrics"
+        return await self._request("GET", endpoint)
+
+    # ==================== Federation Methods ====================
+
+    async def federation_status(self) -> Dict:
+        endpoint = "federation/status"
+        return await self._request("GET", endpoint)
+
+    async def federation_clusters(self) -> List[Dict]:
+        endpoint = "federation/clusters"
+        return await self._request("GET", endpoint)
+
+    async def federation_domains(self) -> List[Dict]:
+        endpoint = "federation/domains"
+        return await self._request("GET", endpoint)
+
+    async def federation_metrics(self) -> Dict:
+        endpoint = "federation/metrics"
+        return await self._request("GET", endpoint)
+
+    async def create_data_domain(self, name: str, description: Optional[str] = None,
+                                  replication_mode: Optional[str] = None,
+                                  storage_types: Optional[List[str]] = None,
+                                  collections: Optional[List[str]] = None,
+                                  tables: Optional[List[str]] = None,
+                                  member_clusters: Optional[List[str]] = None) -> Dict:
+        endpoint = "federation/domains"
+        payload = {
+            "name": name,
+            "description": description,
+            "replication_mode": replication_mode,
+            "storage_types": storage_types or [],
+            "collections": collections or [],
+            "tables": tables or [],
+            "member_clusters": member_clusters or [],
+        }
+        return await self._request("POST", endpoint, payload)
+
+    async def join_domain(self, name: str, collections: Optional[List[str]] = None,
+                           storage_types: Optional[List[str]] = None,
+                           replication_mode: Optional[str] = None) -> Dict:
+        endpoint = f"federation/domains/{name}/join"
+        payload = {
+            "collections": collections,
+            "storage_types": storage_types,
+            "replication_mode": replication_mode,
+        }
+        return await self._request("POST", endpoint, payload)
+
+    async def leave_domain(self, name: str) -> Dict:
+        endpoint = f"federation/domains/{name}/leave"
+        return await self._request("POST", endpoint, {})
+
+    async def balance_domain(self, name: str) -> Dict:
+        endpoint = f"federation/domains/{name}/balance"
+        return await self._request("POST", endpoint, {})
 
     # ==================== DDL / ER Model Operations ====================
 

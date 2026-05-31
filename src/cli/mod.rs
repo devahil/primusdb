@@ -1,5 +1,6 @@
 use crate::storage::columnar::ColumnarEngine;
 use crate::storage::document::DocumentEngine;
+use crate::storage::keyvalue::KeyValueEngine;
 use crate::storage::relational::RelationalEngine;
 use crate::storage::vector::VectorEngine;
 use crate::storage::Schema;
@@ -11,6 +12,7 @@ use chrono;
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "primusdb-cli")]
@@ -338,6 +340,47 @@ fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> crate::Result<()> {
     Ok(())
 }
 
+fn default_cli_config(node_id: &str) -> PrimusDBConfig {
+    PrimusDBConfig {
+        storage: crate::StorageConfig {
+            data_dir: "/tmp/primusdb_cli".to_string(),
+            max_file_size: 1024 * 1024 * 1024,
+            compression: crate::CompressionType::Lz4,
+            cache_size: 512 * 1024 * 1024,
+        },
+        network: crate::NetworkConfig {
+            bind_address: "127.0.0.1".to_string(),
+            port: 8080,
+            max_connections: 1000,
+        },
+        security: crate::SecurityConfig {
+            encryption_enabled: true,
+            key_rotation_interval: 86400,
+            auth_required: false,
+        },
+        cluster: crate::ClusterConfig {
+            enabled: false,
+            node_id: node_id.to_string(),
+            discovery_servers: vec![],
+        },
+        namespaces: Default::default(),
+        federation: None,
+    }
+}
+
+fn default_cli_transaction() -> Transaction {
+    Transaction {
+        id: "cli_operation".to_string(),
+        operations: vec![],
+        created_at: chrono::Utc::now(),
+        status: crate::transaction::TransactionStatus::Active,
+        updated_at: chrono::Utc::now(),
+        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+        timeout_ms: 30000,
+        ..Default::default()
+    }
+}
+
 pub async fn run_cli(cli: Cli) -> crate::Result<()> {
     if cli.mode == "client" {
         // Client mode: connect to remote server
@@ -346,11 +389,53 @@ pub async fn run_cli(cli: Cli) -> crate::Result<()> {
 
     // Embedded mode (default)
     match cli.command {
-        Commands::Server { config, bind } => {
+        Commands::Server { config: _, bind } => {
             println!("Starting PrimusDB server on {}...", bind);
-            println!("Configuration: {:?}", config);
-            // TODO: Initialize and start server
-            println!("Server started successfully!");
+            let cfg = PrimusDBConfig {
+                storage: crate::StorageConfig {
+                    data_dir: "/tmp/primusdb_data".to_string(),
+                    max_file_size: 1024 * 1024 * 1024,
+                    compression: crate::CompressionType::Lz4,
+                    cache_size: 512 * 1024 * 1024,
+                },
+                network: crate::NetworkConfig {
+                    bind_address: "127.0.0.1".to_string(),
+                    port: 8080,
+                    max_connections: 1000,
+                },
+                security: crate::SecurityConfig {
+                    encryption_enabled: true,
+                    key_rotation_interval: 86400,
+                    auth_required: false,
+                },
+                cluster: crate::ClusterConfig {
+                    enabled: false,
+                    node_id: "server_node".to_string(),
+                    discovery_servers: vec![],
+                },
+                namespaces: Default::default(),
+                federation: None,
+            };
+            let primusdb = Arc::new(crate::PrimusDB::new(cfg.clone())?);
+            let auth_config = crate::auth::AuthConfig {
+                require_auth: true,
+                min_password_length: 8,
+                password_expiry_days: 90,
+                max_login_attempts: 5,
+                lockout_duration_minutes: 30,
+                token_expiry_hours: 8760,
+                session_timeout_minutes: 60,
+                mfa_required_for_roles: vec!["admin".to_string()],
+            };
+            let auth_service = Arc::new(crate::auth::AuthService::new(auth_config)?);
+            let api_server = crate::api::APIServer::new(primusdb, auth_service, None);
+            let bind_addr = if bind == "127.0.0.1:8080" {
+                format!("{}:{}", cfg.network.bind_address, cfg.network.port)
+            } else {
+                bind
+            };
+            println!("Server running on {}", bind_addr);
+            api_server.run(&bind_addr).await?;
         }
 
         Commands::Init { data_dir } => {
@@ -400,7 +485,7 @@ discovery_servers = []
             println!("- Status: Running");
             println!("- Version: {}", env!("CARGO_PKG_VERSION"));
             println!("- Uptime: Unknown");
-            println!("- Available Engines: columnar, vector, document, relational");
+            println!("- Available Engines: columnar, vector, document, relational, kv");
             println!("- Features: AI/ML, Blockchain Consensus, Distributed Clustering");
             // TODO: Query actual status from running instance
             println!("");
@@ -451,39 +536,8 @@ discovery_servers = []
 }
 
 async fn handle_crud_cli_command(cmd: CrudCommands) -> crate::Result<()> {
-    let config = PrimusDBConfig {
-        storage: crate::StorageConfig {
-            data_dir: "/tmp/primusdb_cli".to_string(),
-            max_file_size: 1024 * 1024 * 1024,
-            compression: crate::CompressionType::Lz4,
-            cache_size: 512 * 1024 * 1024,
-        },
-        network: crate::NetworkConfig {
-            bind_address: "127.0.0.1".to_string(),
-            port: 8080,
-            max_connections: 1000,
-        },
-        security: crate::SecurityConfig {
-            encryption_enabled: true,
-            key_rotation_interval: 86400,
-            auth_required: false,
-        },
-        cluster: crate::ClusterConfig {
-            enabled: false,
-            node_id: "cli_node".to_string(),
-            discovery_servers: vec![],
-        },
-        namespaces: Default::default(),
-    };
-    let transaction = Transaction {
-        id: "cli_operation".to_string(),
-        operations: vec![],
-        created_at: chrono::Utc::now(),
-        status: crate::transaction::TransactionStatus::Active,
-        updated_at: chrono::Utc::now(),
-        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-        timeout_ms: 30000,
-    };
+    let config = default_cli_config("cli_node");
+    let transaction = default_cli_transaction();
 
     match cmd {
         CrudCommands::Create {
@@ -571,39 +625,8 @@ async fn handle_crud_cli_command(cmd: CrudCommands) -> crate::Result<()> {
 }
 
 async fn handle_table_cli_command(cmd: TableCommands) -> crate::Result<()> {
-    let config = PrimusDBConfig {
-        storage: crate::StorageConfig {
-            data_dir: "/tmp/primusdb_cli".to_string(),
-            max_file_size: 1024 * 1024 * 1024,
-            compression: crate::CompressionType::Lz4,
-            cache_size: 512 * 1024 * 1024,
-        },
-        network: crate::NetworkConfig {
-            bind_address: "127.0.0.1".to_string(),
-            port: 8080,
-            max_connections: 1000,
-        },
-        security: crate::SecurityConfig {
-            encryption_enabled: true,
-            key_rotation_interval: 86400,
-            auth_required: false,
-        },
-        cluster: crate::ClusterConfig {
-            enabled: false,
-            node_id: "cli_node".to_string(),
-            discovery_servers: vec![],
-        },
-        namespaces: Default::default(),
-    };
-    let _transaction = Transaction {
-        id: "cli_operation".to_string(),
-        operations: vec![],
-        created_at: chrono::Utc::now(),
-        status: crate::transaction::TransactionStatus::Active,
-        updated_at: chrono::Utc::now(),
-        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-        timeout_ms: 30000,
-    };
+    let config = default_cli_config("cli_node");
+    let _transaction = default_cli_transaction();
 
     match cmd {
         TableCommands::Create {
@@ -667,39 +690,8 @@ async fn handle_table_cli_command(cmd: TableCommands) -> crate::Result<()> {
 }
 
 async fn handle_advanced_cli_command(cmd: AdvancedCommands) -> crate::Result<()> {
-    let config = PrimusDBConfig {
-        storage: crate::StorageConfig {
-            data_dir: "/tmp/primusdb_cli".to_string(),
-            max_file_size: 1024 * 1024 * 1024,
-            compression: crate::CompressionType::Lz4,
-            cache_size: 512 * 1024 * 1024,
-        },
-        network: crate::NetworkConfig {
-            bind_address: "127.0.0.1".to_string(),
-            port: 8080,
-            max_connections: 1000,
-        },
-        security: crate::SecurityConfig {
-            encryption_enabled: true,
-            key_rotation_interval: 86400,
-            auth_required: false,
-        },
-        cluster: crate::ClusterConfig {
-            enabled: false,
-            node_id: "cli_node".to_string(),
-            discovery_servers: vec![],
-        },
-        namespaces: Default::default(),
-    };
-    let transaction = Transaction {
-        id: "cli_operation".to_string(),
-        operations: vec![],
-        created_at: chrono::Utc::now(),
-        status: crate::transaction::TransactionStatus::Active,
-        updated_at: chrono::Utc::now(),
-        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-        timeout_ms: 30000,
-    };
+    let config = default_cli_config("cli_node");
+    let transaction = default_cli_transaction();
 
     match cmd {
         AdvancedCommands::Analyze {
@@ -800,6 +792,7 @@ fn get_engine(
         "document" => Ok(Box::new(DocumentEngine::new(config)?)),
         "relational" => Ok(Box::new(RelationalEngine::new(config)?)),
         "vector" => Ok(Box::new(VectorEngine::new(config)?)),
+        "kv" | "keyvalue" => Ok(Box::new(KeyValueEngine::new(config, None)?)),
         _ => Err(crate::Error::InvalidRequest(format!(
             "Unknown storage type: {}",
             storage_type
@@ -1097,30 +1090,7 @@ async fn handle_advanced_client_command(
 }
 
 fn handle_namespace_cli_command(cmd: NamespaceCommands) -> crate::Result<()> {
-    let config = PrimusDBConfig {
-        storage: crate::StorageConfig {
-            data_dir: "/tmp/primusdb_cli_ns".to_string(),
-            max_file_size: 1024 * 1024 * 1024,
-            compression: crate::CompressionType::Lz4,
-            cache_size: 512 * 1024 * 1024,
-        },
-        network: crate::NetworkConfig {
-            bind_address: "127.0.0.1".to_string(),
-            port: 8080,
-            max_connections: 1000,
-        },
-        security: crate::SecurityConfig {
-            encryption_enabled: true,
-            key_rotation_interval: 86400,
-            auth_required: false,
-        },
-        cluster: crate::ClusterConfig {
-            enabled: false,
-            node_id: "cli_ns".to_string(),
-            discovery_servers: vec![],
-        },
-        namespaces: Default::default(),
-    };
+    let config = default_cli_config("cli_ns");
 
     match cmd {
         NamespaceCommands::Create { path, description } => {

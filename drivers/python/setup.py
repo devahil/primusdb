@@ -11,7 +11,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="primusdb",
-    version="0.1.0",
+    version="1.3.0",
     author="PrimusDB Team",
     author_email="team@primusdb.com",
     description="Python driver for PrimusDB - Hybrid Database Engine",

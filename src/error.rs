@@ -214,6 +214,12 @@ pub enum Error {
     /// Recovery: Request elevated privileges from administrator
     #[error("Authorization error: {0}")]
     AuthorizationError(String),
+
+    /// Key-Value engine operation failure
+    /// Includes document not found, revision conflicts, index errors, database not found
+    /// Recovery: Check document existence, revision token, or database name
+    #[error("KeyValue error: {0}")]
+    KeyValueError(String),
 }
 
 /// Convenient type alias for Results containing PrimusDB errors
