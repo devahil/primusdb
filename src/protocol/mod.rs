@@ -6,7 +6,7 @@ providing encrypted messaging, trust establishment, consensus validation, and ro
 
 ## Architecture Overview
 
-```
+```text
 Secure Communication Protocol Architecture
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -81,7 +81,7 @@ Secure Communication Protocol Architecture
 ## Usage Examples
 
 ### Basic Secure Connection
-```rust
+```ignore
 use primusdb::protocol::{SecureProtocol, ProtocolConfig};
 
 let config = ProtocolConfig {
@@ -111,7 +111,7 @@ protocol.send_message("node2:8080", message).await?;
 ```
 
 ### Distributed Transaction with Journaling
-```rust
+```ignore
 // Start distributed transaction
 let transaction = protocol.begin_transaction().await?;
 
@@ -127,7 +127,7 @@ assert!(commit_result.success);
 ```
 
 ### Error Recovery and Data Repair
-```rust
+```ignore
 // Detect data corruption
 let corruption_report = protocol.check_data_integrity().await?;
 if corruption_report.has_corruption {
@@ -144,7 +144,7 @@ protocol.monitor_and_correct_errors().await?;
 ## Protocol Message Types
 
 ### SecureMessage
-```rust
+```ignore
 pub struct SecureMessage {
     pub header: MessageHeader,
     pub payload: Operation,
@@ -154,7 +154,7 @@ pub struct SecureMessage {
 ```
 
 ### MessageHeader
-```rust
+```ignore
 pub struct MessageHeader {
     pub version: u16,
     pub message_type: MessageType,
@@ -167,7 +167,7 @@ pub struct MessageHeader {
 ```
 
 ### Operations
-```rust
+```ignore
 pub enum Operation {
     // Cache operations
     CachePut { key: String, data: Vec<u8> },

@@ -5,7 +5,7 @@ All notable changes to PrimusDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.1-alpha] - 2026-05-30
+## [1.3.1-alpha] - Unreleased
 
 ### Added
 - **Real AI/ML Engine Replacement**: Ground-up rewrite of `src/ai.rs` with real ML algorithms replacing all simulated stubs:
@@ -74,7 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ed25519 Signatures**: All transactions can be cryptographically signed and verified, preventing forgery
 - **Protocol Layer**: Inter-node communication now uses AES-256-GCM encryption + Ed25519 signatures + HMAC integrity
 - **X.509 Trust**: Certificate-based node authentication with CRL revocation for cluster security
-
 ### Added
 - **Professional-Grade Vector Engine Rewrite**: Complete ground-up rewrite of `src/storage/vector.rs` with full-featured ANN search, payload filtering, scoring fusion, RAG pipeline, compression, observability, and predictive analytics. 70 unit tests (all passing), 0 new warnings.
   - **HNSW Index**: Real Hierarchical Navigable Small World graph with multi-layer insert/search, incremental updates, configurable M/ef_construction/M_max/max_level. Sub-millisecond ANN search with ≥95% recall.
@@ -100,6 +99,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `src/storage/vector.rs` expanded from ~500 lines to ~2942 lines (single file, matching project convention).
 - `VectorEngine` internals fully rebuilt: ANN indexes behind `Arc<Mutex<HashMap<String, IndexType>>>` for thread-safe lazy initialization.
 - HNSW `random_level()` uses deterministic hash-based RNG (no `rand` crate dependency).
+
+## [1.3.0.1-alpha] - 2026-06-01
+
+### Security
+- **Node.js Driver Dependencies**: Fixed 41 security vulnerabilities in transitive dependencies:
+  - Axios pinned to `1.16.1` (server-side request forgery, CVE-2024-39338)
+  - Overrides added for `handlebars`, `minimatch`, `brace-expansion`, `picomatch`, `follow-redirects` — all forced to latest patched versions
+  - `npm audit` reports 0 vulnerabilities (was 41)
 
 ## [1.3.0-alpha] - 2026-05-27
 

@@ -6,7 +6,7 @@ use crate::consensus::{Block, Operation, OperationType};
 use crate::storage::StorageEngine;
 use crate::StorageType;
 use crate::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 /// WAL entry for consensus state machine recovery.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -20,26 +20,50 @@ pub struct ConsensusStateMachine {
     engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
     last_applied_height: Mutex<u64>,
     applied_txns: Mutex<HashSet<String>>,
-    /// WAL database for crash recovery
-    wal: Arc<sled::Db>,
+    /// WAL database for crash recovery (optional — graceful degradation if unavailable)
+    wal: Option<sled::Db>,
 }
 
 fn parse_storage_type(s: &str) -> Result<StorageType> {
     s.parse::<StorageType>()
 }
 
+fn default_wal_path() -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("primusdb_consensus_wal_{}", std::process::id()));
+    p
+}
+
 impl ConsensusStateMachine {
     pub fn new(engines: HashMap<StorageType, Arc<dyn StorageEngine>>) -> Self {
-        let wal_path = PathBuf::from("/tmp/primusdb/consensus_wal");
-        std::fs::create_dir_all(&wal_path).ok();
-        let wal = sled::open(wal_path.join("wal.db"))
-            .expect("Failed to open consensus WAL database");
+        Self::with_wal_path(engines, default_wal_path())
+    }
+
+    pub fn with_wal_path(
+        engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
+        wal_path: PathBuf,
+    ) -> Self {
+        let wal = match Self::open_wal(&wal_path) {
+            Some(db) => {
+                info!("Consensus WAL opened at {:?}", wal_path);
+                Some(db)
+            }
+            None => {
+                warn!("Consensus WAL unavailable at {:?} — crash recovery disabled", wal_path);
+                None
+            }
+        };
         Self {
             engines,
             last_applied_height: Mutex::new(0),
             applied_txns: Mutex::new(HashSet::new()),
-            wal: Arc::new(wal),
+            wal,
         }
+    }
+
+    fn open_wal(path: &std::path::Path) -> Option<sled::Db> {
+        std::fs::create_dir_all(path).ok()?;
+        sled::open(path.join("wal.db")).ok()
     }
 
     pub fn last_applied_height(&self) -> u64 {
@@ -48,6 +72,9 @@ impl ConsensusStateMachine {
 
     /// Append a committed block to the WAL for crash recovery.
     pub fn append_wal(&self, block: &Block) -> Result<()> {
+        let Some(ref wal) = self.wal else {
+            return Ok(());
+        };
         let entry = WalEntry {
             sequence: block.height,
             block_height: block.height,
@@ -55,15 +82,19 @@ impl ConsensusStateMachine {
         };
         let key = format!("{:020}", block.height);
         let value = bincode::serialize(&entry)?;
-        self.wal.insert(key.as_bytes(), value)?;
-        self.wal.flush()?;
+        wal.insert(key.as_bytes(), value)?;
+        wal.flush()?;
         Ok(())
     }
 
     /// Recover the state machine by replaying all persisted WAL entries.
     pub fn recover_from_wal(&self) -> Result<u64> {
+        let Some(ref wal) = self.wal else {
+            info!("No WAL configured — starting from height 0");
+            return Ok(0);
+        };
         let mut last_height = 0u64;
-        for result in self.wal.iter() {
+        for result in wal.iter() {
             let (_, value) = result?;
             let entry: WalEntry = bincode::deserialize(&value)?;
             if entry.block_height > last_height {
@@ -73,7 +104,7 @@ impl ConsensusStateMachine {
         info!(
             "Consensus WAL recovery complete: last_height={}, entries={}",
             last_height,
-            self.wal.len()
+            wal.len()
         );
         *self.last_applied_height.lock().unwrap() = last_height;
         Ok(last_height)
