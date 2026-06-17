@@ -72,17 +72,21 @@ config = "0.14"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
 
 # Terminal UI (Rich-like)
 owo-colors = "4"
 indicatif = "0.17"
+ratatui = "0.26"
+crossterm = "0.27"
 
 # HTTP client for client mode
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
 urlencoding = "2.1"
 
 # Metrics and monitoring
-prometheus = "0.13"
+prometheus = { version = "0.13", features = ["process"] }
+lazy_static = "1.4"
 num_cpus = "1.0"
 
 # Cache dependencies
@@ -101,19 +105,36 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Base64 encoding
 base64 = "0.21"
 
+# SQL parser (replaces ad-hoc parser)
+sqlparser = "0.51"
+
+# TOML parsing for config validation
+toml = "0.8"
+
+# Database drivers (optional, for migration sources)
+mysql = { version = "28", optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+mongodb = { version = "3", optional = true }
+
 # Secure Protocol
 ring = "0.17"
-ed25519-dalek = "2.1"
-x509-parser = "0.16"
+rand = "0.10.1"
 
 # AI/ML dependencies (lightweight)
 # candle-core = "0.3"
 # candle-nn = "0.3"
-rand = "0.8"
+
+[features]
+default = []
+mysql-source = ["dep:mysql"]
+postgres-source = ["dep:tokio-postgres"]
+mongo-source = ["dep:mongodb"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.8"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde_json = "1.0"
 
 [profile.release]
 lto = true
@@ -128,3 +149,27 @@ path = "src/bin/server.rs"
 [[bin]]
 name = "primusdb-cli"
 path = "src/bin/cli.rs"
+
+[[bench]]
+name = "storage_read"
+harness = false
+
+[[bench]]
+name = "vector_search"
+harness = false
+
+[[bench]]
+name = "ai_ml"
+harness = false
+
+[[bench]]
+name = "relational"
+harness = false
+
+[[bench]]
+name = "columnar"
+harness = false
+
+[[bench]]
+name = "cache"
+harness = false

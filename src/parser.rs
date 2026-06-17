@@ -257,7 +257,7 @@ fn parse_insert(sql: &str) -> Result<Query> {
                 data: Some(serde_json::Value::Object(data)),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -293,7 +293,7 @@ fn parse_update(sql: &str) -> Result<Query> {
                 }
             }
 
-            let conditions = condition_str.map(|c| parse_simple_condition(c));
+            let conditions = condition_str.map(parse_simple_condition);
 
             return Ok(Query {
                 storage_type: StorageType::Relational,
@@ -303,7 +303,7 @@ fn parse_update(sql: &str) -> Result<Query> {
                 data: Some(serde_json::Value::Object(data)),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -326,7 +326,7 @@ fn parse_delete(sql: &str) -> Result<Query> {
             let condition_str = caps.get(2).map(|m| m.as_str());
             let _returning = caps.get(3).map(|m| m.as_str());
 
-            let conditions = condition_str.map(|c| parse_simple_condition(c));
+            let conditions = condition_str.map(parse_simple_condition);
 
             return Ok(Query {
                 storage_type: StorageType::Relational,
@@ -336,7 +336,7 @@ fn parse_delete(sql: &str) -> Result<Query> {
                 data: None,
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -374,7 +374,7 @@ fn parse_create_table(sql: &str) -> Result<Query> {
                 data: Some(serde_json::to_value(&schema).unwrap_or_default()),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -482,7 +482,7 @@ fn parse_alter_table(sql: &str) -> Result<Query> {
                 data: Some(data),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -506,7 +506,7 @@ fn parse_alter_table(sql: &str) -> Result<Query> {
                 data: Some(serde_json::Value::String(col_name)),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -603,7 +603,7 @@ fn parse_create_view(sql: &str) -> Result<Query> {
                 data: Some(data),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -669,7 +669,7 @@ fn parse_create_trigger(sql: &str) -> Result<Query> {
                 data: Some(data),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -698,7 +698,7 @@ fn parse_drop_trigger(sql: &str) -> Result<Query> {
                 data: Some(serde_json::Value::String(trig_name)),
                 limit: None,
                 offset: None,
-            namespace: None,
+                namespace: None,
             });
         }
     }
@@ -708,6 +708,7 @@ fn parse_drop_trigger(sql: &str) -> Result<Query> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

@@ -180,6 +180,7 @@ All operations are thread-safe with fine-grained locking:
 This cache system provides enterprise-grade performance with minimal resource overhead, making it ideal for high-throughput database operations.
 */
 
+#[allow(clippy::module_inception)]
 pub mod cache;
 pub mod cluster;
 pub mod compression;

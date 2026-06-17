@@ -1,0 +1,56 @@
+# Example mapping file: MySQL ecommerce database to PrimusDB
+[source]
+type = "mysql"
+database = "ecommerce"
+
+[target]
+namespace = "staging"
+default_engine = "relational"
+
+# Map the 'users' table to a document store with renamed fields
+[[objects]]
+source = "ecommerce.users"
+target = "users"
+engine = "document"
+primary_key = "user_id"
+
+[[objects.field_mappings]]
+source = "id"
+target = "user_id"
+
+[[objects.field_mappings]]
+source = "full_name"
+target = "name"
+
+[[objects.field_mappings]]
+source = "email"
+target = "email_address"
+
+# Map the 'orders' table to a columnar engine with a type override
+[[objects]]
+source = "ecommerce.orders"
+target = "orders"
+engine = "columnar"
+primary_key = "order_id"
+
+[[objects.field_mappings]]
+source = "id"
+target = "order_id"
+
+[[objects.field_mappings]]
+source = "total_amount"
+target = "amount"
+type_override = "decimal"
+
+# Map the 'products' table using 1:1 defaults (no field_mappings needed)
+[[objects]]
+source = "ecommerce.products"
+target = "products"
+engine = "relational"
+primary_key = "sku"
+
+# Import a view as a separate table
+[[objects]]
+source = "ecommerce.top_sellers"
+target = "top_sellers"
+engine = "relational"

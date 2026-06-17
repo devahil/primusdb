@@ -57,6 +57,11 @@ use primusdb::cli::{run_cli, Cli};
 /// and delegates execution to the core CLI logic.
 #[tokio::main]
 async fn main() -> primusdb::Result<()> {
+    eprintln!();
+    eprintln!("⚠ WARNING: `primusdb-cli` is deprecated and will be removed in a future release.");
+    eprintln!("  Use `primusdb` instead.");
+    eprintln!();
+
     // Initialize structured logging
     tracing_subscriber::fmt::init();
 

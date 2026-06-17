@@ -302,12 +302,15 @@ assert!(health.network_connectivity > 0.8); // 80% connected
 
 use crate::{PrimusDBConfig, Result};
 use async_trait::async_trait;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use base64::Engine;
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tracing::{info, warn};
+use std::time::Instant;
+use tracing::{info, instrument, Span};
 
 /// Core trait defining the consensus protocol interface
 ///
@@ -418,64 +421,10 @@ pub struct Transaction {
     pub operations: Vec<Operation>,
     /// Timestamp when transaction was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Cryptographic signature proving transaction authenticity (hex-encoded Ed25519)
+    /// Cryptographic signature proving transaction authenticity
     pub signature: String,
     /// ID of the node that proposed this transaction
     pub proposer: String,
-    /// Public key of the proposer (hex-encoded Ed25519 verifying key)
-    pub public_key: String,
-}
-
-impl Transaction {
-    /// Create a canonical payload for signing (excludes signature field).
-    fn canonical_payload(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            id: &'a str,
-            operations: &'a [Operation],
-            timestamp: &'a chrono::DateTime<chrono::Utc>,
-            proposer: &'a str,
-            public_key: &'a str,
-        }
-        let p = Payload {
-            id: &self.id,
-            operations: &self.operations,
-            timestamp: &self.timestamp,
-            proposer: &self.proposer,
-            public_key: &self.public_key,
-        };
-        serde_json::to_vec(&p).unwrap_or_default()
-    }
-
-    /// Sign this transaction with an Ed25519 signing key.
-    pub fn sign(&mut self, signing_key: &SigningKey) -> Result<()> {
-        let payload = self.canonical_payload();
-        let sig = signing_key.sign(&payload);
-        self.signature = hex::encode(sig.to_bytes());
-        self.public_key = hex::encode(signing_key.verifying_key().to_bytes());
-        Ok(())
-    }
-
-    /// Verify the Ed25519 signature on this transaction.
-    pub fn verify_signature(&self) -> Result<bool> {
-        if self.signature.is_empty() || self.public_key.is_empty() {
-            return Ok(false);
-        }
-        let sig_bytes = hex::decode(&self.signature)
-            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let pk_bytes = hex::decode(&self.public_key)
-            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes)
-            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let pk = VerifyingKey::from_bytes(
-            &pk_bytes.try_into().map_err(|_| {
-                crate::Error::CryptoError("invalid public key length".to_string())
-            })?,
-        )
-        .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let payload = self.canonical_payload();
-        Ok(pk.verify(&payload, &sig).is_ok())
-    }
 }
 
 /// Individual database operation within a transaction
@@ -615,11 +564,18 @@ pub struct HyperledgerStyleConsensus {
     #[allow(dead_code)]
     config: PrimusDBConfig,
     current_state: Mutex<ChainState>,
-    validators: HashMap<String, Validator>,
+    validators: Mutex<HashMap<String, Validator>>,
     pending_transactions: Mutex<Vec<Transaction>>,
     db: sled::Db,
     /// State machine for applying committed blocks to storage engines
     state_machine: std::sync::Arc<state_machine::ConsensusStateMachine>,
+    /// PKCS8 v2 encoded Ed25519 keypair for this node
+    keypair_bytes: Mutex<Vec<u8>>,
+    /// Base64-encoded ED25519 public key of this node
+    node_public_key: String,
+    /// CSPRNG for key generation
+    #[allow(dead_code)]
+    rng: SystemRandom,
 }
 
 impl HyperledgerStyleConsensus {
@@ -666,19 +622,91 @@ impl HyperledgerStyleConsensus {
 
         let state_machine = std::sync::Arc::new(state_machine::ConsensusStateMachine::new(engines));
 
+        // Generate or load the node's ED25519 keypair
+        let rng = SystemRandom::new();
+        let (keypair_bytes, public_key) = Self::load_or_generate_keypair(&db, &rng);
+
         Ok(HyperledgerStyleConsensus {
             config: config.clone(),
             current_state: Mutex::new(initial_state),
-            validators: HashMap::new(),
+            validators: Mutex::new(HashMap::new()),
             pending_transactions: Mutex::new(vec![]),
             db,
             state_machine,
+            keypair_bytes: Mutex::new(keypair_bytes),
+            node_public_key: public_key.clone(),
+            rng,
         })
+    }
+
+    /// Load the node's ED25519 keypair from sled, or generate a new one.
+    fn load_or_generate_keypair(db: &sled::Db, rng: &SystemRandom) -> (Vec<u8>, String) {
+        // Try to load existing keypair
+        if let Some(bytes) = db.get("node_keypair").ok().flatten() {
+            let bytes = bytes.to_vec();
+            if let Ok(kp) = Ed25519KeyPair::from_pkcs8(&bytes) {
+                let pub_key_bytes = kp.public_key().as_ref().to_vec();
+                let pub_key = base64::engine::general_purpose::STANDARD.encode(&pub_key_bytes);
+                return (bytes, pub_key);
+            }
+        }
+
+        // Generate new keypair
+        let pkcs8_bytes =
+            Ed25519KeyPair::generate_pkcs8(rng).expect("failed to generate ED25519 keypair");
+        let keypair_bytes = pkcs8_bytes.as_ref().to_vec();
+        let kp = Ed25519KeyPair::from_pkcs8(&keypair_bytes).expect("generated keypair is invalid");
+        let pub_key_bytes = kp.public_key().as_ref().to_vec();
+        let pub_key = base64::engine::general_purpose::STANDARD.encode(&pub_key_bytes);
+
+        // Persist to sled for future restarts
+        let _ = db.insert("node_keypair", keypair_bytes.clone());
+        let _ = db.insert("node_public_key", pub_key.as_bytes());
+        let _ = db.flush();
+
+        (keypair_bytes, pub_key)
+    }
+
+    /// Sign a message (transaction hash bytes) with the node's private key.
+    fn sign_bytes(&self, message: &[u8]) -> Vec<u8> {
+        let bytes = self.keypair_bytes.lock().unwrap();
+        let kp = Ed25519KeyPair::from_pkcs8(&bytes).expect("invalid stored keypair");
+        kp.sign(message).as_ref().to_vec()
+    }
+
+    /// Verify a signature against a public key.
+    fn verify_signature(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let peer_public_key = UnparsedPublicKey::new(&ED25519, public_key);
+        peer_public_key.verify(message, signature).is_ok()
+    }
+
+    /// Get the bytes to sign for a transaction.
+    fn transaction_signing_data(tx: &Transaction) -> Vec<u8> {
+        let data = serde_json::json!({
+            "id": tx.id,
+            "operations": tx.operations,
+            "timestamp": tx.timestamp,
+            "proposer": tx.proposer,
+        });
+        serde_json::to_vec(&data).unwrap_or_default()
+    }
+
+    /// Get the bytes to sign for a block.
+    fn block_signing_data(block: &Block) -> Vec<u8> {
+        let data = serde_json::json!({
+            "hash": block.hash.0,
+            "previous_hash": block.previous_hash.0,
+            "height": block.height,
+            "merkle_root": block.merkle_root.0,
+            "timestamp": block.timestamp,
+            "validator": block.validator,
+        });
+        serde_json::to_vec(&data).unwrap_or_default()
     }
 
     /// Add a validator to the validator set
     pub fn add_validator(&mut self, id: String, public_key: String, stake: u64) {
-        self.validators.insert(
+        self.validators.get_mut().unwrap().insert(
             id.clone(),
             Validator {
                 id,
@@ -689,30 +717,30 @@ impl HyperledgerStyleConsensus {
             },
         );
         let mut state = self.current_state.lock().unwrap();
-        state.validators = self.validators.values().cloned().collect();
-        state.consensus_parameters.validator_count = self.validators.len();
+        state.validators = self.validators.lock().unwrap().values().cloned().collect();
+        state.consensus_parameters.validator_count = self.validators.lock().unwrap().len();
     }
 
     /// Remove a validator by ID
     pub fn remove_validator(&mut self, id: &str) {
-        self.validators.remove(id);
+        self.validators.get_mut().unwrap().remove(id);
         let mut state = self.current_state.lock().unwrap();
-        state.validators = self.validators.values().cloned().collect();
-        state.consensus_parameters.validator_count = self.validators.len();
+        state.validators = self.validators.lock().unwrap().values().cloned().collect();
+        state.consensus_parameters.validator_count = self.validators.lock().unwrap().len();
     }
 
     /// Update validator stake
     pub fn update_validator_stake(&mut self, id: &str, new_stake: u64) -> Option<()> {
-        let v = self.validators.get_mut(id)?;
+        let v = self.validators.get_mut().unwrap().get_mut(id)?;
         v.stake = new_stake;
         let mut state = self.current_state.lock().unwrap();
-        state.validators = self.validators.values().cloned().collect();
+        state.validators = self.validators.lock().unwrap().values().cloned().collect();
         Some(())
     }
 
     /// Get validator
-    pub fn get_validator(&self, id: &str) -> Option<&Validator> {
-        self.validators.get(id)
+    pub fn get_validator(&self, id: &str) -> Option<Validator> {
+        self.validators.lock().unwrap().get(id).cloned()
     }
 
     /// Add a transaction to the mempool
@@ -741,13 +769,20 @@ impl HyperledgerStyleConsensus {
             .map(|v| v.id.clone())
             .unwrap_or_else(|| "genesis".to_string());
 
+        let block_data = serde_json::json!({
+            "height": height,
+            "previous_hash": previous_hash.0,
+            "merkle_root": merkle_root.0,
+            "timestamp": chrono::Utc::now(),
+            "validator": validator_id,
+            "tx_count": transactions.len(),
+        });
         let hash = Hash(format!(
-            "block_{}_{}",
-            height,
-            chrono::Utc::now().timestamp()
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&block_data).unwrap_or_default())
         ));
 
-        let block = Block {
+        let mut block = Block {
             hash: hash.clone(),
             previous_hash,
             height,
@@ -755,8 +790,12 @@ impl HyperledgerStyleConsensus {
             timestamp: chrono::Utc::now(),
             merkle_root,
             validator: validator_id,
-            signature: format!("sig_{}", chrono::Utc::now().timestamp()),
+            signature: String::new(),
         };
+
+        let block_msg = Self::block_signing_data(&block);
+        block.signature =
+            base64::engine::general_purpose::STANDARD.encode(self.sign_bytes(&block_msg));
 
         {
             let mut state = self.current_state.lock().unwrap();
@@ -782,10 +821,7 @@ impl HyperledgerStyleConsensus {
         self.db
             .insert("height", serde_json::to_vec(&block.height)?)?;
         self.db.insert("total_tx", serde_json::to_vec(&total_tx)?)?;
-        self.db.insert(
-            "last_hash",
-            block.hash.0.as_bytes(),
-        )?;
+        self.db.insert("last_hash", block.hash.0.as_bytes())?;
         self.db.flush()?;
         Ok(())
     }
@@ -806,7 +842,7 @@ impl HyperledgerStyleConsensus {
 
     fn calculate_merkle_root(transactions: &[Transaction]) -> Hash {
         if transactions.is_empty() {
-            return Hash("empty".to_string());
+            return Hash(format!("{:x}", sha2::Sha256::digest(b"")));
         }
 
         let mut hashes: Vec<String> = transactions
@@ -835,69 +871,94 @@ impl HyperledgerStyleConsensus {
         format!("{:x}", sha2::Sha256::digest(serialized.as_bytes()))
     }
 
+    #[instrument(skip(self), fields(operation = "validate_transaction_signature"))]
     fn validate_transaction_signature(&self, transaction: &Transaction) -> bool {
-        // Local trusted node — allow unsigned transactions (embedded / single-node mode)
-        if transaction.signature.is_empty() || transaction.public_key.is_empty() {
-            info!(
-                "Transaction {} has no Ed25519 signature — allowing (local/trusted mode)",
-                transaction.id
-            );
-            return true;
-        }
-
-        let sig_bytes = match hex::decode(&transaction.signature) {
-            Ok(b) => b,
-            Err(_) => {
-                warn!("Transaction {} has invalid hex signature", transaction.id);
-                return false;
-            }
-        };
-        let pk_bytes = match hex::decode(&transaction.public_key) {
-            Ok(b) => b,
-            Err(_) => {
-                warn!("Transaction {} has invalid hex public key", transaction.id);
+        let proposer_pub_key = match self.validators.lock().unwrap().get(&transaction.proposer) {
+            Some(v) => v.public_key.clone(),
+            None => {
+                tracing::warn!("Unknown proposer: {}", transaction.proposer);
                 return false;
             }
         };
 
-        let sig = match ed25519_dalek::Signature::from_slice(&sig_bytes) {
-            Ok(s) => s,
-            Err(_) => return false,
+        let pub_key_bytes = match base64::engine::general_purpose::STANDARD
+            .decode(&proposer_pub_key)
+            .ok()
+        {
+            Some(b) => b,
+            None => {
+                tracing::warn!("Invalid base64 public key for {}", transaction.proposer);
+                return false;
+            }
         };
 
-        let pk = match VerifyingKey::from_bytes(
-            &pk_bytes.try_into().unwrap_or_default(),
-        ) {
-            Ok(pk) => pk,
-            Err(_) => return false,
+        let signature_bytes = match base64::engine::general_purpose::STANDARD
+            .decode(&transaction.signature)
+            .ok()
+        {
+            Some(b) => b,
+            None => {
+                tracing::warn!("Invalid base64 signature on transaction {}", transaction.id);
+                return false;
+            }
         };
 
-        let payload = transaction.canonical_payload();
-        let result = pk.verify(&payload, &sig).is_ok();
-        if !result {
-            warn!("Transaction {} has invalid signature", transaction.id);
-        }
-        result
+        let message = Self::transaction_signing_data(transaction);
+        Self::verify_signature(&pub_key_bytes, &message, &signature_bytes)
     }
 
     #[allow(dead_code)]
-    fn select_validator(&self, round: u64) -> Option<&Validator> {
-        let validator_list: Vec<&Validator> = self.validators.values().collect();
+    fn select_validator(&self, round: u64) -> Option<Validator> {
+        let validators = self.validators.lock().unwrap();
+        let validator_list: Vec<&Validator> = validators.values().collect();
         if validator_list.is_empty() {
             return None;
         }
 
         let index = (round as usize) % validator_list.len();
-        Some(validator_list[index])
+        Some(validator_list[index].clone())
     }
 }
 
 #[async_trait]
 impl ConsensusEngine for HyperledgerStyleConsensus {
+    #[instrument(skip(self, transaction), fields(
+        operation = "propose_transaction",
+        tx_id = %transaction.id,
+        proposer = %transaction.proposer,
+        duration_ms = tracing::field::Empty
+    ))]
     async fn propose_transaction(&self, transaction: &Transaction) -> Result<ConsensusResult> {
+        let start = Instant::now();
         println!("Proposing transaction: {}", transaction.id);
 
-        if !self.validate_transaction_signature(transaction) {
+        // Sign the transaction with this node's key
+        let mut tx = transaction.clone();
+        let msg = Self::transaction_signing_data(&tx);
+        let sig = self.sign_bytes(&msg);
+        tx.signature = base64::engine::general_purpose::STANDARD.encode(&sig);
+
+        // Ensure this node is registered as a validator
+        if !self.validators.lock().unwrap().contains_key(&tx.proposer) {
+            tracing::info!("Registering proposer '{}' as a validator", tx.proposer);
+            self.validators.lock().unwrap().insert(
+                tx.proposer.clone(),
+                Validator {
+                    id: tx.proposer.clone(),
+                    public_key: self.node_public_key.clone(),
+                    stake: 1000,
+                    reputation: 1.0,
+                    last_seen: chrono::Utc::now(),
+                },
+            );
+            {
+                let mut state = self.current_state.lock().unwrap();
+                state.validators = self.validators.lock().unwrap().values().cloned().collect();
+                state.consensus_parameters.validator_count = self.validators.lock().unwrap().len();
+            }
+        }
+
+        if !self.validate_transaction_signature(&tx) {
             return Ok(ConsensusResult {
                 accepted: false,
                 block_hash: None,
@@ -907,16 +968,25 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
         }
 
         // Add to mempool
-        self.add_to_mempool(transaction.clone());
+        self.add_to_mempool(tx);
+
+        let duration = start.elapsed().as_secs_f64() * 1000.0;
+        Span::current().record("duration_ms", duration);
+
+        let round = {
+            let state = self.current_state.lock().unwrap();
+            state.current_height + 1
+        };
 
         Ok(ConsensusResult {
             accepted: true,
             block_hash: Some(Hash(format!(
-                "block_hash_{}",
-                chrono::Utc::now().timestamp()
+                "{:x}",
+                sha2::Sha256::digest(transaction.id.as_bytes())
             ))),
-            validator_signatures: vec!["signature1".to_string(), "signature2".to_string()],
-            consensus_round: 1,
+            validator_signatures: vec![base64::engine::general_purpose::STANDARD
+                .encode(self.sign_bytes(transaction.id.as_bytes()))],
+            consensus_round: round,
         })
     }
 
@@ -934,13 +1004,68 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
             return Ok(false);
         }
 
+        // Validate validator signature on the block
+        let validator_pub_key = {
+            let validators = self.validators.lock().unwrap();
+            validators
+                .get(&block.validator)
+                .map(|v| v.public_key.clone())
+                .unwrap_or_else(|| self.node_public_key.clone())
+        };
+
+        let pub_key_bytes = match base64::engine::general_purpose::STANDARD
+            .decode(&validator_pub_key)
+            .ok()
+        {
+            Some(b) => b,
+            None => {
+                tracing::warn!("Invalid base64 public key for block validator");
+                return Ok(false);
+            }
+        };
+
+        let signature_bytes = match base64::engine::general_purpose::STANDARD
+            .decode(&block.signature)
+            .ok()
+        {
+            Some(b) => b,
+            None => {
+                tracing::warn!("Invalid base64 block signature");
+                return Ok(false);
+            }
+        };
+
+        let block_msg = Self::block_signing_data(block);
+        if !Self::verify_signature(&pub_key_bytes, &block_msg, &signature_bytes) {
+            tracing::warn!("Block {} has invalid validator signature", block.hash.0);
+            return Ok(false);
+        }
+
+        // Validate all transaction signatures
+        for tx in &block.transactions {
+            if !self.validate_transaction_signature(tx) {
+                tracing::warn!(
+                    "Transaction {} in block {} has invalid signature",
+                    tx.id,
+                    block.hash.0
+                );
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 
     async fn commit_block(&self, block: &Block) -> Result<()> {
-        info!("Committing block {} at height {}", block.hash.0, block.height);
+        info!(
+            "Committing block {} at height {}",
+            block.hash.0, block.height
+        );
         self.persist_block(block)?;
         info!("Block {} persisted to sled", block.hash.0);
+
+        blockchain::set_blockchain_height(block.height);
+        blockchain::inc_blockchain_append();
 
         self.state_machine.apply_block(block).await?;
         info!(
@@ -956,12 +1081,50 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
         Ok(state.clone())
     }
 
-    async fn handle_fork(&self, _fork_point: &Hash) -> Result<ForkResolution> {
-        println!("Handling fork resolution");
-        Ok(ForkResolution::KeepCurrent)
+    async fn handle_fork(&self, fork_point: &Hash) -> Result<ForkResolution> {
+        let state = self.current_state.lock().unwrap();
+        tracing::warn!(
+            "Fork detected at hash={}, current_height={}, last_hash={}",
+            fork_point.0,
+            state.current_height,
+            state.last_block_hash.0
+        );
+
+        // If fork point is our last block, this is a fork at the tip
+        if fork_point.0 == state.last_block_hash.0 {
+            tracing::warn!("Fork at chain tip — scheduling manual review");
+            return Ok(ForkResolution::ManualIntervention);
+        }
+
+        // Try to find the fork point in our stored chain
+        let blocks = self.list_blocks().ok();
+        let fork_found =
+            blocks.is_some_and(|blocks| blocks.iter().any(|b| b.hash.0 == fork_point.0));
+
+        if fork_found {
+            // Fork point exists in our chain; it's an older fork
+            tracing::info!(
+                "Fork point {} found at height, keeping current chain",
+                fork_point.0
+            );
+            Ok(ForkResolution::KeepCurrent)
+        } else {
+            // Unknown fork point
+            tracing::warn!(
+                "Fork point {} not found in local chain — manual intervention required",
+                fork_point.0
+            );
+            Ok(ForkResolution::ManualIntervention)
+        }
     }
 
+    #[instrument(skip(self), fields(
+        operation = "build_and_commit_block",
+        height = tracing::field::Empty,
+        duration_ms = tracing::field::Empty
+    ))]
     async fn build_and_commit_block(&self) -> Result<Option<Block>> {
+        let start = Instant::now();
         let transactions = {
             let mut pending = self.pending_transactions.lock().unwrap();
             if pending.is_empty() {
@@ -970,37 +1133,62 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
             pending.drain(..).collect::<Vec<Transaction>>()
         };
 
-        let merkle_root = Self::calculate_merkle_root(&transactions);
+        // Sign each transaction with the node's key
+        let mut signed_txns: Vec<Transaction> = Vec::with_capacity(transactions.len());
+        for mut tx in transactions {
+            let msg = Self::transaction_signing_data(&tx);
+            let sig = self.sign_bytes(&msg);
+            tx.signature = base64::engine::general_purpose::STANDARD.encode(&sig);
+            signed_txns.push(tx);
+        }
+
+        let merkle_root = Self::calculate_merkle_root(&signed_txns);
 
         let (height, previous_hash) = {
             let state = self.current_state.lock().unwrap();
             (state.current_height + 1, state.last_block_hash.clone())
         };
 
-        let validator_list: Vec<&Validator> = self.validators.values().collect();
-        let validator_id = if validator_list.is_empty() {
-            "genesis".to_string()
+        let validator_list: Vec<Validator> = {
+            let validators = self.validators.lock().unwrap();
+            validators.values().cloned().collect()
+        };
+        let (validator_id, _validator_pub_key) = if validator_list.is_empty() {
+            ("genesis".to_string(), self.node_public_key.clone())
         } else {
             let index = (height as usize) % validator_list.len();
-            validator_list[index].id.clone()
+            let v = &validator_list[index];
+            (v.id.clone(), v.public_key.clone())
         };
 
+        let block_data = serde_json::json!({
+            "height": height,
+            "previous_hash": previous_hash.0,
+            "merkle_root": merkle_root.0,
+            "timestamp": chrono::Utc::now(),
+            "validator": validator_id,
+            "tx_count": signed_txns.len(),
+        });
         let hash = Hash(format!(
-            "block_{}_{}",
-            height,
-            chrono::Utc::now().timestamp()
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&block_data).unwrap_or_default())
         ));
 
-        let block = Block {
+        let mut block = Block {
             hash: hash.clone(),
             previous_hash,
             height,
-            transactions,
+            transactions: signed_txns,
             timestamp: chrono::Utc::now(),
             merkle_root,
             validator: validator_id,
-            signature: format!("sig_{}", chrono::Utc::now().timestamp()),
+            signature: String::new(),
         };
+
+        // Sign the block
+        let block_msg = Self::block_signing_data(&block);
+        let block_sig = self.sign_bytes(&block_msg);
+        block.signature = base64::engine::general_purpose::STANDARD.encode(&block_sig);
 
         if !self.validate_block(&block).await? {
             return Err(crate::Error::ConsensusError(
@@ -1015,9 +1203,17 @@ impl ConsensusEngine for HyperledgerStyleConsensus {
             state.total_transactions += block.transactions.len() as u64;
         }
 
+        Span::current().record("height", height);
+
         self.commit_block(&block).await?;
 
-        info!("Built and committed block {} at height {}", block.hash.0, height);
+        let duration = start.elapsed().as_secs_f64() * 1000.0;
+        Span::current().record("duration_ms", duration);
+
+        info!(
+            "Built and committed block {} at height {}",
+            block.hash.0, height
+        );
         Ok(Some(block))
     }
 }

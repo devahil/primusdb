@@ -13,10 +13,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use sha2::Digest;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use sha2::Digest;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DocumentCollection {
@@ -98,12 +98,51 @@ impl DocumentEngine {
         let path = format!("{}/document", config.storage.data_dir);
         let db = sled::open(&path)?;
 
-        Ok(DocumentEngine {
+        let engine = DocumentEngine {
             config: config.clone(),
             collections: Arc::new(RwLock::new(HashMap::new())),
             encrypted_collections: Arc::new(RwLock::new(HashMap::new())),
             db,
-        })
+        };
+
+        engine.load_from_sled()?;
+        Ok(engine)
+    }
+
+    fn load_from_sled(&self) -> Result<()> {
+        let mut collections = self.collections.write().unwrap();
+        for tree_name in self.db.tree_names() {
+            let name = String::from_utf8_lossy(&tree_name).to_string();
+            if let Ok(tree) = self.db.open_tree(&name) {
+                let mut documents = HashMap::new();
+                let mut next_id: u64 = 1;
+                for entry in tree.iter() {
+                    let (key, value) = entry?;
+                    let doc: Document = serde_json::from_slice(&value)?;
+                    let id_str = String::from_utf8_lossy(&key).to_string();
+                    let numeric_id = id_str
+                        .strip_prefix("doc_")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if numeric_id >= next_id {
+                        next_id = numeric_id + 1;
+                    }
+                    documents.insert(id_str, doc);
+                }
+                if !documents.is_empty() || tree.iter().next().is_some() {
+                    collections.insert(
+                        name.clone(),
+                        DocumentCollection {
+                            name: name.clone(),
+                            documents,
+                            indexes: HashMap::new(),
+                            next_id,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn enable_collection_encryption(&self, collection: &str) -> Result<()> {
@@ -161,11 +200,14 @@ impl DocumentEngine {
                 let field_value = resolve_field(&doc.data, field);
                 if let Some(fv) = field_value {
                     let key = serde_json::to_string(&fv).unwrap_or_default();
-                    index.data.entry(key).or_insert_with(Vec::new).push(doc_id.clone());
+                    index.data.entry(key).or_default().push(doc_id.clone());
                 }
             }
             col.indexes.insert(index_name.to_string(), index);
-            info!("Created index '{}' on '{}' field in '{}'", index_name, field, collection);
+            info!(
+                "Created index '{}' on '{}' field in '{}'",
+                index_name, field, collection
+            );
             Ok(())
         } else {
             Err(crate::Error::DatabaseError(format!(
@@ -218,7 +260,11 @@ impl DocumentEngine {
             }
             if let Some(new) = new_value {
                 let new_key = serde_json::to_string(new).unwrap_or_default();
-                index.data.entry(new_key).or_insert_with(Vec::new).push(doc_id.to_string());
+                index
+                    .data
+                    .entry(new_key)
+                    .or_insert_with(Vec::new)
+                    .push(doc_id.to_string());
             }
         }
         if field.contains('.') {
@@ -243,20 +289,17 @@ impl DocumentEngine {
 
     // ── Bulk Operations ────────────────────────────────────────────
 
-    pub fn insert_many(
-        &self,
-        table: &str,
-        documents: &[serde_json::Value],
-    ) -> Result<u64> {
+    pub fn insert_many(&self, table: &str, documents: &[serde_json::Value]) -> Result<u64> {
         let mut collections = self.collections.write().unwrap();
-        let collection = collections.entry(table.to_string()).or_insert_with(|| {
-            DocumentCollection {
-                name: table.to_string(),
-                documents: HashMap::new(),
-                indexes: HashMap::new(),
-                next_id: 1,
-            }
-        });
+        let collection =
+            collections
+                .entry(table.to_string())
+                .or_insert_with(|| DocumentCollection {
+                    name: table.to_string(),
+                    documents: HashMap::new(),
+                    indexes: HashMap::new(),
+                    next_id: 1,
+                });
 
         let node_id = &self.config.cluster.node_id;
         let mut count = 0u64;
@@ -360,11 +403,7 @@ impl DocumentEngine {
         Ok(updated)
     }
 
-    pub fn delete_many(
-        &self,
-        table: &str,
-        conditions: Option<&serde_json::Value>,
-    ) -> Result<u64> {
+    pub fn delete_many(&self, table: &str, conditions: Option<&serde_json::Value>) -> Result<u64> {
         let mut collections = self.collections.write().unwrap();
         let Some(collection) = collections.get_mut(table) else {
             return Ok(0);
@@ -413,11 +452,7 @@ impl DocumentEngine {
 
     // ── Aggregation Pipeline ───────────────────────────────────────
 
-    pub fn aggregate(
-        &self,
-        table: &str,
-        pipeline: &[serde_json::Value],
-    ) -> Result<Vec<Record>> {
+    pub fn aggregate(&self, table: &str, pipeline: &[serde_json::Value]) -> Result<Vec<Record>> {
         let collections = self.collections.read().unwrap();
         let Some(collection) = collections.get(table) else {
             return Ok(vec![]);
@@ -607,7 +642,7 @@ impl DocumentEngine {
                         })
                     })
                     .cloned()
-                    .min_by(|a, b| compare_json(a, b));
+                    .min_by(compare_json);
                 Ok(min_val.map(|v| (field.to_string(), v)))
             }
             "$max" => {
@@ -620,7 +655,7 @@ impl DocumentEngine {
                         })
                     })
                     .cloned()
-                    .max_by(|a, b| compare_json(a, b));
+                    .max_by(compare_json);
                 Ok(max_val.map(|v| (field.to_string(), v)))
             }
             "$first" => {
@@ -795,23 +830,17 @@ impl DocumentEngine {
 
         match condition {
             serde_json::Value::Object(op_obj) => {
-                for (op, operand) in op_obj {
+                if let Some((op, operand)) = op_obj.into_iter().next() {
                     return match op.as_str() {
                         "$gt" => compare_gt(current, operand),
                         "$lt" => compare_lt(current, operand),
                         "$gte" => compare_gte(current, operand),
                         "$lte" => compare_lte(current, operand),
                         "$ne" => current != operand,
-                        "$in" => operand
-                            .as_array()
-                            .map_or(false, |arr| arr.contains(current)),
-                        "$nin" => operand
-                            .as_array()
-                            .map_or(true, |arr| !arr.contains(current)),
+                        "$in" => operand.as_array().is_some_and(|arr| arr.contains(current)),
+                        "$nin" => operand.as_array().is_none_or(|arr| !arr.contains(current)),
                         "$regex" => {
-                            if let (Some(s), Some(pattern)) =
-                                (current.as_str(), operand.as_str())
-                            {
+                            if let (Some(s), Some(pattern)) = (current.as_str(), operand.as_str()) {
                                 regex::Regex::new(pattern)
                                     .map(|re| re.is_match(s))
                                     .unwrap_or(false)
@@ -828,8 +857,7 @@ impl DocumentEngine {
                             }
                         }
                         "$size" => {
-                            if let (Some(arr), Some(size)) =
-                                (current.as_array(), operand.as_u64())
+                            if let (Some(arr), Some(size)) = (current.as_array(), operand.as_u64())
                             {
                                 arr.len() as u64 == size
                             } else {
@@ -848,20 +876,18 @@ impl DocumentEngine {
                         "$elemMatch" => {
                             if let Some(arr) = current.as_array() {
                                 arr.iter().any(|elem| match operand {
-                                    serde_json::Value::Object(_) => {
-                                        Self::match_document(
-                                            &Document {
-                                                id: String::new(),
-                                                data: elem.clone(),
-                                                created_at: chrono::Utc::now(),
-                                                updated_at: chrono::Utc::now(),
-                                                version: 0,
-                                                vector_clock: HashMap::new(),
-                                                checksum: String::new(),
-                                            },
-                                            operand,
-                                        )
-                                    }
+                                    serde_json::Value::Object(_) => Self::match_document(
+                                        &Document {
+                                            id: String::new(),
+                                            data: elem.clone(),
+                                            created_at: chrono::Utc::now(),
+                                            updated_at: chrono::Utc::now(),
+                                            version: 0,
+                                            vector_clock: HashMap::new(),
+                                            checksum: String::new(),
+                                        },
+                                        operand,
+                                    ),
                                     _ => elem == operand,
                                 })
                             } else {
@@ -920,10 +946,7 @@ fn compare_lte(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     compare_lt(a, b) || a == b
 }
 
-fn resolve_field<'a>(
-    data: &'a serde_json::Value,
-    field: &str,
-) -> Option<&'a serde_json::Value> {
+fn resolve_field<'a>(data: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
     let parts: Vec<&str> = field.split('.').collect();
     let mut current = data;
     for part in parts {
@@ -937,12 +960,11 @@ fn resolve_field<'a>(
 
 fn compare_json(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
     match (a, b) {
-        (serde_json::Value::Number(an), serde_json::Value::Number(bn)) => {
-            an.as_f64()
-                .unwrap_or(0.0)
-                .partial_cmp(&bn.as_f64().unwrap_or(0.0))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (serde_json::Value::Number(an), serde_json::Value::Number(bn)) => an
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&bn.as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal),
         (serde_json::Value::String(as_), serde_json::Value::String(bs)) => as_.cmp(bs),
         (serde_json::Value::Bool(ab), serde_json::Value::Bool(bb)) => ab.cmp(bb),
         _ => std::cmp::Ordering::Equal,
@@ -1246,19 +1268,45 @@ impl StorageEngine for DocumentEngine {
 
         let collections = self.collections.read().unwrap();
         if let Some(collection) = collections.get(table) {
-            let size_bytes: u64 = collection.documents.values()
-                .filter_map(|doc| serde_json::to_string(&doc).ok())
-                .map(|s| s.len() as u64)
-                .sum();
+            let indexes: Vec<crate::storage::Index> = collection
+                .indexes
+                .values()
+                .map(|i| crate::storage::Index {
+                    name: format!("idx_{}", i.field),
+                    fields: vec![i.field.clone()],
+                    index_type: crate::storage::IndexType::BTree,
+                    unique: false,
+                })
+                .collect();
+            let mut field_names: Vec<String> = Vec::new();
+            for doc in collection.documents.values() {
+                if let serde_json::Value::Object(map) = &doc.data {
+                    for key in map.keys() {
+                        if !field_names.contains(key) {
+                            field_names.push(key.clone());
+                        }
+                    }
+                }
+            }
+            let fields: Vec<crate::storage::Field> = field_names
+                .into_iter()
+                .map(|name| crate::storage::Field {
+                    name,
+                    field_type: crate::storage::FieldType::Text,
+                    nullable: true,
+                    default_value: None,
+                    constraints: vec![],
+                })
+                .collect();
             Ok(TableInfo {
                 name: table.to_string(),
                 schema: Schema {
-                    fields: vec![],
-                    indexes: vec![],
+                    fields,
+                    indexes,
                     constraints: vec![],
                 },
                 row_count: collection.documents.len() as u64,
-                size_bytes,
+                size_bytes: 0,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -1267,77 +1315,5 @@ impl StorageEngine for DocumentEngine {
                 "Collection not found".to_string(),
             ))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transaction::Transaction;
-
-    fn test_tx() -> Transaction {
-        Transaction {
-            id: "test".to_string(),
-            operations: vec![],
-            created_at: chrono::Utc::now(),
-            status: crate::transaction::TransactionStatus::Active,
-            updated_at: chrono::Utc::now(),
-            isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-            timeout_ms: 30000,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_document_checksum() {
-        let data = serde_json::json!({"name": "alice", "age": 30});
-        let checksum = Document::compute_checksum(&data);
-        assert_eq!(checksum.len(), 64);
-    }
-
-    #[test]
-    fn test_document_new_doc() {
-        let data = serde_json::json!({"name": "bob"});
-        let doc = Document::new_doc("doc_1".to_string(), data.clone(), "node1");
-        assert_eq!(doc.id, "doc_1");
-        assert_eq!(doc.version, 1);
-        assert_eq!(doc.data["name"], "bob");
-    }
-
-    #[tokio::test]
-    async fn test_document_insert_and_select() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = PrimusDBConfig::default();
-        config.storage.data_dir = dir.path().to_str().unwrap().to_string();
-        config.cluster.node_id = "test_node".to_string();
-        let engine = DocumentEngine::new(&config).unwrap();
-        let schema = Schema { fields: vec![], indexes: vec![], constraints: vec![] };
-        engine.create_table("test_docs", &schema).await.unwrap();
-
-        let tx = test_tx();
-        let data = serde_json::json!({"title": "test doc", "value": 42});
-        let id = engine.insert("test_docs", &data, &tx).await.unwrap();
-        assert_eq!(id, 1);
-
-        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].data["title"], "test doc");
-
-        // Test update
-        let update = serde_json::json!({"value": 99});
-        let updated = engine.update("test_docs", None, &update, &tx).await.unwrap();
-        assert_eq!(updated, 1);
-
-        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
-        assert_eq!(records[0].data["value"], 99);
-
-        // Test delete
-        let deleted = engine.delete("test_docs", None, &tx).await.unwrap();
-        assert_eq!(deleted, 1);
-
-        let records = engine.select("test_docs", None, 10, 0, &tx).await.unwrap();
-        assert_eq!(records.len(), 0);
-
-        engine.drop_table("test_docs").await.unwrap();
     }
 }

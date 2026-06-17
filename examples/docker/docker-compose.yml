@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  primusdb:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: primusdb:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - primusdb_data:/var/lib/primusdb
+      - ./primusdb.toml:/etc/primusdb/config.toml
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Prometheus monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    profiles:
+      - monitoring
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+volumes:
+  primusdb_data:

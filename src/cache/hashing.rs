@@ -248,6 +248,12 @@ impl Default for HashRingConfig {
     }
 }
 
+impl Default for HashRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HashRing {
     /// Create a new consistent hash ring
     pub fn new() -> Self {

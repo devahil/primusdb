@@ -247,7 +247,7 @@ pub struct EncryptionKey {
     pub algorithm: EncryptionAlgorithm,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EncryptionAlgorithm {
     AES256GCM,
     ChaCha20Poly1305,
@@ -585,3 +585,314 @@ pub mod file_encryption;
 pub use file_encryption::{
     EncryptedFileHeader, FileEncryptionFlags, FileEncryptionManager, FILE_MAGIC, FILE_VERSION,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> crate::SecurityConfig {
+        crate::SecurityConfig {
+            encryption_enabled: true,
+            key_rotation_interval: 86400,
+            auth_required: false,
+        }
+    }
+
+    fn disabled_config() -> crate::SecurityConfig {
+        crate::SecurityConfig {
+            encryption_enabled: false,
+            key_rotation_interval: 86400,
+            auth_required: false,
+        }
+    }
+
+    // ── Key generation tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_crypto_manager_creation_enabled() {
+        let _cm = CryptoManager::new(&test_config()).unwrap();
+    }
+
+    #[test]
+    fn test_crypto_manager_creation_disabled() {
+        let _cm = CryptoManager::new(&disabled_config()).unwrap();
+    }
+
+    #[test]
+    fn test_generate_data_key() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        assert_eq!(key.key.len(), 32);
+        assert!(!key.id.is_empty());
+        assert_eq!(key.algorithm, EncryptionAlgorithm::AES256GCM);
+        let plaintext = b"test";
+        let encrypted = cm.encrypt(plaintext, &key).unwrap();
+        assert_eq!(encrypted.key_id, key.id);
+    }
+
+    #[test]
+    fn test_generate_multiple_keys() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let k1 = cm.generate_data_key().unwrap();
+        let k2 = cm.generate_data_key().unwrap();
+        assert_ne!(k1.id, k2.id);
+        let e1 = cm.encrypt(b"data1", &k1).unwrap();
+        let e2 = cm.encrypt(b"data2", &k2).unwrap();
+        assert_eq!(cm.decrypt(&e1).unwrap(), b"data1");
+        assert_eq!(cm.decrypt(&e2).unwrap(), b"data2");
+    }
+
+    // ── Encrypt/decrypt round-trip (AES-256-GCM) ─────────────────────
+
+    #[test]
+    fn test_encrypt_decrypt_aes256gcm_roundtrip() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"Hello, PrimusDB AES-256-GCM!";
+        let encrypted = cm.encrypt(plaintext, &key).unwrap();
+        assert_eq!(encrypted.algorithm, EncryptionAlgorithm::AES256GCM);
+        assert!(!encrypted.ciphertext.is_empty());
+        assert_eq!(encrypted.nonce.len(), 12);
+        assert_eq!(encrypted.tag.len(), 16);
+        assert_eq!(encrypted.key_id, key.id);
+        assert_ne!(encrypted.ciphertext, plaintext);
+
+        let decrypted = cm.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_empty_data() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"";
+        let encrypted = cm.encrypt(plaintext, &key).unwrap();
+        let decrypted = cm.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_large_data() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = vec![0xAB; 100_000];
+        let encrypted = cm.encrypt(&plaintext, &key).unwrap();
+        let decrypted = cm.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_binary_data() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = vec![0x00, 0xFF, 0xAA, 0x55, 0x01, 0xFE];
+        let encrypted = cm.encrypt(&plaintext, &key).unwrap();
+        let decrypted = cm.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    // ── Invalid key tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_decrypt_wrong_key() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key1 = cm.generate_data_key().unwrap();
+        let plaintext = b"secret data";
+        let encrypted = cm.encrypt(plaintext, &key1).unwrap();
+
+        let key2 = cm.generate_data_key().unwrap();
+        let mut tampered = encrypted.clone();
+        tampered.key_id = key2.id.clone();
+        let result = cm.decrypt(&tampered);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_with_no_key() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let encrypted = EncryptedData {
+            key_id: "nonexistent-key".to_string(),
+            nonce: vec![0u8; 12],
+            ciphertext: vec![1, 2, 3],
+            tag: vec![0u8; 16],
+            algorithm: EncryptionAlgorithm::AES256GCM,
+        };
+        let result = cm.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    // ── Tamper detection tests ───────────────────────────────────────
+
+    #[test]
+    fn test_tampered_ciphertext() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"important data";
+        let mut encrypted = cm.encrypt(plaintext, &key).unwrap();
+        if !encrypted.ciphertext.is_empty() {
+            encrypted.ciphertext[0] ^= 0xFF;
+        }
+        let result = cm.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tampered_tag() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"data with tag";
+        let mut encrypted = cm.encrypt(plaintext, &key).unwrap();
+        if !encrypted.tag.is_empty() {
+            encrypted.tag[0] ^= 0xFF;
+        }
+        let result = cm.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tampered_nonce() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"data with nonce";
+        let mut encrypted = cm.encrypt(plaintext, &key).unwrap();
+        if !encrypted.nonce.is_empty() {
+            encrypted.nonce[0] ^= 0x01;
+        }
+        let result = cm.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncated_ciphertext() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let plaintext = b"truncate me";
+        let mut encrypted = cm.encrypt(plaintext, &key).unwrap();
+        if !encrypted.ciphertext.is_empty() {
+            encrypted
+                .ciphertext
+                .truncate(encrypted.ciphertext.len() / 2);
+        }
+        let result = cm.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    // ── Hash / Integrity tests ───────────────────────────────────────
+
+    #[test]
+    fn test_hash_data_sha256() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let hash = cm.hash_data(b"test data", HashAlgorithm::SHA256).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_hash_deterministic() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let h1 = cm.hash_data(b"same data", HashAlgorithm::SHA256).unwrap();
+        let h2 = cm.hash_data(b"same data", HashAlgorithm::SHA256).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_different_data() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let h1 = cm.hash_data(b"data a", HashAlgorithm::SHA256).unwrap();
+        let h2 = cm.hash_data(b"data b", HashAlgorithm::SHA256).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_create_and_verify_integrity() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let data = b"data to check";
+        let integrity = cm.create_data_integrity(data).unwrap();
+        assert!(cm.verify_data_integrity(data, &integrity).unwrap());
+    }
+
+    #[test]
+    fn test_verify_integrity_tampered_data() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let data = b"original data";
+        let integrity = cm.create_data_integrity(data).unwrap();
+        let tampered = b"tampered data";
+        assert!(!cm.verify_data_integrity(tampered, &integrity).unwrap());
+    }
+
+    #[test]
+    fn test_hash_sha3() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let hash = cm.hash_data(b"sha3 test", HashAlgorithm::SHA3_256).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_hash_blake3() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let hash = cm.hash_data(b"blake3 test", HashAlgorithm::Blake3).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    // ── Password hashing tests ───────────────────────────────────────
+
+    #[test]
+    fn test_hash_and_verify_password() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let password = "my_secure_password!";
+        let hash = cm.hash_password(password).unwrap();
+        assert!(hash.starts_with("$argon2"));
+        assert!(cm.verify_password(password, &hash).unwrap());
+    }
+
+    #[test]
+    fn test_verify_wrong_password() {
+        let cm = CryptoManager::new(&test_config()).unwrap();
+        let hash = cm.hash_password("correct_password").unwrap();
+        assert!(!cm.verify_password("wrong_password", &hash).unwrap());
+    }
+
+    // ── Key rotation tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_key_rotation() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let k1 = cm.generate_data_key().unwrap();
+        let k2 = cm.generate_data_key().unwrap();
+
+        assert_eq!(cm.decrypt(&cm.encrypt(b"a", &k1).unwrap()).unwrap(), b"a");
+        assert_eq!(cm.decrypt(&cm.encrypt(b"b", &k2).unwrap()).unwrap(), b"b");
+
+        cm.rotate_keys().unwrap();
+
+        assert_eq!(cm.decrypt(&cm.encrypt(b"a", &k1).unwrap()).unwrap(), b"a");
+        assert_eq!(cm.decrypt(&cm.encrypt(b"b", &k2).unwrap()).unwrap(), b"b");
+    }
+
+    // ── Key status tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_key_status_active() {
+        let mut cm = CryptoManager::new(&test_config()).unwrap();
+        let key = cm.generate_data_key().unwrap();
+        let status = cm.get_key_status();
+        assert!(matches!(status.get(&key.id), Some(KeyStatus::Active)));
+    }
+
+    // ── EncryptionAlgorithm tests ────────────────────────────────────
+
+    #[test]
+    fn test_encryption_algorithm_serde() {
+        let alg = EncryptionAlgorithm::AES256GCM;
+        let json = serde_json::to_string(&alg).unwrap();
+        let deserialized: EncryptionAlgorithm = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, EncryptionAlgorithm::AES256GCM);
+    }
+
+    #[test]
+    fn test_hash_algorithm_serde() {
+        let alg = HashAlgorithm::SHA256;
+        let json = serde_json::to_string(&alg).unwrap();
+        let deserialized: HashAlgorithm = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, HashAlgorithm::SHA256));
+    }
+}

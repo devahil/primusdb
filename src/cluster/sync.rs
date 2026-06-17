@@ -1,14 +1,23 @@
-use crate::Result;
 use crate::cluster::rpc::{
-    ConflictResolveMessage, MerkleRequest, MerkleResponse, RpcClient, RpcMessage,
-    SyncRequest, SyncResponse, ReplicaWriteRequest,
+    ConflictResolveMessage, MerkleRequest, MerkleResponse, ReplicaWriteRequest, RpcClient,
+    RpcMessage, SyncRequest, SyncResponse,
 };
+use crate::Result;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 
+type RecordVersionEntry = (String, HashMap<String, u64>, u64, String);
+type RecordVersionEntryWithData = (
+    String,
+    HashMap<String, u64>,
+    u64,
+    String,
+    serde_json::Map<String, serde_json::Value>,
+);
 
 pub mod consensus;
 pub mod reconciliation;
@@ -227,9 +236,10 @@ impl SyncCoordinator {
 
     fn restore_state(&self) -> Result<()> {
         if let Some(ref db) = self.db {
-            if let Some(data) = db.get("sync_term").map_err(|e| {
-                crate::Error::ClusterError(format!("DB read: {}", e))
-            })? {
+            if let Some(data) = db
+                .get("sync_term")
+                .map_err(|e| crate::Error::ClusterError(format!("DB read: {}", e)))?
+            {
                 let term: u64 = bincode::deserialize(&data).unwrap_or(0);
                 *self.term.write().unwrap() = term;
             }
@@ -241,12 +251,10 @@ impl SyncCoordinator {
         if let Some(ref db) = self.db {
             let data = bincode::serialize(&*self.term.read().unwrap())
                 .map_err(|e| crate::Error::ClusterError(format!("Serialize: {}", e)))?;
-            db.insert("sync_term", data).map_err(|e|
-                crate::Error::ClusterError(format!("DB write: {}", e))
-            )?;
-            db.flush().map_err(|e|
-                crate::Error::ClusterError(format!("DB flush: {}", e))
-            )?;
+            db.insert("sync_term", data)
+                .map_err(|e| crate::Error::ClusterError(format!("DB write: {}", e)))?;
+            db.flush()
+                .map_err(|e| crate::Error::ClusterError(format!("DB flush: {}", e)))?;
         }
         Ok(())
     }
@@ -283,7 +291,9 @@ impl SyncCoordinator {
         };
 
         let quorum_required = self.config.write_quorum;
-        let votes = self.request_votes(&operation, &validators, quorum_required).await;
+        let votes = self
+            .request_votes(&operation, &validators, quorum_required)
+            .await;
         let confirmed = votes.iter().filter(|v| v.vote).count() >= quorum_required;
 
         if confirmed {
@@ -310,22 +320,26 @@ impl SyncCoordinator {
 
         for node_id in &read_nodes {
             if *node_id == self.node_id {
-                if let Some(meta) = self.sync_metadata.read().unwrap()
+                if let Some(meta) = self
+                    .sync_metadata
+                    .read()
+                    .unwrap()
                     .get(&format!("{}:{}", table, key))
                 {
                     versions.push(meta.vector_clock.clone());
                     source_nodes.push(node_id.clone());
                 }
             } else {
-                let clients = self.clients.read().unwrap();
-                if let Some(client) = clients.get(node_id) {
-                    let req = RpcMessage::ReplicaRead(
-                        crate::cluster::rpc::ReplicaReadRequest {
-                            storage_type: table.to_string(),
-                            table: table.to_string(),
-                            key: key.to_string(),
-                        },
-                    );
+                let client = {
+                    let clients = self.clients.read().unwrap();
+                    clients.get(node_id).cloned()
+                };
+                if let Some(client) = client {
+                    let req = RpcMessage::ReplicaRead(crate::cluster::rpc::ReplicaReadRequest {
+                        storage_type: table.to_string(),
+                        table: table.to_string(),
+                        key: key.to_string(),
+                    });
                     if let Ok(RpcMessage::ReplicaReadResponse(resp)) = client.send(&req).await {
                         if resp.found {
                             source_nodes.push(node_id.clone());
@@ -335,8 +349,8 @@ impl SyncCoordinator {
             }
         }
 
-        let is_consistent = versions.len() >= quorum_required
-            && self.verify_version_agreement(&versions);
+        let is_consistent =
+            versions.len() >= quorum_required && self.verify_version_agreement(&versions);
 
         Ok(ConsensusReadResult {
             data: None,
@@ -404,9 +418,11 @@ impl SyncCoordinator {
     }
 
     pub async fn elect_leader(&self, candidates: Vec<String>) -> Result<String> {
-        let mut current_term = self.term.write().unwrap();
-        *current_term += 1;
-        let term = *current_term;
+        let term = {
+            let mut guard = self.term.write().unwrap();
+            *guard += 1;
+            *guard
+        };
         self.persist_term()?;
 
         let mut votes = 0;
@@ -417,16 +433,17 @@ impl SyncCoordinator {
                 votes += 1;
                 continue;
             }
-            let clients = self.clients.read().unwrap();
-            if let Some(client) = clients.get(node) {
-                let req = RpcMessage::RequestVote(
-                    crate::cluster::rpc::RaftVoteRequest {
-                        term,
-                        candidate_id: self.node_id.clone(),
-                        last_log_index: 0,
-                        last_log_term: 0,
-                    },
-                );
+            let client = {
+                let clients = self.clients.read().unwrap();
+                clients.get(node).cloned()
+            };
+            if let Some(client) = client {
+                let req = RpcMessage::RequestVote(crate::cluster::rpc::RaftVoteRequest {
+                    term,
+                    candidate_id: self.node_id.clone(),
+                    last_log_index: 0,
+                    last_log_term: 0,
+                });
                 if let Ok(RpcMessage::VoteResponse(resp)) = client.send(&req).await {
                     if resp.vote_granted {
                         votes += 1;
@@ -445,15 +462,17 @@ impl SyncCoordinator {
 
     pub fn update_metadata(&self, key: &str, data: &serde_json::Value) -> Result<()> {
         let mut metadata = self.sync_metadata.write().unwrap();
-        let meta = metadata.entry(key.to_string()).or_insert_with(|| SyncMetadata {
-            key: key.to_string(),
-            vector_clock: VectorClock::new(&self.node_id),
-            version: 0,
-            last_sync: 0,
-            replicas: vec![self.node_id.clone()],
-            dirty: true,
-            checksum: String::new(),
-        });
+        let meta = metadata
+            .entry(key.to_string())
+            .or_insert_with(|| SyncMetadata {
+                key: key.to_string(),
+                vector_clock: VectorClock::new(&self.node_id),
+                version: 0,
+                last_sync: 0,
+                replicas: vec![self.node_id.clone()],
+                dirty: true,
+                checksum: String::new(),
+            });
 
         meta.vector_clock.increment(&self.node_id);
         meta.version += 1;
@@ -481,8 +500,11 @@ impl SyncCoordinator {
             let vote_granted = if validator == &self.node_id {
                 true
             } else {
-                let clients = self.clients.read().unwrap();
-                match clients.get(validator) {
+                let client = {
+                    let clients = self.clients.read().unwrap();
+                    clients.get(validator).cloned()
+                };
+                match client {
                     Some(client) => {
                         let req = RpcMessage::ReplicaWrite(ReplicaWriteRequest {
                             operation_id: operation.id.clone(),
@@ -505,11 +527,12 @@ impl SyncCoordinator {
             if vote_granted {
                 confirmations += 1;
             }
+            let vote_data = format!("{}:{}:{}", validator, term, vote_granted);
             votes.push(QuorumVote {
                 node_id: validator.clone(),
                 vote: vote_granted,
                 term,
-                hash: "validated".to_string(),
+                hash: format!("{:x}", sha2::Sha256::digest(vote_data.as_bytes())),
             });
         }
         votes
@@ -521,10 +544,13 @@ impl SyncCoordinator {
         storage_type: &str,
         peer_node: &str,
     ) -> Result<SyncResponse> {
-        let clients = self.clients.read().unwrap();
-        let client = clients.get(peer_node).ok_or_else(||
+        let client = {
+            let clients = self.clients.read().unwrap();
+            clients.get(peer_node).cloned()
+        };
+        let client = client.ok_or_else(|| {
             crate::Error::ClusterError(format!("Peer {} not connected", peer_node))
-        )?;
+        })?;
 
         let req = RpcMessage::SyncRequest(SyncRequest {
             node_id: self.node_id.clone(),
@@ -536,7 +562,9 @@ impl SyncCoordinator {
 
         match client.send(&req).await {
             Ok(RpcMessage::SyncResponse(resp)) => Ok(resp),
-            Ok(_) => Err(crate::Error::ClusterError("Unexpected sync response".into())),
+            Ok(_) => Err(crate::Error::ClusterError(
+                "Unexpected sync response".into(),
+            )),
             Err(e) => Err(e),
         }
     }
@@ -547,10 +575,13 @@ impl SyncCoordinator {
         storage_type: &str,
         peer_node: &str,
     ) -> Result<MerkleResponse> {
-        let clients = self.clients.read().unwrap();
-        let client = clients.get(peer_node).ok_or_else(||
+        let client = {
+            let clients = self.clients.read().unwrap();
+            clients.get(peer_node).cloned()
+        };
+        let client = client.ok_or_else(|| {
             crate::Error::ClusterError(format!("Peer {} not connected", peer_node))
-        )?;
+        })?;
 
         let req = RpcMessage::MerkleRequest(MerkleRequest {
             table: table.to_string(),
@@ -560,11 +591,14 @@ impl SyncCoordinator {
 
         match client.send(&req).await {
             Ok(RpcMessage::MerkleResponse(resp)) => Ok(resp),
-            Ok(_) => Err(crate::Error::ClusterError("Unexpected merkle response".into())),
+            Ok(_) => Err(crate::Error::ClusterError(
+                "Unexpected merkle response".into(),
+            )),
             Err(e) => Err(e),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn resolve_conflict(
         &self,
         key: &str,
@@ -575,8 +609,11 @@ impl SyncCoordinator {
         term: u64,
         peer_node: &str,
     ) -> Result<()> {
-        let clients = self.clients.read().unwrap();
-        if let Some(client) = clients.get(peer_node) {
+        let client = {
+            let clients = self.clients.read().unwrap();
+            clients.get(peer_node).cloned()
+        };
+        if let Some(client) = client {
             let req = RpcMessage::ConflictResolve(ConflictResolveMessage {
                 key: key.to_string(),
                 table: table.to_string(),
@@ -590,14 +627,102 @@ impl SyncCoordinator {
         Ok(())
     }
 
-    async fn resolve_conflicts(&self, _target_node: &str) -> Result<u64> {
-        // In production, this would use the reconciliation plan from reconcile_table()
-        // to push/pull records and resolve concurrent modifications
-        Ok(0)
+    async fn resolve_conflicts(&self, target_node: &str) -> Result<u64> {
+        let metadata_pairs = {
+            let meta = self.sync_metadata.read().unwrap();
+            meta.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut resolved_count = 0u64;
+
+        // Compare vector clocks across entries for concurrent conflicts
+        for i in 0..metadata_pairs.len().saturating_sub(1) {
+            let a = &metadata_pairs[i].1;
+            let b = &metadata_pairs[i + 1].1;
+            if a.vector_clock.is_concurrent(&b.vector_clock) {
+                // Last-writer-wins: keep the entry with the later sync timestamp
+                let keep = if a.last_sync >= b.last_sync { a } else { b };
+                let meta_key = &metadata_pairs[if keep.key == a.key { i } else { i + 1 }].0;
+
+                // Extract table name from metadata key (format: "table:id")
+                let (table, _) = meta_key.split_once(':').unwrap_or_default();
+
+                tracing::info!(
+                    "Resolved concurrent conflict for '{}' in table '{}'",
+                    keep.key,
+                    table
+                );
+
+                // Notify the target node about the resolution
+                let msg = {
+                    let clients = self.clients.read().unwrap();
+                    clients.get(target_node).map(|client| {
+                        let msg = RpcMessage::ConflictResolve(ConflictResolveMessage {
+                            key: keep.key.clone(),
+                            table: table.to_string(),
+                            storage_type: "document".to_string(),
+                            resolution: "last-writer-wins".to_string(),
+                            resolved_data: serde_json::json!({}),
+                            term: *self.term.read().unwrap(),
+                        });
+                        (client.clone(), msg)
+                    })
+                };
+                if let Some((client, msg)) = msg {
+                    let _ = client.send(&msg).await;
+                }
+                resolved_count += 1;
+            }
+        }
+
+        Ok(resolved_count)
     }
 
-    async fn merge_records(&self, _target_node: &str) -> Result<u64> {
-        Ok(0)
+    async fn merge_records(&self, target_node: &str) -> Result<u64> {
+        let metadata = {
+            let meta = self.sync_metadata.read().unwrap();
+            meta.clone()
+        };
+
+        let mut merged_count = 0u64;
+
+        // Push metadata entries to the target node via replica write
+        for (key, entry) in &metadata {
+            if entry.replicas.contains(&self.node_id) {
+                continue;
+            }
+
+            let client = {
+                let clients = self.clients.read().unwrap();
+                clients.get(target_node).cloned()
+            };
+            if let Some(client) = client {
+                let msg = RpcMessage::ReplicaWrite(ReplicaWriteRequest {
+                    operation_id: key.clone(),
+                    storage_type: "keyvalue".to_string(),
+                    table: key.clone(),
+                    key: key.clone(),
+                    data: serde_json::json!({}),
+                    term: *self.term.read().unwrap(),
+                    index: entry.version,
+                });
+                if client.send(&msg).await.is_ok() {
+                    merged_count += 1;
+                }
+            }
+        }
+
+        if merged_count > 0 {
+            tracing::info!(
+                "Merged {} metadata entries with node {}",
+                merged_count,
+                target_node
+            );
+        }
+
+        Ok(merged_count)
     }
 
     fn verify_version_agreement(&self, versions: &[VectorClock]) -> bool {
@@ -625,12 +750,11 @@ impl SyncCoordinator {
     pub fn build_table_merkle_tree(
         &self,
         _table_name: &str,
-        rows: &[(String, HashMap<String, u64>, u64, String)],
+        rows: &[RecordVersionEntry],
     ) -> MerkleNode {
-        use sha2::Digest;
         if rows.is_empty() {
             return MerkleNode {
-                hash: "empty".to_string(),
+                hash: format!("{:x}", sha2::Sha256::digest(b"")),
                 children: None,
                 key_range: None,
                 is_leaf: true,
@@ -640,7 +764,8 @@ impl SyncCoordinator {
         let leaf_hashes: Vec<(String, String)> = rows
             .iter()
             .map(|(id, _vc, version, checksum)| {
-                let h = format!("{:x}",
+                let h = format!(
+                    "{:x}",
                     sha2::Sha256::digest(format!("{}:{}:{}", id, checksum, version).as_bytes())
                 );
                 (id.clone(), h)
@@ -654,31 +779,27 @@ impl SyncCoordinator {
     pub fn reconcile_table(
         &self,
         _table_name: &str,
-        local_rows: &[(String, HashMap<String, u64>, u64, String, serde_json::Map<String, serde_json::Value>)],
-        remote_rows: &[(String, HashMap<String, u64>, u64, String, serde_json::Map<String, serde_json::Value>)],
+        local_rows: &[RecordVersionEntryWithData],
+        remote_rows: &[RecordVersionEntryWithData],
         local_node_id: &str,
         remote_node_id: &str,
     ) -> ReconciliationPlan {
-        let local_map: HashMap<&str, &(_, _, _, _, _)> = local_rows
-            .iter()
-            .map(|r| (r.0.as_str(), r))
-            .collect();
-        let remote_map: HashMap<&str, &(_, _, _, _, _)> = remote_rows
-            .iter()
-            .map(|r| (r.0.as_str(), r))
-            .collect();
+        let local_map: HashMap<&str, &(_, _, _, _, _)> =
+            local_rows.iter().map(|r| (r.0.as_str(), r)).collect();
+        let remote_map: HashMap<&str, &(_, _, _, _, _)> =
+            remote_rows.iter().map(|r| (r.0.as_str(), r)).collect();
 
         let mut pull_records = Vec::new();
         let mut push_records = Vec::new();
         let mut conflicts = Vec::new();
 
-        for (key, _remote) in &remote_map {
+        for key in remote_map.keys() {
             if !local_map.contains_key(key) {
                 pull_records.push(key.to_string());
             }
         }
 
-        for (key, _local) in &local_map {
+        for key in local_map.keys() {
             if !remote_map.contains_key(key) {
                 push_records.push(key.to_string());
             }
@@ -694,8 +815,12 @@ impl SyncCoordinator {
 
                     for (node, clock) in remote_vc {
                         let lc = local_vc.get(node).unwrap_or(&0);
-                        if clock > lc { remote_newer = true; }
-                        if clock < lc { local_newer = true; }
+                        if clock > lc {
+                            remote_newer = true;
+                        }
+                        if clock < lc {
+                            local_newer = true;
+                        }
                     }
                     for (node, clock) in local_vc {
                         if !remote_vc.contains_key(node) && *clock > 0 {
@@ -741,25 +866,24 @@ impl SyncCoordinator {
         }
     }
 
-    pub fn register_table_sync_metadata(
-        &self,
-        table_name: &str,
-        rows: &[(String, HashMap<String, u64>, u64, String)],
-    ) {
+    pub fn register_table_sync_metadata(&self, table_name: &str, rows: &[RecordVersionEntry]) {
         let mut metadata = self.sync_metadata.write().unwrap();
         for (id, vc, version, checksum) in rows {
             let key = format!("{}:{}", table_name, id);
             let mut vector_clock = cluster_vector_clock_from_map(vc);
             vector_clock.increment(&self.node_id);
-            metadata.insert(key, SyncMetadata {
-                key: id.clone(),
-                vector_clock,
-                version: *version,
-                last_sync: now_ms(),
-                replicas: vec![self.node_id.clone()],
-                dirty: false,
-                checksum: checksum.clone(),
-            });
+            metadata.insert(
+                key,
+                SyncMetadata {
+                    key: id.clone(),
+                    vector_clock,
+                    version: *version,
+                    last_sync: now_ms(),
+                    replicas: vec![self.node_id.clone()],
+                    dirty: false,
+                    checksum: checksum.clone(),
+                },
+            );
         }
     }
 
@@ -783,10 +907,8 @@ impl SyncCoordinator {
 
         // Resolve any concurrent conflicts using vector clocks
         for conflict in &plan.conflicts {
-            let (winning, strategy) = resolve_cross_cluster_conflict(
-                &conflict.local_version,
-                &conflict.remote_version,
-            );
+            let (winning, strategy) =
+                resolve_cross_cluster_conflict(&conflict.local_version, &conflict.remote_version);
             debug!(
                 "Conflict resolved for key {}: {:?} (winner={})",
                 conflict.key, strategy, winning.modified_by
@@ -812,7 +934,6 @@ fn cluster_vector_clock_from_map(map: &HashMap<String, u64>) -> VectorClock {
 }
 
 fn build_merkle_tree_recursive(leaf_hashes: &[(String, String)]) -> MerkleNode {
-    use sha2::Digest;
     if leaf_hashes.len() == 1 {
         return MerkleNode {
             hash: leaf_hashes[0].1.clone(),
@@ -838,8 +959,16 @@ fn build_merkle_tree_recursive(leaf_hashes: &[(String, String)]) -> MerkleNode {
             if chunk.len() == 2 {
                 let combined = format!("{}{}", chunk[0].hash, chunk[1].hash);
                 let hash = format!("{:x}", sha2::Sha256::digest(combined.as_bytes()));
-                let start = chunk[0].key_range.as_ref().map(|k| k.0.clone()).unwrap_or_default();
-                let end = chunk[1].key_range.as_ref().map(|k| k.1.clone()).unwrap_or_default();
+                let start = chunk[0]
+                    .key_range
+                    .as_ref()
+                    .map(|k| k.0.clone())
+                    .unwrap_or_default();
+                let end = chunk[1]
+                    .key_range
+                    .as_ref()
+                    .map(|k| k.1.clone())
+                    .unwrap_or_default();
                 next.push(MerkleNode {
                     hash,
                     children: Some(vec![chunk[0].hash.clone(), chunk[1].hash.clone()]),
@@ -856,11 +985,17 @@ fn build_merkle_tree_recursive(leaf_hashes: &[(String, String)]) -> MerkleNode {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 fn rand_id() -> u32 {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     (nanos as u32) ^ ((nanos >> 32) as u32)
 }
 

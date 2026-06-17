@@ -515,7 +515,7 @@ pub enum ReferentialAction {
 }
 
 /// Data integrity constraint definition
-
+///
 /// Constraints enforce data quality and referential integrity rules.
 /// They prevent invalid data from being inserted and maintain consistency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -752,14 +752,24 @@ pub mod columnar;
 /// Flexible JSON document storage with dynamic indexing,
 /// schema validation, and path-based queries.
 pub mod document;
+
+/// Relational storage engine implementation
+///
+/// Traditional SQL table storage with ACID transactions,
+/// foreign key constraints, and relational algebra operations.
 pub mod relational;
+
+/// Vector storage engine implementation
+///
+/// High-performance similarity search with FAISS-style indexing,
+/// SIMD operations, and multiple distance metrics.
 pub mod vector;
-pub mod keyvalue;
 
 /// Key-Value storage engine implementation (CouchDB-compatible)
 ///
 /// Document-oriented key-value storage with _id, _rev support,
 /// bulk operations, views, and Mango query syntax.
+pub mod keyvalue;
 
 /*
 Storage Module Hierarchy:
@@ -785,7 +795,7 @@ storage/
 
 /// Storage engine type enumeration
 /// Used to identify which storage engine handles a particular table or operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StorageEngineType {
     /// Columnar storage engine - optimized for analytics and OLAP
     Columnar,
@@ -794,6 +804,7 @@ pub enum StorageEngineType {
     /// Document storage engine - optimized for JSON documents
     Document,
     /// Relational storage engine - optimized for SQL and transactions
+    #[default]
     Relational,
     /// Key-Value storage engine - optimized for high-speed access
     KeyValue,
@@ -810,6 +821,7 @@ impl StorageEngineType {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "columnar" => Some(StorageEngineType::Columnar),
@@ -819,11 +831,5 @@ impl StorageEngineType {
             "keyvalue" | "kv" => Some(StorageEngineType::KeyValue),
             _ => None,
         }
-    }
-}
-
-impl Default for StorageEngineType {
-    fn default() -> Self {
-        StorageEngineType::Relational
     }
 }

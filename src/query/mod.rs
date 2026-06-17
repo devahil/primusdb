@@ -336,8 +336,8 @@ impl UqlEngine {
                 crate::Error::DatabaseError("Storage engines lock poisoned".to_string())
             })?;
             engines
-                .iter()
-                .map(|(k, _)| {
+                .keys()
+                .map(|k| {
                     let name = match k {
                         StorageType::Columnar => "columnar",
                         StorageType::Vector => "vector",
@@ -409,7 +409,7 @@ pub struct UqlQuery {
     pub parameters: Option<HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub enum QueryLanguage {
     #[serde(rename = "sql")]
     Sql,
@@ -420,13 +420,8 @@ pub enum QueryLanguage {
     #[serde(rename = "uql")]
     Uql,
     #[serde(rename = "auto")]
+    #[default]
     Auto,
-}
-
-impl Default for QueryLanguage {
-    fn default() -> Self {
-        QueryLanguage::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

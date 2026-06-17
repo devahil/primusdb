@@ -215,11 +215,19 @@ pub enum Error {
     #[error("Authorization error: {0}")]
     AuthorizationError(String),
 
-    /// Key-Value engine operation failure
-    /// Includes document not found, revision conflicts, index errors, database not found
-    /// Recovery: Check document existence, revision token, or database name
-    #[error("KeyValue error: {0}")]
-    KeyValueError(String),
+    /// Feature or functionality is not supported — usually because a required
+    /// dependency crate is missing from `Cargo.toml`.
+    ///
+    /// Recovery: Add the required dependency as described in the error message
+    /// and rebuild the project.
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
+
+    /// Resource Governor enforcement action triggered.
+    /// Occurs when a workload exceeds configured policy limits.
+    /// Recovery: Review governance policies or increase limits.
+    #[error("Governor error: {0}")]
+    GovernorError(String),
 }
 
 /// Convenient type alias for Results containing PrimusDB errors

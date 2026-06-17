@@ -47,7 +47,6 @@ public class PrimusDBConnection implements java.sql.Connection {
 
     @Override
     public PreparedStatement prepareStatement(String sql) throws SQLException {
-        checkClosed();
         return new PrimusDBPreparedStatement(this, sql);
     }
 
@@ -160,8 +159,6 @@ public class PrimusDBConnection implements java.sql.Connection {
     @Override public Blob createBlob() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public NClob createNClob() throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public SQLXML createSQLXML() throws SQLException { throw new SQLFeatureNotSupportedException(); }
-    @Override public String getSchema() throws SQLException { return database; }
-    @Override public void setSchema(String schema) throws SQLException { }
     @Override public boolean isValid(int timeout) throws SQLException { return !closed; }
     @Override public void setClientInfo(String name, String value) throws SQLClientInfoException {}
     @Override public void setClientInfo(Properties properties) throws SQLClientInfoException {}
@@ -174,4 +171,6 @@ public class PrimusDBConnection implements java.sql.Connection {
     @Override public int getNetworkTimeout() throws SQLException { return 0; }
     @Override public <T> T unwrap(Class<T> iface) throws SQLException { throw new SQLFeatureNotSupportedException(); }
     @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return false; }
+    @Override public String getSchema() throws SQLException { return this.database; }
+    @Override public void setSchema(String schema) throws SQLException { /* no-op */ }
 }

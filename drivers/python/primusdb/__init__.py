@@ -69,7 +69,6 @@ class PrimusDBClient:
         """Close the connection to the server."""
         if self._session:
             await self._session.close()
-            self._session = None
             self._connected = False
 
     async def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -342,6 +341,117 @@ class PrimusDBClient:
     async def balance_domain(self, name: str) -> Dict:
         endpoint = f"federation/domains/{name}/balance"
         return await self._request("POST", endpoint, {})
+
+    # ==================== Resource Governor Methods ====================
+
+    async def governor_start_execution(
+        self, namespace, workload_type, user=None, role=None
+    ):
+        """Start a governor-tracked execution."""
+        payload = {
+            "namespace": namespace,
+            "workload_type": workload_type,
+        }
+        if user is not None:
+            payload["user"] = user
+        if role is not None:
+            payload["role"] = role
+        async with self._session.post(
+            f"http://{self.config.host}:{self.config.port}/governor/executions/start",
+            json=payload,
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor start failed"))
+            return data["data"]
+
+    async def governor_finish_execution(self, execution_id):
+        """Finish a governor-tracked execution."""
+        async with self._session.post(
+            f"http://{self.config.host}:{self.config.port}/governor/executions/{execution_id}/finish",
+            json={},
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor finish failed"))
+
+    async def governor_check_limit(self, execution_id, check_type, value):
+        """Check a resource limit for an execution."""
+        payload = {"check_type": check_type, "value": value}
+        async with self._session.post(
+            f"http://{self.config.host}:{self.config.port}/governor/executions/{execution_id}/check",
+            json=payload,
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor check failed"))
+            return data["data"]
+
+    async def governor_status(self):
+        """Get governor status."""
+        async with self._session.get(
+            f"http://{self.config.host}:{self.config.port}/governor/status",
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor status failed"))
+            return data["data"]
+
+    async def governor_metrics(self):
+        """Get governor metrics snapshot."""
+        async with self._session.get(
+            f"http://{self.config.host}:{self.config.port}/governor/metrics",
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor metrics failed"))
+            return data["data"]
+
+    async def governor_list_executions(self):
+        """List all active executions."""
+        async with self._session.get(
+            f"http://{self.config.host}:{self.config.port}/governor/executions",
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor list executions failed"))
+            return data["data"]
+
+    async def governor_list_violations(self):
+        """List all violations."""
+        async with self._session.get(
+            f"http://{self.config.host}:{self.config.port}/governor/violations",
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor list violations failed"))
+            return data["data"]
+
+    async def governor_policies(self):
+        """List all policies."""
+        async with self._session.get(
+            f"http://{self.config.host}:{self.config.port}/governor/policies",
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor policies failed"))
+            return data["data"]
+
+    async def governor_update_policy(self, name, limits, action, scope):
+        """Create or update a resource policy."""
+        payload = {
+            "name": name,
+            "limits": limits,
+            "action": action,
+            "scope": scope,
+        }
+        async with self._session.post(
+            f"http://{self.config.host}:{self.config.port}/governor/policies/update",
+            json=payload,
+        ) as resp:
+            data = await resp.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Governor update policy failed"))
 
     # ==================== DDL / ER Model Operations ====================
 

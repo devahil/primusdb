@@ -1,8 +1,8 @@
-use crate::Result;
 use crate::cluster::rpc::{
-    ReplicaReadRequest, ReplicaReadResponse, ReplicaWriteAck, ReplicaWriteRequest,
-    RpcClient, RpcMessage, ShardTransferChunk, ShardTransferRequest,
+    ReplicaReadRequest, ReplicaReadResponse, ReplicaWriteAck, ReplicaWriteRequest, RpcClient,
+    RpcMessage, ShardTransferChunk, ShardTransferRequest,
 };
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,17 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::info;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum ReplicationMode {
     Sync,
     Async,
+    #[default]
     Quorum,
-}
-
-impl Default for ReplicationMode {
-    fn default() -> Self {
-        Self::Quorum
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +61,7 @@ impl ReplicationEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn replicate_write(
         &self,
         operation_id: &str,

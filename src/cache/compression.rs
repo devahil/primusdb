@@ -37,20 +37,15 @@ use crc32fast::Hasher as Crc32;
 use lz4::{Decoder, EncoderBuilder};
 use std::io::{Read, Write};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionLevel {
     /// Fast compression with ~60% ratio
     Fast = 1,
     /// Balanced speed/ratio with ~70% ratio
+    #[default]
     Balanced = 6,
     /// High compression with ~80% ratio
     High = 12,
-}
-
-impl Default for CompressionLevel {
-    fn default() -> Self {
-        CompressionLevel::Balanced
-    }
 }
 
 pub struct CompressionEngine {

@@ -143,11 +143,7 @@ impl Row {
         format!("{:x}", sha2::Sha256::digest(serialized.as_bytes()))
     }
 
-    fn new_row(
-        id: u64,
-        data: serde_json::Map<String, serde_json::Value>,
-        node_id: &str,
-    ) -> Self {
+    fn new_row(id: u64, data: serde_json::Map<String, serde_json::Value>, node_id: &str) -> Self {
         let mut vc = HashMap::new();
         vc.insert(node_id.to_string(), 1);
         Row {
@@ -565,7 +561,7 @@ impl RelationalEngine {
         let mut foreign_keys = self.foreign_keys.write().unwrap();
         foreign_keys
             .entry(fk.from_table.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(fk);
         Ok(())
     }
@@ -791,6 +787,7 @@ impl RelationalEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_select(
         &self,
         table: &str,
@@ -899,7 +896,7 @@ impl RelationalEngine {
                 .rows
                 .iter()
                 .filter(|(_, row)| {
-                    conditions.map_or(true, |cond| {
+                    conditions.is_none_or(|cond| {
                         self.evaluate_condition(cond, &row.data).unwrap_or(false)
                     })
                 })
@@ -1095,7 +1092,9 @@ impl RelationalEngine {
                             }
                         }
                     }
-                    _ => {}
+                    _ => {
+                        tracing::warn!("evaluate_condition: unrecognized operator in condition");
+                    }
                 }
             }
         }
@@ -1615,10 +1614,8 @@ impl RelationalEngine {
 
             if let Ok(old_tree) = self.db.open_tree(&old_tree_name) {
                 let new_tree = self.db.open_tree(&new_tree_name)?;
-                for result in old_tree.iter() {
-                    if let Ok((key, value)) = result {
-                        new_tree.insert(key, value)?;
-                    }
+                for (key, value) in old_tree.iter().flatten() {
+                    new_tree.insert(key, value)?;
                 }
                 self.db.drop_tree(old_tree_name)?;
             }
@@ -1734,7 +1731,7 @@ impl RelationalEngine {
                 .rows
                 .iter()
                 .filter(|(_, row)| {
-                    conditions.map_or(true, |cond| {
+                    conditions.is_none_or(|cond| {
                         self.evaluate_condition(cond, &row.data).unwrap_or(false)
                     })
                 })
@@ -1851,6 +1848,7 @@ impl RelationalEngine {
         Ok(QueryResult::Records(deleted_records))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_select_grouped(
         &self,
         table: &str,
@@ -2110,7 +2108,9 @@ impl RelationalEngine {
                                                         fk.from_column.clone(),
                                                         serde_json::Value::Null,
                                                     );
-                                                    cr.increment_version(&self.config.cluster.node_id);
+                                                    cr.increment_version(
+                                                        &self.config.cluster.node_id,
+                                                    );
                                                     let row_copy = cr.clone();
                                                     self.persist_row(fk_table, &row_copy)?;
                                                 }
@@ -2154,7 +2154,9 @@ impl RelationalEngine {
                                                         fk.from_column.clone(),
                                                         default_val,
                                                     );
-                                                    cr.increment_version(&self.config.cluster.node_id);
+                                                    cr.increment_version(
+                                                        &self.config.cluster.node_id,
+                                                    );
                                                     let row_copy = cr.clone();
                                                     self.persist_row(fk_table, &row_copy)?;
                                                 }
@@ -2175,11 +2177,19 @@ impl RelationalEngine {
     // Cluster Reconciliation Methods (Hyperledger-style)
     // ─────────────────────────────────────────────
 
+    #[allow(clippy::type_complexity)]
     pub fn get_rows_for_reconciliation(
         &self,
         table: &str,
-    ) -> Result<Vec<(String, HashMap<String, u64>, u64, String, serde_json::Map<String, serde_json::Value>)>>
-    {
+    ) -> Result<
+        Vec<(
+            String,
+            HashMap<String, u64>,
+            u64,
+            String,
+            serde_json::Map<String, serde_json::Value>,
+        )>,
+    > {
         let tables = self.tables.read().unwrap();
         if let Some(table_data) = tables.get(table) {
             let mut rows = Vec::new();
@@ -2221,8 +2231,7 @@ impl RelationalEngine {
                 for chunk in hashes.chunks(2) {
                     if chunk.len() == 2 {
                         let combined = format!("{}{}", chunk[0], chunk[1]);
-                        new_hashes
-                            .push(format!("{:x}", sha2::Sha256::digest(combined.as_bytes())));
+                        new_hashes.push(format!("{:x}", sha2::Sha256::digest(combined.as_bytes())));
                     } else {
                         new_hashes.push(chunk[0].clone());
                     }
@@ -2235,6 +2244,7 @@ impl RelationalEngine {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn apply_reconciled_rows(
         &self,
         table: &str,
@@ -2479,33 +2489,31 @@ impl StorageEngine for RelationalEngine {
 
         let mut tables = self.tables.write().unwrap();
         let _is_new = !tables.contains_key(table);
-        let table_entry = tables
-            .entry(table.to_string())
-            .or_insert_with(|| {
-                let fields: Vec<Field> = data_obj
-                    .iter()
-                    .map(|(name, val)| Field {
-                        name: name.clone(),
-                        field_type: json_to_field_type(val),
-                        nullable: true,
-                        default_value: None,
-                        constraints: vec![],
-                    })
-                    .collect();
-                RelationalTable {
-                    name: table.to_string(),
-                    schema: Schema {
-                        fields,
-                        indexes: vec![],
-                        constraints: vec![],
-                    },
-                    rows: HashMap::new(),
-                    next_id: 1,
-                    indexes: HashMap::new(),
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                }
-            });
+        let table_entry = tables.entry(table.to_string()).or_insert_with(|| {
+            let fields: Vec<Field> = data_obj
+                .iter()
+                .map(|(name, val)| Field {
+                    name: name.clone(),
+                    field_type: json_to_field_type(val),
+                    nullable: true,
+                    default_value: None,
+                    constraints: vec![],
+                })
+                .collect();
+            RelationalTable {
+                name: table.to_string(),
+                schema: Schema {
+                    fields,
+                    indexes: vec![],
+                    constraints: vec![],
+                },
+                rows: HashMap::new(),
+                next_id: 1,
+                indexes: HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        });
 
         let id = table_entry.next_id;
         table_entry.next_id += 1;
@@ -2580,7 +2588,7 @@ impl StorageEngine for RelationalEngine {
                 .rows
                 .iter()
                 .filter(|(_, row)| {
-                    conditions.map_or(true, |cond| {
+                    conditions.is_none_or(|cond| {
                         self.evaluate_condition(cond, &row.data).unwrap_or(false)
                     })
                 })
@@ -2772,7 +2780,10 @@ impl StorageEngine for RelationalEngine {
                 info!("Truncated relational table: {}", tbl);
                 Ok(())
             } else {
-                Err(crate::Error::DatabaseError(format!("Table '{}' not found", tbl)))
+                Err(crate::Error::DatabaseError(format!(
+                    "Table '{}' not found",
+                    tbl
+                )))
             }
         }
 
@@ -2788,7 +2799,7 @@ impl StorageEngine for RelationalEngine {
                 tables_to_truncate
             };
             for child in &child_tables {
-                do_truncate(self, &child).await?;
+                do_truncate(self, child).await?;
             }
         }
         do_truncate(self, table).await
@@ -2825,7 +2836,7 @@ impl StorageEngine for RelationalEngine {
 fn json_to_field_type(value: &serde_json::Value) -> FieldType {
     match value {
         serde_json::Value::Number(n) => {
-            if n.is_f64() || n.as_f64().map_or(false, |f| f.fract() != 0.0) {
+            if n.is_f64() || n.as_f64().is_some_and(|f| f.fract() != 0.0) {
                 FieldType::Float
             } else {
                 FieldType::Integer

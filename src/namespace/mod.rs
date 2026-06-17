@@ -86,17 +86,12 @@ impl Default for NamespaceConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum InheritanceMode {
     DenyOverride,
     ExplicitOnly,
+    #[default]
     AllowOverride,
-}
-
-impl Default for InheritanceMode {
-    fn default() -> Self {
-        Self::AllowOverride
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,11 +308,11 @@ impl NamespaceController {
         let mut iter = self.db.open_tree("namespaces")?.iter();
         while let Some(Ok((key, value))) = iter.next() {
             if let Ok(key_str) = String::from_utf8(key.to_vec()) {
-                if key_str.starts_with("namespace:") {
+                if let Some(stripped) = key_str.strip_prefix("namespace:") {
                     if let Ok(ns) = bincode::deserialize::<Namespace>(&value) {
                         let path = ns.path.clone();
                         cache.insert(ns.id.clone(), ns);
-                        path_index.insert(path, key_str[10..].to_string());
+                        path_index.insert(path, stripped.to_string());
                     }
                 }
             }
@@ -458,9 +453,9 @@ impl NamespaceController {
     }
 
     pub fn update(&self, path: &str, updates: NamespaceUpdate) -> crate::Result<Namespace> {
-        let ns = self
-            .get_by_path(path)?
-            .ok_or_else(|| crate::Error::ValidationError(format!("Namespace '{}' not found", path)))?;
+        let ns = self.get_by_path(path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", path))
+        })?;
 
         let updated = Namespace {
             description: updates.description.unwrap_or(ns.description),
@@ -497,9 +492,9 @@ impl NamespaceController {
             )));
         }
 
-        let ns = self
-            .get_by_path(path)?
-            .ok_or_else(|| crate::Error::ValidationError(format!("Namespace '{}' not found", path)))?;
+        let ns = self.get_by_path(path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", path))
+        })?;
 
         let children = self.list_children(path)?;
         if !children.is_empty() {
@@ -534,7 +529,9 @@ impl NamespaceController {
         let prefix = format!("{}.", parent_path);
         let mut children: Vec<Namespace> = cache
             .values()
-            .filter(|ns| ns.path.starts_with(&prefix) && ns.parent_path.as_deref() == Some(parent_path))
+            .filter(|ns| {
+                ns.path.starts_with(&prefix) && ns.parent_path.as_deref() == Some(parent_path)
+            })
             .cloned()
             .collect();
         children.sort_by(|a, b| a.path.cmp(&b.path));
@@ -561,11 +558,9 @@ impl NamespaceController {
         storage_type: StorageType,
         resource_name: &str,
     ) -> crate::Result<NamespaceResource> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let resources = self.list_resources(&ns.id)?;
         if resources.len() as u32 >= ns.policies.max_resources {
@@ -604,11 +599,9 @@ impl NamespaceController {
         storage_type: StorageType,
         resource_name: &str,
     ) -> crate::Result<()> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let tree = self.db.open_tree("resources")?;
         let key = format!("resource:{}:{:?}:{}", ns.id, storage_type, resource_name);
@@ -661,11 +654,9 @@ impl NamespaceController {
         granted_by: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> crate::Result<NamespaceUserBinding> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let binding = NamespaceUserBinding {
             namespace_id: ns.id.clone(),
@@ -684,11 +675,9 @@ impl NamespaceController {
     }
 
     pub fn remove_user_binding(&self, namespace_path: &str, user_id: &str) -> crate::Result<()> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let tree = self.db.open_tree("user_bindings")?;
         let key = format!("user_binding:{}:{}", ns.id, user_id);
@@ -696,7 +685,10 @@ impl NamespaceController {
         Ok(())
     }
 
-    pub fn list_user_bindings(&self, namespace_id: &str) -> crate::Result<Vec<NamespaceUserBinding>> {
+    pub fn list_user_bindings(
+        &self,
+        namespace_id: &str,
+    ) -> crate::Result<Vec<NamespaceUserBinding>> {
         let tree = self.db.open_tree("user_bindings")?;
         let prefix = format!("user_binding:{}:", namespace_id);
         let mut bindings = Vec::new();
@@ -717,11 +709,9 @@ impl NamespaceController {
         permissions: Vec<NamespacePermission>,
         inheritable: bool,
     ) -> crate::Result<NamespaceRole> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let role = NamespaceRole {
             id: uuid::Uuid::new_v4().to_string(),
@@ -740,11 +730,9 @@ impl NamespaceController {
     }
 
     pub fn remove_role(&self, namespace_path: &str, role_id: &str) -> crate::Result<()> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let tree = self.db.open_tree("roles")?;
         let key = format!("role:{}:{}", ns.id, role_id);
@@ -766,11 +754,9 @@ impl NamespaceController {
     }
 
     pub fn effective_policy(&self, namespace_path: &str) -> crate::Result<NamespacePolicies> {
-        let ns = self
-            .get_by_path(namespace_path)?
-            .ok_or_else(|| {
-                crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
-            })?;
+        let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
+            crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
+        })?;
 
         let mut merged = ns.policies.clone();
 
@@ -784,10 +770,12 @@ impl NamespaceController {
                             merged.allowed_storage_types.clear();
                         }
                         merged.max_depth = merged.max_depth.min(parent_policy.max_depth);
-                        merged.max_resources = merged.max_resources.min(parent_policy.max_resources);
+                        merged.max_resources =
+                            merged.max_resources.min(parent_policy.max_resources);
                         merged.max_users = merged.max_users.min(parent_policy.max_users);
-                        merged.max_storage_bytes =
-                            merged.max_storage_bytes.min(parent_policy.max_storage_bytes);
+                        merged.max_storage_bytes = merged
+                            .max_storage_bytes
+                            .min(parent_policy.max_storage_bytes);
                     }
                     InheritanceMode::ExplicitOnly => {}
                     InheritanceMode::AllowOverride => {

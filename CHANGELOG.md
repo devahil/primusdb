@@ -5,110 +5,7 @@ All notable changes to PrimusDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.1-alpha] - Unreleased
-
-### Added
-- **Real AI/ML Engine Replacement**: Ground-up rewrite of `src/ai.rs` with real ML algorithms replacing all simulated stubs:
-  - **LinearRegression**: Gradient descent training with configurable learning rate/epochs, R² scoring
-  - **LogisticRegression**: Sigmoid activation, gradient descent with binary cross-entropy
-  - **K-Means++**: K-means++ initialization, iterative assignment, silhouette score evaluation
-  - **TimeSeries**: Linear trend + seasonal component decomposition with configurable season period
-  - **AnomalyDetection**: Z-score based detection with configurable threshold (default 2.5σ)
-  - **Forecast**: Trend + seasonality projection with progressive confidence intervals
-  - **PatternAnalysis**: Model-weighted trend direction analysis from trained regressor
-  - All previous AI/ML CLI commands continue to work unchanged
-- **Blockchain Audit Ledger**: New `src/blockchain.rs` module (~800 lines) with:
-  - Immutable append-only ledger backed by sled persistence
-  - SHA-256 Merkle tree with full hash chain validation
-  - Indexed by namespace and transaction ID for fast lookup
-  - Tamper detection with detailed integrity reports
-  - 8 unit tests (all passing)
-- **Ed25519 Transaction Signatures**: Transaction struct extended with:
-  - `sign()` method using `ed25519-dalek` for real cryptographic signing
-  - `verify_signature()` method for signature validation
-  - Canonical JSON payload (excludes `signature` field during signing)
-  - Full integration into blockchain audit ledger
-- **Secure Communication Protocol Reactivation**: `src/protocol.rs` module fully reactivated and compiling cleanly:
-  - AES-256-GCM encryption via `ring` crate
-  - Ed25519 digital signatures for message authentication
-  - HMAC-SHA256 for integrity verification
-  - X.509 certificate-based trust establishment with revocation
-  - Trusted node management with CRL-style revocation
-  - Distributed journaling with entry buffering and flush
-  - Error recovery with retry and backoff
-  - Module was previously commented out due to compilation errors; now fully operational
-- **Java JDBC Driver Enhancements** (`drivers/java/src/main/java/com/primusdb/jdbc/`):
-  - `PreparedStatement` implementation with full `setInt`, `setString`, `setDouble`, `setBoolean`, `setLong`, `setFloat`, `setNull` support
-  - `executeBatch()` and `addBatch()` for batch operations
-  - `getMetaData()` returning real `ResultSetMetaData`
-  - `executeUpdate()` returning actual affected row counts
-  - SQL parameter placeholder (`?`) parsing and positional binding
-  - 213 unit tests (all passing)
-- **NamespacedStorageEngine Tests**: 4 new integration tests covering:
-  - Namespace-isolated CRUD across columnar/vector/document/relational engines
-  - DDL operations (create/drop/truncate table) within namespaces
-  - Sequence operations under namespace isolation
-  - Not-found error behavior for non-existent namespaces
-  - Backward-compatible behavior when namespace isolation is disabled
-- **Structured CLI Backup/Restore Format**: Enhanced `backup`/`restore` commands with:
-  - Magic header `PRIMUSDBBACKUP` for format identification
-  - Structured manifest with metadata (version, timestamp, engine info)
-  - Data segments with typed payloads for each storage engine
-  - Schema/index definitions preserved in backup
-  - Embedded WAL entries for transaction consistency
-  - Blake3 checksum for integrity verification per segment
-
-### Fixed
-- **AI module dead code**: All previously mocked/stub AI functions replaced with real implementations — 0 stubs remain
-- **Protocol module compilation**: Fixed all compile errors in `protocol.rs` — module now builds cleanly with `cargo build`
-- **Java driver connection URL parsing**: Properly handles `jdbc:primusdb://host:port/db` format with SSL parameters
-
-### Changed
-- `src/ai.rs` expanded from ~800 lines of stubs/simulations to ~1200 lines of real ML implementations
-- `src/ai.rs` removed all `unimplemented!()`, `todo!()`, and panic stubs
-- `Transaction` struct in `src/types.rs` now includes `signature: Option<Vec<u8>>` and `public_key: Option<Vec<u8>>` fields
-- Crate version bumped to `1.3.1-alpha`
-
-### Security
-- **Blockchain Audit Ledger**: SHA-256 Merkle chain enables tamper-evident transaction history with full audit trail
-- **Ed25519 Signatures**: All transactions can be cryptographically signed and verified, preventing forgery
-- **Protocol Layer**: Inter-node communication now uses AES-256-GCM encryption + Ed25519 signatures + HMAC integrity
-- **X.509 Trust**: Certificate-based node authentication with CRL revocation for cluster security
-### Added
-- **Professional-Grade Vector Engine Rewrite**: Complete ground-up rewrite of `src/storage/vector.rs` with full-featured ANN search, payload filtering, scoring fusion, RAG pipeline, compression, observability, and predictive analytics. 70 unit tests (all passing), 0 new warnings.
-  - **HNSW Index**: Real Hierarchical Navigable Small World graph with multi-layer insert/search, incremental updates, configurable M/ef_construction/M_max/max_level. Sub-millisecond ANN search with ≥95% recall.
-  - **IVF Index**: K-means++ clustering with per-centroid inverted lists, configurable nlist/nprobe, brute-force fallback when nprobe ≥ nlist.
-  - **Payload Filter Engine**: Composable condition system — Eq, Ne, Gt, Gte, Lt, Lte, In, Nin, Exists, Regex, And, Or, Not. Parsed from Query::conditions, integrated into select().
-  - **Scoring Engine**: Raw, Normalized, RRF (Reciprocal Rank Fusion) with configurable k, Weighted fusion with per-list weights.
-  - **Scalar Quantization (SQ8)**: f32 → u8 linear mapping, 4× memory reduction with dequantization round-trip.
-  - **Binary Quantization (BQ)**: f32 → 1-bit threshold encoding, 32× reduction, Hamming distance for similarity.
-  - **CollectionConfig**: Persistent per-table config with dimensions, metric, index method, quantization, scoring mode, HNSW/IVF parameters.
-  - **VectorMetrics**: Per-query/cumulative observability — query count, vector count, deleted count, cache hit/miss, 10-bucket latency histogram (1ms–1s), index build time.
-  - **RAG Subsystem**: chunk_document() with Fixed (size/overlap), Recursive (paragraph→sentence→word), and SlidingWindow strategies; rag_retrieve_similar_chunks() for end-to-end RAG retrieval.
-  - **Predictive Analytics**: kmeans_clustering() with configurable K/iterations/tolerance; detect_anomalies() via MAD (Median Absolute Deviation); analytics_vector_profile() returning dimension stats, sparsity, distribution, outlier fraction.
-  - **All existing StorageEngine APIs preserved**: insert/select/update/delete/analyze/create_table/drop_table/truncate_table/table_info — fully backward compatible.
-  - **Engine-specific extensions** via `as_any()`: build_hnsw_index(), build_ivf_index(), get_metrics(), vector_search().
-
-### Fixed
-- **HNSW search algorithm**: Fixed incorrect `candidates.pop()` (farthest-first) → `candidates.remove(0)` (closest-first) in greedy search loop, fixing recall for multi-layer searches.
-- **load_all_vectors ID mismatch**: `load_all_vectors()` now converts sled u64 keys to numeric strings matching the `records_map` insertion keys in `select()`, fixing HNSW/IVF index query result lookups.
-- **IVF test hanging**: Resolved infinite loop in recursive chunking by capping chunk size at input length.
-- **Dead code suppression**: Added `#[allow(dead_code)]` to unused fields/methods in test helpers and internal structs — 0 warnings.
-
-### Changed
-- `src/storage/vector.rs` expanded from ~500 lines to ~2942 lines (single file, matching project convention).
-- `VectorEngine` internals fully rebuilt: ANN indexes behind `Arc<Mutex<HashMap<String, IndexType>>>` for thread-safe lazy initialization.
-- HNSW `random_level()` uses deterministic hash-based RNG (no `rand` crate dependency).
-
-## [1.3.0.1-alpha] - 2026-06-01
-
-### Security
-- **Node.js Driver Dependencies**: Fixed 41 security vulnerabilities in transitive dependencies:
-  - Axios pinned to `1.16.1` (server-side request forgery, CVE-2024-39338)
-  - Overrides added for `handlebars`, `minimatch`, `brace-expansion`, `picomatch`, `follow-redirects` — all forced to latest patched versions
-  - `npm audit` reports 0 vulnerabilities (was 41)
-
-## [1.3.0-alpha] - 2026-05-27
+## [1.3.1-alpha] - 2026-06-17
 
 ### Added
 - **Production-Grade Distributed Cluster System**: Complete infrastructure for multi-node operation:
@@ -136,11 +33,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **Geo-Distributed Sharding**: `ShardManager` now supports region-aware shard placement. `ShardInfo` extended with `primary_region` and `cross_region_replicas` fields. New `create_geo_shard()` method places primary in one region and replicas across others. `add_node_with_region()`, `nodes_in_region()`, `regions()`, `has_cross_region_redundancy()` methods added.
     - **FederationConfig in PrimusDBConfig**: `PrimusDBConfig` includes optional `federation: Option<FederationConfig>` field. The `PrimusDB::new()` constructor auto-initializes `FederationManager` and `DataDomainManager` when federation is configured. New `start_federation()` async method on `PrimusDB` for background announce/heartbeat loops.
 
+### Added
+- **Resource Governor Engine**: Complete policy-based resource enforcement with `GovernorEngine` (`src/governor/`):
+  - Per-instance counters (CPU, memory, query complexity, pipeline, FFI, AI/ML, vector, graph, migration, backup, executions)
+  - Policy definitions with `EnforcementAction` (Block, Warn, Log, Throttle, Queue) and workload-type scoping
+  - Execution tracking via `ExecutionContext` with namespace, workload type, and wall-clock timing
+  - Violation recording with timestamps, policy names, and enforced actions
+  - `metrics_snapshot()` aggregates real-time data from all counter groups
+  - 15+ `check_*` methods on `GovernorEngine`/`ExecutionHandle` for per-resource limit evaluation
+- **4 POST REST endpoints** for Resource Governor:
+  - `POST /api/v1/governor/executions/start` — start a tracked execution
+  - `POST /api/v1/governor/executions/:id/finish` — finish an execution
+  - `POST /api/v1/governor/executions/:id/check` — check a resource limit
+  - `POST /api/v1/governor/policies/update` — create or update a policy
+- **Governor API methods in all 5 drivers**:
+  - **Python** (`drivers/python/primusdb/__init__.py`): 10 async methods (`governor_start_execution`, `governor_finish_execution`, `governor_check_limit`, `governor_status`, `governor_metrics`, `governor_list_executions`, `governor_list_violations`, `governor_policies`, `governor_update_policy`)
+  - **Node.js/TS** (`drivers/node/src/index.ts`): 7 interfaces + 10 methods with full TypeScript types
+  - **Java** (`drivers/java/.../jdbc/GovernorGateway.java`): new class with 10 methods matching REST API
+  - **Ruby** (`drivers/ruby/lib/primusdb.rb`): 10 methods on `Client`
+  - **Rust** (`drivers/rust/src/lib.rs`): `governor_engine` field on `PrimusDB` + 6 convenience methods on `NativeDriver`
+- **Governor documentation** (3 new pages + updated references):
+  - `docs/features/governor.md` — feature overview, CLI commands, REST table, metrics reference
+  - `docs/operations/resource-governor.md` — day-to-day operations, POST endpoints with curl examples
+  - `docs/tui/governor-panel.md` — TUI governor panel layout and usage
+  - `docs/reference/api.md` — complete governor REST API section (9 endpoints documented)
+  - `docs/usage/drivers.md` — governor driver API table with code examples
+- **8 new governor unit tests**: execution lifecycle, policy enforcement, metrics aggregation, limit checking, violation recording
+- CLI flags for all governor limits (`--cpu-quota`, `--memory-limit`, etc.) in `primusdb governor set`
+
 ### Changed
 - `ClusterManager::new()` is now synchronous; async initialization moved to `start()`
 - `SyncCoordinator::new()` accepts `clients` (Arc<RwLock<HashMap>>) and `db` (Option<sled::Db>) for real network operations
 - `ClusterConfig` expanded with replication, Raft, and gossip configuration fields
-- Bumped crate version to `1.3.0-alpha`
+- Bumped crate version to `1.3.1-alpha`
+- Governor counters moved from static globals to per-instance `Inner` fields (thread-safe, testable)
+- `metrics_snapshot()` now aggregates real counter data instead of returning zeroed structs
+- Execution-insert ordering in `engine.rs` fixed to insert at end of list
+- TUI governor panel version string synced to `1.3.1-alpha`
+- All driver header versions synced to `1.3.1-alpha`
 
 ### Fixed
 - Transaction endpoints no longer return hardcoded responses (real Raft-backed operations)
@@ -148,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - KV/CouchDB endpoints wired through actual storage engine calls
 - Removed all simulated node discovery (hardcoded IPs, fake votes)
 - Removed dead code in protocol module (unreachable trust code, empty recovery stubs)
+- **8 failing tests**: nav cycling, sidebar rendering, metrics/status global state pollution between tests, policy inheritance chain resolution
+- **3 clippy warnings**: unnecessary clones, needless `&` refs, unused variables in governor module
+- **`primusdb server status`**: now uses `lsof -ti tcp:8080` + `/health` HTTP probe to detect actual running process; reports "Running" with real PID and version or "Not running" instead of hardcoded `Status → Running`
+- **Docs coherence**: governor.md endpoint counts (5→9), file size stats, stale "global counters statics" mention; version references synced across all docs to `1.3.1-alpha`
 
 ### Removed
 - Removed `discover_nodes()` simulation stub

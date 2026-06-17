@@ -51,6 +51,12 @@ struct SearchIndex {
     bloom_filter: Option<BloomFilter>,
 }
 
+impl Default for CompressedSearch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompressedSearch {
     /// Create a new compressed search engine
     pub fn new() -> Self {
@@ -140,18 +146,29 @@ impl CompressedSearch {
         regex_pattern: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let _regex = Regex::new(regex_pattern)?;
+        let regex = Regex::new(regex_pattern)?;
 
-        let results = Vec::new();
+        let mut results = Vec::new();
         let indexes = self.indexes.read().unwrap();
 
-        for (_key, _index) in indexes.iter() {
-            // This is simplified - in practice, you'd need to extract text from compressed data
-            // For now, we'll just return empty results
-            // A full implementation would decompress chunks and search them
-
+        for (key, index) in indexes.iter() {
             if results.len() >= limit {
                 break;
+            }
+
+            // Search through terms for regex match
+            for (pos, term) in index.terms.keys().enumerate() {
+                if regex.is_match(term) {
+                    results.push(SearchResult {
+                        key: key.clone(),
+                        position: pos,
+                        matched_text: term.clone(),
+                        score: 1.0,
+                    });
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
             }
         }
 
@@ -178,13 +195,28 @@ impl CompressedSearch {
     }
 
     /// Extract searchable text from compressed data
-    /// This is a placeholder - real implementation would use LZ4 streaming
-    fn extract_searchable_text(&self, _compressed_data: &[u8]) -> Result<String, SearchError> {
-        // Placeholder: in real implementation, this would:
-        // 1. Create LZ4 decoder stream
-        // 2. Extract text chunks
-        // 3. Return concatenated searchable text
-        Ok(String::new())
+    fn extract_searchable_text(&self, compressed_data: &[u8]) -> Result<String, SearchError> {
+        if compressed_data.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Strip trailing CRC32 checksum (last 4 bytes) if present
+        let payload = if compressed_data.len() > 4 {
+            &compressed_data[..compressed_data.len() - 4]
+        } else {
+            compressed_data
+        };
+
+        // Decompress using LZ4 frame decoder
+        use std::io::Read;
+        let mut decoder = lz4::Decoder::new(payload)
+            .map_err(|e| SearchError::DecompressionError(e.to_string()))?;
+        let mut output = String::new();
+        decoder
+            .read_to_string(&mut output)
+            .map_err(|e| SearchError::DecompressionError(e.to_string()))?;
+
+        Ok(output)
     }
 
     /// Estimate memory usage of indexes
@@ -231,6 +263,8 @@ pub enum SearchError {
     Io(#[from] std::io::Error),
     #[error("Invalid data format")]
     InvalidData,
+    #[error("Decompression error: {0}")]
+    DecompressionError(String),
 }
 
 #[cfg(test)]

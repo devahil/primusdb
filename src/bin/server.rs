@@ -300,64 +300,41 @@ use primusdb::{
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(clap::Args, Debug, Clone)]
-pub struct NetworkArgs {
-    #[arg(short, long, default_value = "127.0.0.1")]
+#[derive(Parser)]
+#[command(name = "primusdb-server")]
+#[command(about = "PrimusDB Hybrid Database Server")]
+#[command(version = "1.3.1-alpha")]
+pub struct ServerCli {
+    #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
 
     #[arg(short, long, default_value = "8080")]
     pub port: u16,
-}
 
-#[derive(clap::Args, Debug, Clone)]
-pub struct StorageArgs {
     #[arg(short, long)]
     pub data_dir: Option<String>,
-}
 
-#[derive(clap::Args, Debug, Clone)]
-pub struct ClusterArgs {
     #[arg(short, long)]
     pub cluster: bool,
+
+    #[arg(long, default_value = "config.toml")]
+    pub config: String,
+
+    #[arg(short, long, default_value = "info")]
+    pub log_level: String,
+
+    // Federation flags
+    #[arg(long, default_value = "default")]
+    pub federation_id: String,
 
     #[arg(long)]
     pub cluster_id: Option<String>,
 
     #[arg(long)]
     pub region: Option<String>,
-}
-
-#[derive(clap::Args, Debug, Clone)]
-pub struct FederationArgs {
-    #[arg(long, default_value = "default")]
-    pub federation_id: String,
 
     #[arg(long)]
     pub federation_discovery: Vec<String>,
-}
-
-#[derive(Parser)]
-#[command(name = "primusdb-server")]
-#[command(about = "PrimusDB Hybrid Database Server")]
-#[command(version = "1.3.0-alpha")]
-pub struct ServerCli {
-    #[command(flatten)]
-    pub network: NetworkArgs,
-
-    #[command(flatten)]
-    pub storage: StorageArgs,
-
-    #[command(flatten)]
-    pub cluster: ClusterArgs,
-
-    #[command(flatten)]
-    pub federation: Option<FederationArgs>,
-
-    #[arg(short, long, default_value = "config.toml")]
-    pub config: String,
-
-    #[arg(short, long, default_value = "info")]
-    pub log_level: String,
 }
 
 fn print_banner() {
@@ -370,7 +347,7 @@ fn print_banner() {
 ║  |  __/| |  | | | | | | | (_| || |_| | |_) |                  ║
 ║  |_|   |_|  |_|_| |_| |_|\__,_||____/|____/                   ║
 ║                                                               ║
-║  Hybrid Database Engine  v1.3.0-alpha                         ║
+║  Hybrid Database Engine  v1.3.1-alpha                         ║
 ║  Multi-Model · Distributed · AI-Native                        ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝"#;
@@ -384,12 +361,7 @@ fn print_config(key: &str, value: &str, status: &str) {
         "warn" => "⚠".yellow().to_string(),
         _ => "●".white().to_string(),
     };
-    println!(
-        "  {}  {} {}",
-        dot,
-        key.bold().white(),
-        value.cyan()
-    );
+    println!("  {}  {} {}", dot, key.bold().white(), value.cyan());
 }
 
 fn spinner(msg: &str) -> ProgressBar {
@@ -407,6 +379,13 @@ fn spinner(msg: &str) -> ProgressBar {
 
 #[tokio::main]
 async fn main() -> primusdb::Result<()> {
+    eprintln!();
+    eprintln!(
+        "⚠ WARNING: `primusdb-server` is deprecated and will be removed in a future release."
+    );
+    eprintln!("  Use `primusdb server start` instead.");
+    eprintln!();
+
     // Suppress tracing for clean startup; only show Rich-like output
     // tracing_subscriber::fmt::init();
 
@@ -445,23 +424,33 @@ async fn main() -> primusdb::Result<()> {
     let auth_service = Arc::new(AuthService::new(auth_config)?);
 
     let api_server = primusdb::api::APIServer::new(primusdb.clone(), auth_service, None);
-    let bind_addr = format!("{}:{}", _args.network.host, _args.network.port);
+    let bind_addr = format!("{}:{}", _args.host, _args.port);
 
     // ── CONFIG SUMMARY ───────────────────────────────────
     println!("\n  {}", "Configuration".bold().underline().white());
     println!();
-    print_config("Engine", "PrimusDB v1.3.0-alpha", "ok");
+    print_config("Engine", "PrimusDB v1.3.1-alpha", "ok");
     print_config(
         "Storage",
-        &_args.storage.data_dir.clone().unwrap_or_else(|| "/tmp/primusdb_data".into()),
+        &_args
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| "/tmp/primusdb_data".into()),
         "info",
     );
-    print_config("Network", &format!("{}:{}", _args.network.host, _args.network.port), "info");
-    print_config("Cluster Mode", if _args.cluster.cluster { "Enabled" } else { "Standalone" }, if _args.cluster.cluster { "ok" } else { "warn" });
-    let fed_id = _args.federation.as_ref().map(|f| f.federation_id.as_str()).unwrap_or("default");
+    print_config("Network", &format!("{}:{}", _args.host, _args.port), "info");
+    print_config(
+        "Cluster Mode",
+        if _args.cluster {
+            "Enabled"
+        } else {
+            "Standalone"
+        },
+        if _args.cluster { "ok" } else { "warn" },
+    );
     if fed_enabled {
-        print_config("Federation", fed_id, "ok");
-        if let Some(ref region) = _args.cluster.region {
+        print_config("Federation", &_args.federation_id, "ok");
+        if let Some(ref region) = _args.region {
             print_config("Region", region, "info");
         }
     }
@@ -488,20 +477,18 @@ async fn main() -> primusdb::Result<()> {
 }
 
 fn create_config(args: &ServerCli) -> PrimusDBConfig {
-    let federation = if args.cluster.cluster {
-        args.federation.as_ref().filter(|f| !f.federation_discovery.is_empty()).map(|f| {
-            primusdb::cluster::FederationConfig {
-                federation_id: f.federation_id.clone(),
-                cluster_id: args.cluster.cluster_id.clone().unwrap_or_else(|| args.network.host.clone()),
-                region: args.cluster.region.clone(),
-                announce_interval_ms: 10_000,
-                heartbeat_interval_ms: 5_000,
-                heartbeat_timeout_ms: 3_000,
-                suspect_timeout_ms: 30_000,
-                max_clusters: 64,
-                enable_cross_cluster_replication: true,
-                enable_federated_namespaces: true,
-            }
+    let federation = if args.cluster && !args.federation_discovery.is_empty() {
+        Some(primusdb::cluster::FederationConfig {
+            federation_id: args.federation_id.clone(),
+            cluster_id: args.cluster_id.clone().unwrap_or_else(|| args.host.clone()),
+            region: args.region.clone(),
+            announce_interval_ms: 10_000,
+            heartbeat_interval_ms: 5_000,
+            heartbeat_timeout_ms: 3_000,
+            suspect_timeout_ms: 30_000,
+            max_clusters: 64,
+            enable_cross_cluster_replication: true,
+            enable_federated_namespaces: true,
         })
     } else {
         None
@@ -510,7 +497,6 @@ fn create_config(args: &ServerCli) -> PrimusDBConfig {
     PrimusDBConfig {
         storage: StorageConfig {
             data_dir: args
-                .storage
                 .data_dir
                 .clone()
                 .unwrap_or_else(|| "/tmp/primusdb_data".to_string()),
@@ -519,8 +505,8 @@ fn create_config(args: &ServerCli) -> PrimusDBConfig {
             cache_size: 512 * 1024 * 1024, // 512MB
         },
         network: NetworkConfig {
-            bind_address: args.network.host.clone(),
-            port: args.network.port,
+            bind_address: args.host.clone(),
+            port: args.port,
             max_connections: 1000,
         },
         security: SecurityConfig {
@@ -529,7 +515,7 @@ fn create_config(args: &ServerCli) -> PrimusDBConfig {
             auth_required: false,
         },
         cluster: ClusterConfig {
-            enabled: args.cluster.cluster,
+            enabled: args.cluster,
             node_id: format!(
                 "node_{}",
                 chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)

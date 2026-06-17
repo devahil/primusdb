@@ -1,1258 +1,578 @@
-use crate::storage::columnar::ColumnarEngine;
-use crate::storage::document::DocumentEngine;
-use crate::storage::keyvalue::KeyValueEngine;
-use crate::storage::relational::RelationalEngine;
-use crate::storage::vector::VectorEngine;
-use crate::storage::Schema;
-use crate::storage::StorageEngine;
-use crate::transaction::Transaction;
+pub mod cmd;
+pub mod command;
+pub mod discovery;
+pub mod output;
+pub mod tui;
 
-use crate::PrimusDBConfig;
-use chrono;
-use clap::{Parser, Subcommand};
-use std::fs;
+#[allow(dead_code)]
+mod legacy;
+
 use std::path::PathBuf;
-use std::sync::Arc;
 
-#[derive(Parser)]
-#[command(name = "primusdb-cli")]
-#[command(about = "PrimusDB Command Line Interface")]
-pub struct Cli {
-    /// Server URL for client mode
-    #[arg(long, default_value = "http://localhost:8080")]
-    pub server: String,
+use clap::CommandFactory;
+use clap::Parser;
+pub use command::{Cli, Commands};
+pub use output::{ExitCode, OutputData, OutputFormat};
 
-    /// Run in client mode (connect to server) or embedded mode
-    #[arg(long, default_value = "embedded")]
-    pub mode: String,
+use crate::Result;
+use command::{BenchSubcommands, GlobalArgs, GovernorSubcommands, MigrateSubcommands};
+use output::format_output;
 
-    #[command(subcommand)]
-    pub command: Commands,
+/// Main entry point for the PrimusDB CLI.
+///
+/// Parses command-line arguments and dispatches to the appropriate handler.
+pub async fn run() -> Result<()> {
+    run_cli(Cli::parse()).await
 }
 
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Start the PrimusDB server
-    Server {
-        /// Configuration file path
-        #[arg(short, long, value_name = "FILE")]
-        config: Option<PathBuf>,
-
-        /// Bind address
-        #[arg(short, long, default_value = "127.0.0.1:8080")]
-        bind: String,
-    },
-
-    /// Initialize a new PrimusDB instance
-    Init {
-        /// Data directory path
-        #[arg(short, long, default_value = "./data")]
-        data_dir: PathBuf,
-    },
-
-    /// Show database status
-    Status,
-
-    /// Backup database
-    Backup {
-        /// Backup destination
-        #[arg(short, long)]
-        destination: PathBuf,
-    },
-
-    /// Restore database from backup
-    Restore {
-        /// Backup source
-        #[arg(short, long)]
-        source: PathBuf,
-    },
-
-    /// Execute CRUD operations
-    #[command(subcommand)]
-    Crud(CrudCommands),
-
-    /// Manage tables and collections
-    #[command(subcommand)]
-    Table(TableCommands),
-
-    /// Execute advanced operations
-    #[command(subcommand)]
-    Advanced(AdvancedCommands),
-
-    /// Manage namespaces
-    #[command(subcommand)]
-    Namespace(NamespaceCommands),
-}
-
-#[derive(Subcommand)]
-pub enum CrudCommands {
-    /// Create a new record
-    Create {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Data to insert (JSON)
-        #[arg(long)]
-        data: String,
-    },
-
-    /// Read records
-    Read {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Query conditions (JSON)
-        #[arg(long)]
-        conditions: Option<String>,
-
-        /// Limit results
-        #[arg(long, default_value = "10")]
-        limit: u64,
-
-        /// Offset results
-        #[arg(long, default_value = "0")]
-        offset: u64,
-    },
-
-    /// Update records
-    Update {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Update conditions (JSON)
-        #[arg(long)]
-        conditions: Option<String>,
-
-        /// Data to update (JSON)
-        #[arg(long)]
-        data: String,
-    },
-
-    /// Delete records
-    Delete {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Delete conditions (JSON)
-        #[arg(long)]
-        conditions: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum TableCommands {
-    /// Create a new table/collection
-    Create {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Schema definition (JSON)
-        #[arg(long)]
-        schema: Option<String>,
-    },
-
-    /// Drop (delete) a table/collection
-    Drop {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-    },
-
-    /// Truncate (empty) a table/collection
-    Truncate {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-    },
-
-    /// Get table/collection information
-    Info {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum AdvancedCommands {
-    /// Analyze data patterns
-    Analyze {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Analysis conditions (JSON)
-        #[arg(long)]
-        conditions: Option<String>,
-    },
-
-    /// Make AI predictions
-    Predict {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Prediction data (JSON)
-        #[arg(long)]
-        data: String,
-    },
-
-    /// Vector similarity search
-    VectorSearch {
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-
-        /// Query vector (JSON array)
-        #[arg(long)]
-        query_vector: String,
-    },
-
-    /// Cluster data
-    Cluster {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-    },
-
-    /// Get table/collection information
-    TableInfo {
-        /// Storage engine type (columnar, vector, document, relational)
-        #[arg(long)]
-        storage_type: String,
-
-        /// Table/collection name
-        #[arg(long)]
-        table: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum NamespaceCommands {
-    /// Create a new namespace
-    Create {
-        /// Namespace path (e.g. root.tenant.project)
-        path: String,
-        /// Description of the namespace
-        #[arg(long)]
-        description: Option<String>,
-    },
-
-    /// List all namespaces
-    List,
-
-    /// Show namespace info
-    Info {
-        /// Namespace path
-        path: String,
-    },
-
-    /// Delete a namespace
-    Delete {
-        /// Namespace path
-        path: String,
-    },
-
-    /// List child namespaces
-    Children {
-        /// Parent namespace path
-        path: String,
-    },
-
-    /// List namespace effective policy
-    Policy {
-        /// Namespace path
-        path: String,
-    },
-
-    /// List resources attached to namespace
-    Resources {
-        /// Namespace path
-        path: String,
-    },
-}
-
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> crate::Result<()> {
-    if !dst.exists() {
-        fs::create_dir_all(dst)?;
-    }
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            copy_dir_all(&src_path.into(), &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn default_cli_config(node_id: &str) -> PrimusDBConfig {
-    PrimusDBConfig {
-        storage: crate::StorageConfig {
-            data_dir: "/tmp/primusdb_cli".to_string(),
-            max_file_size: 1024 * 1024 * 1024,
-            compression: crate::CompressionType::Lz4,
-            cache_size: 512 * 1024 * 1024,
-        },
-        network: crate::NetworkConfig {
-            bind_address: "127.0.0.1".to_string(),
-            port: 8080,
-            max_connections: 1000,
-        },
-        security: crate::SecurityConfig {
-            encryption_enabled: true,
-            key_rotation_interval: 86400,
-            auth_required: false,
-        },
-        cluster: crate::ClusterConfig {
-            enabled: false,
-            node_id: node_id.to_string(),
-            discovery_servers: vec![],
-        },
-        namespaces: Default::default(),
-        federation: None,
-    }
-}
-
-fn default_cli_transaction() -> Transaction {
-    Transaction {
-        id: "cli_operation".to_string(),
-        operations: vec![],
-        created_at: chrono::Utc::now(),
-        status: crate::transaction::TransactionStatus::Active,
-        updated_at: chrono::Utc::now(),
-        isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-        timeout_ms: 30000,
-        ..Default::default()
-    }
-}
-
-pub async fn run_cli(cli: Cli) -> crate::Result<()> {
-    if cli.mode == "client" {
-        // Client mode: connect to remote server
-        return run_client_mode(cli).await;
-    }
-
-    // Embedded mode (default)
-    match cli.command {
-        Commands::Server { config: _, bind } => {
-            println!("Starting PrimusDB server on {}...", bind);
-            let cfg = PrimusDBConfig {
-                storage: crate::StorageConfig {
-                    data_dir: "/tmp/primusdb_data".to_string(),
-                    max_file_size: 1024 * 1024 * 1024,
-                    compression: crate::CompressionType::Lz4,
-                    cache_size: 512 * 1024 * 1024,
-                },
-                network: crate::NetworkConfig {
-                    bind_address: "127.0.0.1".to_string(),
-                    port: 8080,
-                    max_connections: 1000,
-                },
-                security: crate::SecurityConfig {
-                    encryption_enabled: true,
-                    key_rotation_interval: 86400,
-                    auth_required: false,
-                },
-                cluster: crate::ClusterConfig {
-                    enabled: false,
-                    node_id: "server_node".to_string(),
-                    discovery_servers: vec![],
-                },
-                namespaces: Default::default(),
-                federation: None,
-            };
-            let primusdb = Arc::new(crate::PrimusDB::new(cfg.clone())?);
-            let auth_config = crate::auth::AuthConfig {
-                require_auth: true,
-                min_password_length: 8,
-                password_expiry_days: 90,
-                max_login_attempts: 5,
-                lockout_duration_minutes: 30,
-                token_expiry_hours: 8760,
-                session_timeout_minutes: 60,
-                mfa_required_for_roles: vec!["admin".to_string()],
-            };
-            let auth_service = Arc::new(crate::auth::AuthService::new(auth_config)?);
-            let api_server = crate::api::APIServer::new(primusdb, auth_service, None);
-            let bind_addr = if bind == "127.0.0.1:8080" {
-                format!("{}:{}", cfg.network.bind_address, cfg.network.port)
-            } else {
-                bind
-            };
-            println!("Server running on {}", bind_addr);
-            api_server.run(&bind_addr).await?;
-        }
-
-        Commands::Init { data_dir } => {
-            println!("Initializing PrimusDB in directory: {:?}", data_dir);
-            // Initialize database directory and configuration
-            if !data_dir.exists() {
-                std::fs::create_dir_all(&data_dir)?;
-                println!("Created data directory: {:?}", data_dir);
-            } else {
-                println!("Data directory already exists: {:?}", data_dir);
-            }
-
-            // Create default config if not exists
-            let config_path = data_dir.join("config.toml");
-            if !config_path.exists() {
-                let default_config = r#"
-[storage]
-data_dir = "./data"
-max_file_size = 1073741824
-compression = "lz4"
-cache_size = 536870912
-
-[network]
-bind_address = "127.0.0.1"
-port = 8080
-max_connections = 1000
-
-[security]
-encryption_enabled = true
-key_rotation_interval = 86400
-auth_required = false
-
-[cluster]
-enabled = false
-node_id = "node1"
-discovery_servers = []
-"#;
-                std::fs::write(&config_path, default_config)?;
-                println!("Created default config: {:?}", config_path);
-            }
-
-            println!("PrimusDB initialized successfully!");
-        }
-
-        Commands::Status => {
-            println!("PrimusDB Status:");
-            println!("- Status: Running");
-            println!("- Version: {}", env!("CARGO_PKG_VERSION"));
-            println!("- Uptime: Unknown");
-            println!("- Available Engines: columnar, vector, document, relational, kv");
-            println!("- Features: AI/ML, Blockchain Consensus, Distributed Clustering");
-            // TODO: Query actual status from running instance
-            println!("");
-        }
-
-        Commands::Backup { destination } => {
-            println!("Backing up PrimusDB to: {:?}", destination);
-            // Implement backup functionality
-            let data_dir = PathBuf::from("./data");
-            if data_dir.exists() {
-                copy_dir_all(&data_dir, &destination)?;
-                println!("Backup completed successfully!");
-            } else {
-                println!("No data directory found to backup.");
-            }
-        }
-
-        Commands::Restore { source } => {
-            println!("Restoring PrimusDB from: {:?}", source);
-            // Implement restore functionality
-            let data_dir = PathBuf::from("./data");
-            if source.exists() {
-                copy_dir_all(&source, &data_dir)?;
-                println!("Restore completed successfully!");
-            } else {
-                println!("Backup source not found.");
-            }
-        }
-
-        Commands::Crud(crud_cmd) => {
-            handle_crud_cli_command(crud_cmd).await?;
-        }
-
-        Commands::Table(table_cmd) => {
-            handle_table_cli_command(table_cmd).await?;
-        }
-
-        Commands::Advanced(adv_cmd) => {
-            handle_advanced_cli_command(adv_cmd).await?;
-        }
-
-        Commands::Namespace(ns_cmd) => {
-            handle_namespace_cli_command(ns_cmd)?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_crud_cli_command(cmd: CrudCommands) -> crate::Result<()> {
-    let config = default_cli_config("cli_node");
-    let transaction = default_cli_transaction();
-
-    match cmd {
-        CrudCommands::Create {
-            storage_type,
-            table,
-            data,
-        } => {
-            println!(
-                "Creating record in {} table '{}' with data: {}",
-                storage_type, table, data
-            );
-            let data_json: serde_json::Value = serde_json::from_str(&data)?;
-            let engine = get_engine(&storage_type, &config)?;
-            let count = engine.insert(&table, &data_json, &transaction).await?;
-            println!("Record created successfully with ID: {}", count);
-        }
-        CrudCommands::Read {
-            storage_type,
-            table,
-            conditions,
-            limit,
-            offset,
-        } => {
-            println!(
-                "Reading records from {} table '{}' (limit: {}, offset: {})",
-                storage_type, table, limit, offset
-            );
-            let conditions_json = conditions
-                .as_ref()
-                .map(|c| serde_json::from_str(c).unwrap());
-            let engine = get_engine(&storage_type, &config)?;
-            let limit_val = limit;
-            let offset_val = offset;
-            let records = engine
-                .select(
-                    &table,
-                    conditions_json.as_ref(),
-                    limit_val,
-                    offset_val,
-                    &transaction,
-                )
-                .await?;
-            println!("Records retrieved successfully: {} records", records.len());
-            for record in records {
-                println!("  ID: {}, Data: {}", record.id, record.data);
-            }
-        }
-        CrudCommands::Update {
-            storage_type,
-            table,
-            conditions,
-            data,
-        } => {
-            println!(
-                "Updating records in {} table '{}' with data: {}",
-                storage_type, table, data
-            );
-            let conditions_json = conditions
-                .as_ref()
-                .map(|c| serde_json::from_str(c).unwrap());
-            let data_json: serde_json::Value = serde_json::from_str(&data)?;
-            let engine = get_engine(&storage_type, &config)?;
-            let count = engine
-                .update(&table, conditions_json.as_ref(), &data_json, &transaction)
-                .await?;
-            println!("Records updated successfully: {} records", count);
-        }
-        CrudCommands::Delete {
-            storage_type,
-            table,
-            conditions,
-        } => {
-            println!("Deleting records from {} table '{}'", storage_type, table);
-            let conditions_json = conditions
-                .as_ref()
-                .map(|c| serde_json::from_str(c).unwrap());
-            let engine = get_engine(&storage_type, &config)?;
-            let count = engine
-                .delete(&table, conditions_json.as_ref(), &transaction)
-                .await?;
-            println!("Records deleted successfully: {} records", count);
-        }
-    }
-    Ok(())
-}
-
-async fn handle_table_cli_command(cmd: TableCommands) -> crate::Result<()> {
-    let config = default_cli_config("cli_node");
-    let _transaction = default_cli_transaction();
-
-    match cmd {
-        TableCommands::Create {
-            storage_type,
-            table,
-            schema,
-        } => {
-            println!("Creating table '{}' in {} storage", table, storage_type);
-            let schema = schema
-                .map(|s| serde_json::from_str(&s).unwrap())
-                .unwrap_or(Schema {
-                    fields: vec![],
-                    indexes: vec![],
-                    constraints: vec![],
-                });
-            let engine = get_engine(&storage_type, &config)?;
-            engine.create_table(&table, &schema).await?;
-            println!("Table created successfully");
-        }
-
-        TableCommands::Drop {
-            storage_type,
-            table,
-        } => {
-            println!("Dropping table '{}' from {} storage", table, storage_type);
-            let engine = get_engine(&storage_type, &config)?;
-            engine.drop_table(&table).await?;
-            println!("Table dropped successfully");
-        }
-
-        TableCommands::Truncate {
-            storage_type,
-            table,
-        } => {
-            println!("Truncating table '{}' in {} storage", table, storage_type);
-            let engine = get_engine(&storage_type, &config)?;
-            engine.truncate_table(&table, false).await?;
-            println!("Table truncated successfully");
-        }
-
-        TableCommands::Info {
-            storage_type,
-            table,
-        } => {
-            println!(
-                "Getting info for table '{}' in {} storage",
-                table, storage_type
-            );
-            let engine = get_engine(&storage_type, &config)?;
-            let info = engine.table_info(&table).await?;
-            println!("Table Info:");
-            println!("  Engine: {}", storage_type);
-            println!("  Table: {}", table);
-            println!("  Record Count: {}", info.row_count);
-            println!("  Size: {} bytes", info.size_bytes);
-            println!("  Created: {}", info.created_at);
-            println!("  Updated: {}", info.updated_at);
-        }
-    }
-    Ok(())
-}
-
-async fn handle_advanced_cli_command(cmd: AdvancedCommands) -> crate::Result<()> {
-    let config = default_cli_config("cli_node");
-    let transaction = default_cli_transaction();
-
-    match cmd {
-        AdvancedCommands::Analyze {
-            storage_type,
-            table,
-            conditions,
-        } => {
-            println!(
-                "Analyzing data patterns in {} table '{}'",
-                storage_type, table
-            );
-            let conditions_json = conditions
-                .as_ref()
-                .map(|c| serde_json::from_str(c).unwrap());
-            let engine = get_engine(&storage_type, &config)?;
-            let analysis = engine
-                .analyze(&table, conditions_json.as_ref(), &transaction)
-                .await?;
-            println!("Analysis completed successfully:");
-            println!("{}", analysis);
-        }
-        AdvancedCommands::Predict {
-            storage_type,
-            table,
-            data,
-        } => {
-            println!(
-                "Making AI predictions on {} table '{}' with data: {}",
-                storage_type, table, data
-            );
-            let conditions_json: serde_json::Value = serde_json::from_str(&data)?;
-            let ai_engine = crate::ai::AIEngine::new(&config)?;
-            let predictions = ai_engine.predict(&table, Some(&conditions_json)).await?;
-            println!("Predictions completed successfully:");
-            for pred in predictions {
-                println!("  {}", serde_json::to_string_pretty(&pred.data)?);
-            }
-        }
-        AdvancedCommands::VectorSearch {
-            table,
-            query_vector,
-        } => {
-            println!(
-                "Performing vector similarity search in table '{}' with vector: {}",
-                table, query_vector
-            );
-            let query_vec: Vec<f32> = serde_json::from_str(&query_vector)?;
-            let engine = VectorEngine::new(&config)?;
-            // For now, assume vector is stored as JSON array
-            let conditions = serde_json::json!({ "vector": query_vec });
-            let results = engine
-                .select(&table, Some(&conditions), 10, 0, &transaction)
-                .await?;
-            println!("Vector search completed successfully:");
-            for result in results {
-                println!("  {}", serde_json::to_string_pretty(&result.data)?);
-            }
-        }
-        AdvancedCommands::Cluster {
-            storage_type,
-            table,
-        } => {
-            println!("Clustering data in {} table '{}'", storage_type, table);
-            let ai_engine = crate::ai::AIEngine::new(&config)?;
-            let clusters = ai_engine.cluster_data(&table, 3).await?;
-            println!("Clustering completed successfully:");
-            println!("  Number of clusters: {}", clusters.clusters.len());
-            for (i, cluster) in clusters.clusters.iter().enumerate() {
-                println!("  Cluster {}: {} members", i, cluster.members.len());
-            }
-        }
-        AdvancedCommands::TableInfo {
-            storage_type,
-            table,
-        } => {
-            println!("Getting information for {} table '{}'", storage_type, table);
-            let engine = get_engine(&storage_type, &config)?;
-            let info = engine.table_info(&table).await?;
-            println!("Table info retrieved successfully:");
-            println!("- Engine: {}", storage_type);
-            println!("- Table: {}", table);
-            println!("- Records: {}", info.row_count);
-            println!("- Size: {} bytes", info.size_bytes);
-            println!("- Created: {}", info.created_at);
-            println!("- Updated: {}", info.updated_at);
-        }
-    }
-
-    Ok(())
-}
-
-fn get_engine(
-    storage_type: &str,
-    config: &PrimusDBConfig,
-) -> crate::Result<Box<dyn StorageEngine>> {
-    match storage_type {
-        "columnar" => Ok(Box::new(ColumnarEngine::new(config)?)),
-        "document" => Ok(Box::new(DocumentEngine::new(config)?)),
-        "relational" => Ok(Box::new(RelationalEngine::new(config)?)),
-        "vector" => Ok(Box::new(VectorEngine::new(config)?)),
-        "kv" | "keyvalue" => Ok(Box::new(KeyValueEngine::new(config, None)?)),
-        _ => Err(crate::Error::InvalidRequest(format!(
-            "Unknown storage type: {}",
-            storage_type
-        ))),
-    }
-}
-
-async fn run_client_mode(cli: Cli) -> crate::Result<()> {
-    println!("PrimusDB CLI - Client Mode");
-    println!("Server: {}", cli.server);
+/// Dispatch a pre-parsed Cli to the appropriate handler.
+pub async fn run_cli(cli: Cli) -> Result<()> {
+    let fmt: OutputFormat = cli.global.format.parse().unwrap_or(OutputFormat::Table);
 
     match cli.command {
-        Commands::Server { .. } => {
-            println!(
-                "Server command not available in client mode. Use embedded mode to start server."
-            );
+        Commands::Server(cmd) => handle_server(cmd, &fmt).await,
+        Commands::Connect { server, timeout } => handle_connect(server, timeout, &fmt).await,
+        Commands::Health => handle_health(&cli.global, &fmt).await,
+        Commands::Status => handle_status(&cli.global, &fmt).await,
+        Commands::Instance(cmd) => handle_instance(cmd, &cli.global, &fmt).await,
+        Commands::Tui { server, no_color } => handle_tui(server, no_color).await,
+        Commands::Query { query, database } => {
+            handle_query(query, database, &cli.global, &fmt).await
         }
-        Commands::Init { .. } => {
-            println!("Init command not available in client mode. Use embedded mode to initialize database.");
+        Commands::Sql { sql, database } => handle_sql_file(sql, database, &cli.global, &fmt).await,
+        Commands::Db(cmd) => handle_db(cmd, &cli.global, &fmt).await,
+        Commands::Engine(cmd) => handle_engine(cmd, &cli.global, &fmt).await,
+        Commands::Namespace(cmd) => handle_namespace(cmd, &cli.global, &fmt).await,
+        Commands::Config(cmd) => handle_config(cmd, &cli.global, &fmt).await,
+        Commands::Cluster(cmd) => handle_cluster(cmd, &cli.global, &fmt).await,
+        Commands::Protocol(cmd) => handle_protocol(cmd, &cli.global, &fmt).await,
+        Commands::Backup(cmd) => handle_backup(cmd, &cli.global, &fmt).await,
+        Commands::Restore {
+            source,
+            database: db,
+            force,
+        } => handle_restore(source, db, force, &cli.global, &fmt).await,
+        Commands::Metrics {
+            filter,
+            watch,
+            interval,
+        } => handle_metrics(filter, watch, interval, &cli.global, &fmt).await,
+        Commands::Auth(cmd) => handle_auth(cmd, &cli.global, &fmt).await,
+        Commands::User(cmd) => handle_user(cmd, &cli.global, &fmt).await,
+        Commands::Role(cmd) => handle_role(cmd, &cli.global, &fmt).await,
+        Commands::Ai(cmd) => handle_ai(cmd, &cli.global, &fmt).await,
+        Commands::Vector(cmd) => handle_vector(cmd, &cli.global, &fmt).await,
+        Commands::Graph(cmd) => handle_graph(cmd, &cli.global, &fmt).await,
+        Commands::Cdc(cmd) => handle_cdc(cmd, &cli.global, &fmt).await,
+        Commands::Explain { query } => handle_explain(query, &cli.global, &fmt).await,
+        Commands::Bench(cmd) => handle_bench(cmd, &cli.global, &fmt).await,
+        Commands::Migrate(cmd) => handle_migrate(cmd, &cli.global, &fmt).await,
+        Commands::Doctor { aggressive, report } => {
+            handle_doctor(aggressive, report, &cli.global, &fmt).await
         }
-        Commands::Status => {
-            match reqwest::get(&format!("{}/health", cli.server)).await {
-                Ok(response) => {
-                    let json: serde_json::Value = response.json().await.map_err(|e| {
-                        crate::Error::NetworkError(format!("Failed to parse response: {}", e))
-                    })?;
-                    println!("Server Status:");
-                    println!("{}", serde_json::to_string_pretty(&json)?);
-                }
-                Err(e) => {
-                    eprintln!("Failed to connect to server: {}", e);
-                    eprintln!("Make sure the server is running: primusdb-server --host 127.0.0.1 --port 8080");
-                }
-            }
+        Commands::Discover {
+            broadcast,
+            port,
+            timeout,
+        } => handle_discover(broadcast, port, timeout, &fmt).await,
+        Commands::Governor(cmd) => handle_governor(cmd, &cli.global, &fmt).await,
+        Commands::Completion { shell } => handle_completion(shell),
+        Commands::Version { verbose } => handle_version(verbose),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler functions
+// ---------------------------------------------------------------------------
+
+async fn handle_server(cmd: command::ServerSubcommands, fmt: &OutputFormat) -> Result<()> {
+    cmd::server::handle_server(cmd, fmt).await
+}
+
+async fn handle_connect(server: Option<String>, timeout: u64, fmt: &OutputFormat) -> Result<()> {
+    let url = server.unwrap_or_else(|| "http://localhost:8080".to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .build()
+        .map_err(|e| crate::Error::NetworkError(e.to_string()))?;
+
+    match client.get(format!("{}/health", url)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let data = OutputData::Message(format!("Connected to {}", url));
+            println!("{}", format_output(&data, *fmt));
         }
-        Commands::Backup { destination } => {
-            println!(
-                "Backup from server: {} -> {}",
-                cli.server,
-                destination.display()
-            );
-            println!("Backup functionality coming soon in client mode!");
+        Ok(resp) => {
+            let data = OutputData::Error(format!("Connection failed: HTTP {}", resp.status()));
+            println!("{}", format_output(&data, *fmt));
         }
-        Commands::Restore { source } => {
-            println!("Restore to server: {} -> {}", source.display(), cli.server);
-            println!("Restore functionality coming soon in client mode!");
-        }
-        Commands::Crud(crud_cmd) => {
-            handle_crud_client_command(cli.server, crud_cmd).await?;
-        }
-        Commands::Table(table_cmd) => {
-            handle_table_client_command(cli.server, table_cmd).await?;
-        }
-        Commands::Advanced(adv_cmd) => {
-            handle_advanced_client_command(cli.server, adv_cmd).await?;
-        }
-        Commands::Namespace(ns_cmd) => {
-            handle_namespace_client_command(cli.server, ns_cmd).await?;
+        Err(e) => {
+            let data = OutputData::Error(format!("Connection failed: {}", e));
+            println!("{}", format_output(&data, *fmt));
         }
     }
-
     Ok(())
 }
 
-async fn handle_crud_client_command(server: String, cmd: CrudCommands) -> crate::Result<()> {
-    let client = reqwest::Client::new();
+async fn handle_health(global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| crate::Error::NetworkError(e.to_string()))?;
 
-    match cmd {
-        CrudCommands::Create {
-            storage_type,
-            table,
-            data,
-        } => {
-            let url = format!("{}/api/v1/crud/{}/{}", server, storage_type, table);
-            let response = client
-                .post(&url)
-                .json(&serde_json::from_str::<serde_json::Value>(&data)?)
-                .send()
-                .await?;
-
-            let json: serde_json::Value = response.json().await?;
-            println!("Create result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+    match client
+        .get(format!("{}/health", global.server_url))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let data = OutputData::Json(json);
+            println!("{}", format_output(&data, *fmt));
         }
-        CrudCommands::Read {
-            storage_type,
-            table,
-            conditions,
-            limit,
-            offset,
-        } => {
-            let mut url = format!(
-                "{}/api/v1/crud/{}/{}?limit={}&offset={}",
-                server, storage_type, table, limit, offset
-            );
-            if let Some(conditions) = conditions {
-                url.push_str(&format!("&conditions={}", urlencoding::encode(&conditions)));
-            }
-
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Read result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Ok(resp) => {
+            let data = OutputData::Error(format!("Health check failed: HTTP {}", resp.status()));
+            println!("{}", format_output(&data, *fmt));
         }
-        CrudCommands::Update {
-            storage_type,
-            table,
-            conditions,
-            data,
-        } => {
-            let url = format!("{}/api/v1/crud/{}/{}", server, storage_type, table);
-            let body = serde_json::json!({
-                "data": serde_json::from_str::<serde_json::Value>(&data)?,
-                "conditions": conditions.and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            });
-
-            let response = client.put(&url).json(&body).send().await?;
-
-            let json: serde_json::Value = response.json().await?;
-            println!("Update result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-        CrudCommands::Delete {
-            storage_type,
-            table,
-            conditions,
-        } => {
-            let mut url = format!("{}/api/v1/crud/{}/{}", server, storage_type, table);
-            if let Some(conditions) = conditions {
-                url.push_str(&format!("?conditions={}", urlencoding::encode(&conditions)));
-            }
-
-            let response = client.delete(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Delete result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Err(e) => {
+            let data = OutputData::Error(format!("Health check failed: {}", e));
+            println!("{}", format_output(&data, *fmt));
         }
     }
-
     Ok(())
 }
 
-async fn handle_table_client_command(server: String, cmd: TableCommands) -> crate::Result<()> {
-    let client = reqwest::Client::new();
+async fn handle_status(global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| crate::Error::NetworkError(e.to_string()))?;
 
-    match cmd {
-        TableCommands::Create {
-            storage_type,
-            table,
-            schema,
-        } => {
-            let url = format!("{}/api/v1/crud/{}/{}", server, storage_type, table);
-            let body = serde_json::json!({
-                "operation": "CreateTable",
-                "schema": schema.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            });
-            let response = client.post(&url).json(&body).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Table creation result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+    match client
+        .get(format!("{}/status", global.server_url))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let data = OutputData::Json(json);
+            println!("{}", format_output(&data, *fmt));
         }
-
-        TableCommands::Drop {
-            storage_type,
-            table,
-        } => {
-            let url = format!("{}/api/v1/crud/{}/{}", server, storage_type, table);
-            let response = client.delete(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Table drop result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Ok(resp) => {
+            let data = OutputData::Error(format!("Status check failed: HTTP {}", resp.status()));
+            println!("{}", format_output(&data, *fmt));
         }
-
-        TableCommands::Truncate {
-            storage_type,
-            table,
-        } => {
-            let url = format!("{}/api/v1/crud/{}/{}/truncate", server, storage_type, table);
-            let response = client.post(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Table truncate result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        TableCommands::Info {
-            storage_type,
-            table,
-        } => {
-            let url = format!("{}/api/v1/table/{}/{}/info", server, storage_type, table);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Table info:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Err(e) => {
+            let data = OutputData::Error(format!("Status check failed: {}", e));
+            println!("{}", format_output(&data, *fmt));
         }
     }
-
     Ok(())
 }
 
-async fn handle_advanced_client_command(
-    server: String,
-    cmd: AdvancedCommands,
-) -> crate::Result<()> {
-    let client = reqwest::Client::new();
+async fn handle_instance(
+    cmd: command::InstanceSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::instance::handle_instance(cmd, global, fmt).await
+}
 
-    match cmd {
-        AdvancedCommands::Analyze {
-            storage_type,
-            table,
-            conditions,
-        } => {
-            let url = format!(
-                "{}/api/v1/advanced/analyze/{}/{}",
-                server, storage_type, table
-            );
-            let body = serde_json::json!({
-                "conditions": conditions.and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            });
+async fn handle_tui(server: Option<String>, _no_color: bool) -> Result<()> {
+    match server {
+        Some(url) => tui::run_tui_connect(&url).await,
+        None => tui::run_tui().await,
+    }
+}
 
-            let response = client.post(&url).json(&body).send().await?;
+async fn handle_query(
+    query: Vec<String>,
+    database: Option<String>,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::query::handle_query(query, database, global, fmt).await
+}
 
-            let json: serde_json::Value = response.json().await?;
-            println!("Analysis result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+async fn handle_sql_file(
+    sql: Vec<String>,
+    database: Option<String>,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::query::handle_sql_file(sql, database, global, fmt).await
+}
+
+async fn handle_db(
+    cmd: command::DbSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::db::handle_db(cmd, global, fmt).await
+}
+
+async fn handle_engine(
+    cmd: command::EngineSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::engine::handle_engine(cmd, global, fmt).await
+}
+
+async fn handle_namespace(
+    cmd: command::NamespaceSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::namespace::handle_namespace(cmd, global, fmt).await
+}
+
+async fn handle_cluster(
+    cmd: command::ClusterSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::cluster::handle_cluster(cmd, global, fmt).await
+}
+
+async fn handle_protocol(
+    cmd: command::ProtocolSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::protocol::handle_protocol(cmd, global, fmt).await
+}
+
+async fn handle_backup(
+    cmd: command::BackupSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::backup::handle_backup(cmd, global, fmt).await
+}
+
+async fn handle_restore(
+    source: PathBuf,
+    database: Option<String>,
+    force: bool,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::backup::handle_restore(source, database, force, global, fmt).await
+}
+
+async fn handle_metrics(
+    _filter: Option<String>,
+    _watch: bool,
+    _interval: u64,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let data = OutputData::Error(format!("Failed to create HTTP client: {}", e));
+            println!("{}", format_output(&data, *fmt));
+            return Ok(());
         }
-        AdvancedCommands::Predict {
-            storage_type,
-            table,
-            data,
-        } => {
-            let url = format!(
-                "{}/api/v1/advanced/predict/{}/{}",
-                server, storage_type, table
-            );
-            let body = serde_json::json!({
-                "data": serde_json::from_str::<serde_json::Value>(&data)?
-            });
+    };
 
-            let response = client.post(&url).json(&body).send().await?;
-
-            let json: serde_json::Value = response.json().await?;
-            println!("Prediction result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+    match client
+        .get(format!("{}/metrics", global.server_url))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().await.unwrap_or_default();
+            let data = OutputData::Message(text);
+            println!("{}", format_output(&data, *fmt));
         }
-        AdvancedCommands::VectorSearch {
-            table,
-            query_vector,
-        } => {
-            let url = format!("{}/api/v1/advanced/vector-search/{}", server, table);
-            let query_vector: Vec<f32> = query_vector
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .collect();
-
-            let body = serde_json::json!({
-                "query_vector": query_vector,
-                "limit": 10
-            });
-
-            let response = client.post(&url).json(&body).send().await?;
-
-            let json: serde_json::Value = response.json().await?;
-            println!("Vector search result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let data = OutputData::Error(format!("HTTP {}: {}", status, text));
+            println!("{}", format_output(&data, *fmt));
         }
-        AdvancedCommands::Cluster {
-            storage_type,
-            table,
-        } => {
-            let url = format!(
-                "{}/api/v1/advanced/cluster/{}/{}",
-                server, storage_type, table
-            );
-            let body = serde_json::json!({"algorithm": "kmeans", "clusters": 5});
-
-            let response = client.post(&url).json(&body).send().await?;
-
-            let json: serde_json::Value = response.json().await?;
-            println!("Clustering result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-        AdvancedCommands::TableInfo {
-            storage_type,
-            table,
-        } => {
-            let url = format!("{}/api/v1/table/{}/{}/info", server, storage_type, table);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Table info:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        Err(e) => {
+            let data = OutputData::Error(format!("Connection failed: {}", e));
+            println!("{}", format_output(&data, *fmt));
         }
     }
-
     Ok(())
 }
 
-fn handle_namespace_cli_command(cmd: NamespaceCommands) -> crate::Result<()> {
-    let config = default_cli_config("cli_ns");
+async fn handle_auth(
+    cmd: command::AuthSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::auth::handle_auth(cmd, global, fmt).await
+}
 
+async fn handle_user(
+    cmd: command::UserSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::auth::handle_user(cmd, global, fmt).await
+}
+
+async fn handle_role(
+    cmd: command::RoleSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::auth::handle_role(cmd, global, fmt).await
+}
+
+async fn handle_ai(
+    cmd: command::AiSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::ai::handle_ai(cmd, global, fmt).await
+}
+
+async fn handle_vector(
+    cmd: command::VectorSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::vector::handle_vector(cmd, global, fmt).await
+}
+
+async fn handle_graph(
+    cmd: command::GraphSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::graph::handle_graph(cmd, global, fmt).await
+}
+
+async fn handle_cdc(
+    cmd: command::CdcSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::cdc::handle_cdc(cmd, global, fmt).await
+}
+
+async fn handle_explain(query: Vec<String>, global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
+    cmd::query::handle_explain(query, global, fmt).await
+}
+
+async fn handle_bench(
+    cmd: BenchSubcommands,
+    _global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    let feature = match &cmd {
+        BenchSubcommands::Run { .. } => "bench run",
+        BenchSubcommands::List { .. } => "bench list",
+        BenchSubcommands::Report { .. } => "bench report",
+    };
+    let data = OutputData::Message(format!(
+        "{} is not yet available via CLI. \
+         Use the Criterion benchmark framework directly:\n  \
+         cargo bench (run all benchmarks)\n  \
+         cargo bench --bench <name> (run a specific benchmark)",
+        feature
+    ));
+    println!("{}", format_output(&data, *fmt));
+    Ok(())
+}
+
+async fn handle_migrate(
+    cmd: MigrateSubcommands,
+    _global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
     match cmd {
-        NamespaceCommands::Create { path, description } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            let ns = controller.create(
-                &path,
-                description.as_deref().unwrap_or(""),
-                None,
-                None,
-                std::collections::HashMap::new(),
+        MigrateSubcommands::InspectSource {
+            source,
+            url,
+            namespace,
+            format: _rpt_fmt,
+        } => {
+            let data = OutputData::Message(format!(
+                "Migration source inspection is available when the corresponding database driver crate\n\
+                 (mysql, tokio-postgres, mongodb) is added as a dependency.\n\n\
+                 Requested: source={}, url={}, namespace={:?}",
+                source,
+                crate::migration::report::MigrationReport::mask_url(&url),
+                namespace
+            ));
+            println!("{}", format_output(&data, *fmt));
+            Ok(())
+        }
+        MigrateSubcommands::Plan {
+            source,
+            url,
+            target,
+            namespace,
+            mapping,
+            mode,
+            format: _rpt_fmt,
+            output,
+        } => {
+            let plan = crate::migration::run_migrate_plan(
+                source, url, target, namespace, mapping, mode, output,
             )?;
-            println!("Namespace created:");
-            println!("  Path: {}", ns.path);
-            println!("  ID: {}", ns.id);
-            println!("  Description: {}", ns.description);
+            let data = plan;
+            println!("{}", format_output(&data, *fmt));
+            Ok(())
         }
-
-        NamespaceCommands::List => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            let namespaces = controller.list_all()?;
-            println!("Namespaces ({}):", namespaces.len());
-            for ns in &namespaces {
-                println!("  {} (id: {})", ns.path, ns.id);
-            }
-        }
-
-        NamespaceCommands::Info { path } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            match controller.get_by_path(&path)? {
-                Some(ns) => {
-                    println!("Namespace: {}", ns.path);
-                    println!("  ID: {}", ns.id);
-                    println!("  Description: {}", ns.description);
-                    println!("  Parent: {:?}", ns.parent_path);
-                    println!("  Active: {}", ns.is_active);
-                    println!("  Created: {}", ns.created_at);
+        MigrateSubcommands::Import {
+            source,
+            url,
+            target,
+            namespace,
+            mapping,
+            mode,
+            batch_size,
+            limit,
+            include,
+            exclude,
+            overwrite,
+            resume,
+            yes,
+        } => {
+            let conn_str_for_log = crate::migration::report::MigrationReport::mask_url(&url);
+            if !yes {
+                println!("Migration Import Plan:");
+                println!("  Source: {} at {}", source, conn_str_for_log);
+                println!(
+                    "  Target: {}",
+                    target.as_deref().unwrap_or("http://localhost:8080")
+                );
+                println!("  Namespace: {}", namespace.as_deref().unwrap_or("default"));
+                println!("  Mode: {}", mode);
+                println!("  Overwrite: {}", if overwrite { "yes" } else { "no" });
+                println!("  Resume: {}", if resume { "yes" } else { "no" });
+                println!();
+                print!("Proceed with import? [y/N]: ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).ok();
+                let input = input.trim().to_lowercase();
+                if input != "y" && input != "yes" {
+                    println!("Import cancelled.");
+                    return Ok(());
                 }
-                None => println!("Namespace '{}' not found", path),
             }
+            let cfg = crate::migration::MigrateImportConfig {
+                source,
+                url,
+                target,
+                namespace,
+                mapping,
+                mode,
+                batch_size,
+                limit,
+                include,
+                exclude,
+                overwrite,
+                resume,
+            };
+            let result = crate::migration::run_migrate_import(cfg)?;
+            println!("{}", format_output(&result, *fmt));
+            Ok(())
         }
-
-        NamespaceCommands::Delete { path } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            match controller.delete(&path) {
-                Ok(()) => println!("Namespace '{}' deleted", path),
-                Err(e) => println!("Error: {}", e),
-            }
+        MigrateSubcommands::Validate {
+            target,
+            namespace,
+            report,
+        } => {
+            let result = crate::migration::run_migrate_validate(target, namespace, report)?;
+            println!("{}", format_output(&result, *fmt));
+            Ok(())
         }
-
-        NamespaceCommands::Children { path } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            let children = controller.list_children(&path)?;
-            println!("Children of '{}' ({}):", path, children.len());
-            for child in &children {
-                println!("  {}", child.path);
-            }
-        }
-
-        NamespaceCommands::Policy { path } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            match controller.effective_policy(&path) {
-                Ok(policy) => {
-                    println!("Effective policy for '{}':", path);
-                    println!("  Max depth: {}", policy.max_depth);
-                    println!("  Max resources: {}", policy.max_resources);
-                    println!("  Max users: {}", policy.max_users);
-                    println!("  Max storage: {} bytes", policy.max_storage_bytes);
-                    println!("  Allowed types: {:?}", policy.allowed_storage_types);
-                }
-                Err(e) => println!("Error: {}", e),
-            }
-        }
-
-        NamespaceCommands::Resources { path } => {
-            let controller = crate::namespace::NamespaceController::new(&config)?;
-            controller.init()?;
-            match controller.get_by_path(&path)? {
-                Some(ns) => {
-                    let resources = controller.list_resources(&ns.id)?;
-                    println!("Resources in '{}' ({}):", path, resources.len());
-                    for r in &resources {
-                        println!(
-                            "  {} [{:?}] -> {}",
-                            r.resource_name, r.storage_type, r.physical_name
-                        );
-                    }
-                }
-                None => println!("Namespace '{}' not found", path),
-            }
+        MigrateSubcommands::Report {
+            target,
+            namespace,
+            format: rpt_fmt,
+            output,
+        } => {
+            let result = crate::migration::run_migrate_report(target, namespace, &rpt_fmt, output)?;
+            println!("{}", format_output(&result, *fmt));
+            Ok(())
         }
     }
+}
 
+async fn handle_config(
+    cmd: command::ConfigSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::config::handle_config(cmd, global, fmt).await
+}
+
+async fn handle_doctor(
+    aggressive: bool,
+    report: Option<PathBuf>,
+    _global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::doctor::handle_doctor(aggressive, report, fmt).await
+}
+
+async fn handle_discover(
+    broadcast: String,
+    port: u16,
+    timeout: u64,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::discover::handle_discover(broadcast, port, timeout, fmt).await
+}
+
+async fn handle_governor(
+    cmd: GovernorSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::governor::handle_governor(cmd, global, fmt).await
+}
+
+fn handle_completion(shell: String) -> Result<()> {
+    use clap_complete::{generate, Shell};
+
+    let mut cmd = Cli::command();
+    let name = "primusdb";
+
+    let shell = match shell.to_lowercase().as_str() {
+        "bash" => Shell::Bash,
+        "zsh" => Shell::Zsh,
+        "fish" => Shell::Fish,
+        "powershell" | "ps1" => Shell::PowerShell,
+        "elvish" => Shell::Elvish,
+        other => {
+            let data = OutputData::Error(format!(
+                "Unknown shell: {}. Supported: bash, zsh, fish, powershell, elvish",
+                other
+            ));
+            println!("{}", format_output(&data, OutputFormat::Plain));
+            return Ok(());
+        }
+    };
+
+    generate(shell, &mut cmd, name, &mut std::io::stdout());
     Ok(())
 }
 
-async fn handle_namespace_client_command(server: String, cmd: NamespaceCommands) -> crate::Result<()> {
-    let client = reqwest::Client::new();
-    let base = format!("{}/api/v1/namespaces", server);
-
-    match cmd {
-        NamespaceCommands::Create { path, description } => {
-            let url = format!("{}/{}", base, path);
-            let body = serde_json::json!({"description": description});
-            let response = client.post(&url).json(&body).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Create result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::List => {
-            let response = client.get(&base).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Namespaces:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::Info { path } => {
-            let url = format!("{}/{}", base, path);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Namespace info:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::Delete { path } => {
-            let url = format!("{}/{}", base, path);
-            let response = client.delete(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Delete result:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::Children { path } => {
-            let url = format!("{}/{}/children", base, path);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Children:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::Policy { path } => {
-            let url = format!("{}/{}/effective-policy", base, path);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Effective policy:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-
-        NamespaceCommands::Resources { path } => {
-            let url = format!("{}/{}/resources", base, path);
-            let response = client.get(&url).send().await?;
-            let json: serde_json::Value = response.json().await?;
-            println!("Resources:");
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
+fn handle_version(verbose: bool) -> Result<()> {
+    if verbose {
+        println!(
+            "PrimusDB v{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_LICENSE")
+        );
+        println!("Build: {}", env!("CARGO_PKG_NAME"));
+    } else {
+        println!("{}", env!("CARGO_PKG_VERSION"));
     }
-
     Ok(())
 }

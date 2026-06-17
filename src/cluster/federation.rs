@@ -1,5 +1,5 @@
 use crate::cluster::rpc::{
-    FedClusterAnnounce, FedClusterAck, FedClusterInfo, FedDomainJoin, FedDomainJoinAck,
+    FedClusterAck, FedClusterAnnounce, FedClusterInfo, FedDomainJoin, FedDomainJoinAck,
     FedDomainLeave, FedHeartbeatMessage, FedNamespaceResolveRequest, RpcClient, RpcMessage,
 };
 use crate::Result;
@@ -109,7 +109,6 @@ impl FederationManager {
                 "sharding".into(),
                 "replication".into(),
                 "namespaces".into(),
-                "keyvalue".into(),
             ],
         };
 
@@ -164,10 +163,7 @@ impl FederationManager {
         Ok(())
     }
 
-    pub async fn register_remote_cluster(
-        &self,
-        info: FedClusterInfo,
-    ) -> Result<FedClusterAck> {
+    pub async fn register_remote_cluster(&self, info: FedClusterInfo) -> Result<FedClusterAck> {
         let mut members = self.members.write().await;
         let known: Vec<FedClusterInfo> = members
             .iter()
@@ -259,17 +255,17 @@ impl FederationManager {
         Ok(ack)
     }
 
-    pub async fn leave_domain(
-        &self,
-        domain_name: &str,
-    ) -> Result<()> {
+    pub async fn leave_domain(&self, domain_name: &str) -> Result<()> {
         let leave = FedDomainLeave {
             cluster_id: self.config.cluster_id.clone(),
             node_id: format!("{}:{}", self.config.cluster_id, "gateway"),
             domain_name: domain_name.to_string(),
         };
 
-        self.local_domains.write().await.retain(|d| d != domain_name);
+        self.local_domains
+            .write()
+            .await
+            .retain(|d| d != domain_name);
 
         for (cid, member) in self.members.read().await.iter() {
             if cid == &self.config.cluster_id {
@@ -299,8 +295,7 @@ impl FederationManager {
         let member_ids: Vec<String> = members
             .iter()
             .filter(|(_, m)| {
-                m.status == ClusterStatus::Online
-                    && m.info.domains.contains(&req.domain_name)
+                m.status == ClusterStatus::Online && m.info.domains.contains(&req.domain_name)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -384,9 +379,7 @@ impl FederationManager {
         let timeout = self.config.suspect_timeout_ms;
         let mut members = self.members.write().await;
         for (_, member) in members.iter_mut() {
-            if member.status == ClusterStatus::Online
-                && now - member.last_seen > timeout
-            {
+            if member.status == ClusterStatus::Online && now - member.last_seen > timeout {
                 member.status = ClusterStatus::Suspect;
                 warn!(
                     "Federation member {} is suspect (last seen: {}ms ago)",
@@ -394,9 +387,7 @@ impl FederationManager {
                     now - member.last_seen
                 );
             }
-            if member.status == ClusterStatus::Suspect
-                && now - member.last_seen > timeout * 2
-            {
+            if member.status == ClusterStatus::Suspect && now - member.last_seen > timeout * 2 {
                 member.status = ClusterStatus::Offline;
                 info!(
                     "Federation member {} is now offline",
@@ -491,10 +482,7 @@ impl FederationManager {
         let fed = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(
-                    fed.config.announce_interval_ms,
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_millis(fed.config.announce_interval_ms)).await;
 
                 if let Err(e) = fed
                     .announce_cluster(&address1, port, &node_id1, cluster_size)
@@ -509,10 +497,7 @@ impl FederationManager {
         let fed2 = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(
-                    fed2.config.heartbeat_interval_ms,
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_millis(fed2.config.heartbeat_interval_ms)).await;
                 if let Err(e) = fed2.send_heartbeat(&node_id2).await {
                     warn!("Federation heartbeat error: {}", e);
                 }
@@ -526,35 +511,32 @@ pub async fn connect_and_send(
     port: u16,
     msg: RpcMessage,
 ) -> Result<Option<RpcMessage>> {
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use std::time::Duration;
 
     let addr = format!("{}:{}", host, port);
-    let mut stream = match tokio::time::timeout(
-        Duration::from_secs(3),
-        TcpStream::connect(&addr),
-    )
-    .await
-    {
-        Ok(Ok(s)) => {
-            let _ = s.set_nodelay(true);
-            s
-        }
-        _ => return Ok(None),
-    };
+    let mut stream =
+        match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+            Ok(Ok(s)) => {
+                let _ = s.set_nodelay(true);
+                s
+            }
+            _ => return Ok(None),
+        };
 
-    let data = bincode::serialize(&msg).map_err(|e| {
-        crate::Error::ClusterError(format!("Federation serialize: {}", e))
-    })?;
+    let data = bincode::serialize(&msg)
+        .map_err(|e| crate::Error::ClusterError(format!("Federation serialize: {}", e)))?;
     let len = data.len() as u32;
 
-    stream.write_all(&len.to_le_bytes()).await.map_err(|e| {
-        crate::Error::ClusterError(format!("Federation write len: {}", e))
-    })?;
-    stream.write_all(&data).await.map_err(|e| {
-        crate::Error::ClusterError(format!("Federation write data: {}", e))
-    })?;
+    stream
+        .write_all(&len.to_le_bytes())
+        .await
+        .map_err(|e| crate::Error::ClusterError(format!("Federation write len: {}", e)))?;
+    stream
+        .write_all(&data)
+        .await
+        .map_err(|e| crate::Error::ClusterError(format!("Federation write data: {}", e)))?;
 
     let mut len_buf = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len_buf))

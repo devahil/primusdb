@@ -16,9 +16,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 fn block_on_sync<F: std::future::Future>(f: F) -> F::Output {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(f)
-    })
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 fn sql_str_to_json_condition(sql: &str) -> Option<serde_json::Value> {
@@ -416,7 +414,6 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
-                ..Default::default()
             };
 
             let records = block_on_sync(async {
@@ -720,42 +717,110 @@ impl QueryExecutor {
         join_type: JoinType,
         _cross_engine: bool,
     ) -> Result<Vec<Record>> {
-        // For now, simulate join. In production, this would fetch from the right engine.
+        // Parse join condition: "left.col = right.col"
+        let (left_col_name, right_col_name) =
+            self.parse_join_condition(condition, left_table, right_table);
+
+        // Scan right table from all registered storage engines
+        let right_records: Vec<Record> = {
+            let engines = self.storage_engines.read().unwrap();
+            let mut records = Vec::new();
+            let txn = crate::transaction::Transaction {
+                id: "join_txn".to_string(),
+                operations: vec![],
+                status: crate::transaction::TransactionStatus::Active,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+                timeout_ms: 5000,
+            };
+            let handle = tokio::runtime::Handle::current();
+            for (_st, engine) in engines.iter() {
+                if let Ok(mut recs) = handle.block_on(engine.select(right_table, None, 0, 0, &txn))
+                {
+                    records.append(&mut recs);
+                };
+            }
+            records
+        };
+
         let mut results = Vec::new();
+        let mut right_matched = vec![false; right_records.len()];
 
         for left in left_records {
-            let mut joined_data = serde_json::Map::new();
-            if let serde_json::Value::Object(obj) = &left.data {
-                for (k, v) in obj {
-                    joined_data.insert(k.clone(), v.clone());
+            let mut left_joined = false;
+
+            for (ri, right) in right_records.iter().enumerate() {
+                // Check join condition: left_col == right_col
+                let matches = if let (Some(lc), Some(rc)) = (&left_col_name, &right_col_name) {
+                    left.data
+                        .get(lc.as_str())
+                        .and_then(|lv| right.data.get(rc.as_str()).map(|rv| lv == rv))
+                        .unwrap_or(false)
+                } else {
+                    // No explicit condition — cross join behavior
+                    true
+                };
+
+                if !matches {
+                    continue;
                 }
+
+                let mut joined = serde_json::Map::new();
+                // Add left fields with table prefix
+                if let serde_json::Value::Object(obj) = &left.data {
+                    for (k, v) in obj {
+                        joined.insert(format!("{}.{}", left_table, k), v.clone());
+                    }
+                }
+                // Add right fields with table prefix
+                if let serde_json::Value::Object(obj) = &right.data {
+                    for (k, v) in obj {
+                        joined.insert(format!("{}.{}", right_table, k), v.clone());
+                    }
+                }
+
+                results.push(Record {
+                    id: format!("{}_{}", left.id, right.id),
+                    data: serde_json::Value::Object(joined),
+                    metadata: HashMap::new(),
+                });
+
+                left_joined = true;
+                right_matched[ri] = true;
             }
 
-            // Parse condition to extract join columns
-            let (left_col, _right_col) =
-                self.parse_join_condition(condition, left_table, right_table);
-
-            let matched = if let Some(lv) = left_col.and_then(|c| left.data.get(c)) {
-                // Simulate right-side fetch
-                let right_data = serde_json::json!({
-                    "right_table": right_table,
-                    "join_key": lv,
-                    "matched": true
-                });
-                joined_data.insert(format!("{}_data", right_table), right_data);
-                true
-            } else {
-                false
-            };
-
-            if matched
-                || join_type == JoinType::Left
-                || join_type == JoinType::Full
-                || join_type == JoinType::Cross
-            {
+            // LEFT JOIN: keep left row even if no match
+            if !left_joined && (join_type == JoinType::Left || join_type == JoinType::Full) {
+                let mut joined = serde_json::Map::new();
+                if let serde_json::Value::Object(obj) = &left.data {
+                    for (k, v) in obj {
+                        joined.insert(format!("{}.{}", left_table, k), v.clone());
+                    }
+                }
                 results.push(Record {
                     id: left.id.clone(),
-                    data: serde_json::Value::Object(joined_data),
+                    data: serde_json::Value::Object(joined),
+                    metadata: HashMap::new(),
+                });
+            }
+        }
+
+        // RIGHT JOIN: add right rows that had no match
+        if join_type == JoinType::Right || join_type == JoinType::Full {
+            for (ri, right) in right_records.iter().enumerate() {
+                if right_matched[ri] {
+                    continue;
+                }
+                let mut joined = serde_json::Map::new();
+                if let serde_json::Value::Object(obj) = &right.data {
+                    for (k, v) in obj {
+                        joined.insert(format!("{}.{}", right_table, k), v.clone());
+                    }
+                }
+                results.push(Record {
+                    id: format!("right_unmatched_{}", ri),
+                    data: serde_json::Value::Object(joined),
                     metadata: HashMap::new(),
                 });
             }
@@ -764,20 +829,27 @@ impl QueryExecutor {
         Ok(results)
     }
 
-    fn parse_join_condition<'a>(
+    fn parse_join_condition(
         &self,
-        condition: &'a str,
+        condition: &str,
         _left_table: &str,
         _right_table: &str,
-    ) -> (Option<&'a str>, Option<&'a str>) {
+    ) -> (Option<String>, Option<String>) {
         // Expected format: "left_table.column = right_table.column"
+        // or just "left_col = right_col"
         let eq_parts: Vec<&str> = condition.split('=').collect();
         if eq_parts.len() == 2 {
             let left_part = eq_parts[0].trim();
             let right_part = eq_parts[1].trim();
 
-            let left_col = left_part.split('.').nth(1).or_else(|| Some(left_part));
-            let right_col = right_part.split('.').nth(1).or_else(|| Some(right_part));
+            let left_col = left_part
+                .split('.')
+                .next_back()
+                .map(|s| s.trim().to_string());
+            let right_col = right_part
+                .split('.')
+                .next_back()
+                .map(|s| s.trim().to_string());
 
             (left_col, right_col)
         } else {
@@ -805,7 +877,6 @@ impl QueryExecutor {
                             updated_at: chrono::Utc::now(),
                             isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                             timeout_ms: 0,
-                            ..Default::default()
                         };
                         if let Ok(right_records) = block_on_sync(async {
                             engine
@@ -920,7 +991,7 @@ impl QueryExecutor {
             .map(|(group_key, group_records)| {
                 let mut data = serde_json::Map::new();
                 // Add group by columns
-                for (_i, col) in group_by.iter().enumerate() {
+                for col in group_by.iter() {
                     if let Some(first) = group_records.first() {
                         if let Some(val) = first.data.get(col) {
                             data.insert(col.clone(), val.clone());
@@ -1098,7 +1169,6 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
-                ..Default::default()
             };
 
             let count =
@@ -1167,7 +1237,6 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
-                ..Default::default()
             };
 
             let count = block_on_sync(async {
@@ -1219,7 +1288,6 @@ impl QueryExecutor {
                 updated_at: chrono::Utc::now(),
                 isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
-                ..Default::default()
             };
 
             let count = block_on_sync(async {
@@ -1320,8 +1388,9 @@ impl QueryExecutor {
 
         if let Some(storage_engine) = engines.get(&storage_type) {
             // Try downcast to RelationalEngine for alter operations
-            if let Some(rel) =
-                (*storage_engine).as_any().downcast_ref::<crate::storage::relational::RelationalEngine>()
+            if let Some(rel) = (*storage_engine)
+                .as_any()
+                .downcast_ref::<crate::storage::relational::RelationalEngine>()
             {
                 if let Some(def) = conditions {
                     let def_upper = def.to_uppercase();
@@ -1380,7 +1449,12 @@ impl QueryExecutor {
             "document" => StorageType::Document,
             "relational" => StorageType::Relational,
             "keyvalue" => StorageType::KeyValue,
-            _ => return Err(crate::Error::DatabaseError(format!("Unknown storage engine: {}", engine))),
+            _ => {
+                return Err(crate::Error::DatabaseError(format!(
+                    "Unknown storage engine: {}",
+                    engine
+                )))
+            }
         };
         let storage_engines = self.storage_engines.read().map_err(|_| {
             crate::Error::DatabaseError("Storage engines lock poisoned".to_string())
@@ -1422,15 +1496,30 @@ impl QueryExecutor {
     }
 
     fn execute_update(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
-        self.execute_select(plan)
+        for stage in &plan.stages {
+            if let StageOperation::Update { table, engine } = &stage.operation {
+                return self.execute_update_op(
+                    table,
+                    engine,
+                    &stage.conditions,
+                    &stage.projections,
+                );
+            }
+        }
+        Ok(vec![])
     }
 
     fn execute_delete(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
-        self.execute_select(plan)
+        for stage in &plan.stages {
+            if let StageOperation::Delete { table, engine } = &stage.operation {
+                return self.execute_delete_op(table, engine, &stage.conditions);
+            }
+        }
+        Ok(vec![])
     }
 
     fn execute_ddl(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
-        for stage in &plan.stages {
+        if let Some(stage) = plan.stages.first() {
             return match &stage.operation {
                 StageOperation::Create { table, engine } => {
                     self.execute_create_table(table, engine)

@@ -2,7 +2,7 @@
  * PrimusDB Node.js Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: MIT - See LICENSE file for details
- * Version: 1.3.0-alpha - Added: ER Model features (RETURNING, GROUP BY, FK, cascade truncate)
+ * Version: 1.3.1-alpha - Added: Resource Governor API methods
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -154,6 +154,66 @@ export interface ClusterStatistics {
   avgValidationTimeMs: number;
   activeValidators: number;
   totalValidators: number;
+}
+
+export interface GovernorStatus {
+  enabled: boolean;
+  active_executions: number;
+  total_violations: number;
+  blocked_count: number;
+  throttled_count: number;
+  policies_loaded: number;
+  uptime_seconds: number;
+}
+
+export interface GovernorMetrics {
+  active_executions: number;
+  blocked_total: number;
+  throttled_total: number;
+  policy_violations_total: number;
+  memory_usage_bytes: number;
+  cpu_time_ms: number;
+  ffi_calls_total: number;
+}
+
+export interface GovernorExecution {
+  execution_id: string;
+  namespace: string;
+  workload_type: string;
+  action: string;
+  created_at: string;
+  elapsed_ms: number;
+}
+
+export interface GovernorViolation {
+  id: string;
+  timestamp: string;
+  execution_id: string;
+  namespace: string;
+  workload_type: string;
+  limit_name: string;
+  limit_value: string;
+  usage_value: string;
+  action: string;
+}
+
+export interface GovernorPolicy {
+  name: string;
+  scope: string;
+  scope_name: string;
+  action: string;
+  max_memory_mb: number | null;
+  max_execution_steps: number | null;
+}
+
+export interface GovernorCheckResult {
+  action: string;
+  message: string | null;
+}
+
+export interface GovernorStartResult {
+  execution_id: string;
+  action: string;
 }
 
 /**
@@ -1989,6 +2049,78 @@ export class PrimusDB {
     } catch (error) {
       throw new Error(`Balance domain failed: ${error}`);
     }
+  }
+
+  async governorStartExecution(
+    namespace: string,
+    workloadType: string,
+    user?: string,
+    role?: string
+  ): Promise<GovernorStartResult> {
+    this.checkConnection();
+    const payload: Record<string, unknown> = { namespace, workload_type: workloadType };
+    if (user !== undefined) payload.user = user;
+    if (role !== undefined) payload.role = role;
+    const response = await this.httpClient.post('/api/v1/governor/executions/start', payload);
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor start failed');
+  }
+
+  async governorFinishExecution(executionId: string): Promise<void> {
+    this.checkConnection();
+    const response = await this.httpClient.post(`/api/v1/governor/executions/${executionId}/finish`, {});
+    if (!response.data.success) throw new Error(response.data.error || 'Governor finish failed');
+  }
+
+  async governorCheckLimit(executionId: string, checkType: string, value: number): Promise<GovernorCheckResult> {
+    this.checkConnection();
+    const response = await this.httpClient.post(`/api/v1/governor/executions/${executionId}/check`, {
+      check_type: checkType,
+      value,
+    });
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor check failed');
+  }
+
+  async governorStatus(): Promise<GovernorStatus> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/governor/status');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor status failed');
+  }
+
+  async governorMetrics(): Promise<GovernorMetrics> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/governor/metrics');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor metrics failed');
+  }
+
+  async governorListExecutions(): Promise<GovernorExecution[]> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/governor/executions');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor list executions failed');
+  }
+
+  async governorListViolations(): Promise<GovernorViolation[]> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/governor/violations');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor list violations failed');
+  }
+
+  async governorPolicies(): Promise<GovernorPolicy[]> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/governor/policies');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Governor policies failed');
+  }
+
+  async governorUpdatePolicy(name: string, limits: Record<string, unknown>, action: string, scope: string): Promise<void> {
+    this.checkConnection();
+    const response = await this.httpClient.post('/api/v1/governor/policies/update', { name, limits, action, scope });
+    if (!response.data.success) throw new Error(response.data.error || 'Governor update policy failed');
   }
 
   /**

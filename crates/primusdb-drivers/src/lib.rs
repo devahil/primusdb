@@ -98,6 +98,12 @@ pub struct HTTPDriver {
     connected: bool,
 }
 
+impl Default for HTTPDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HTTPDriver {
     pub fn new() -> Self {
         Self {
@@ -107,6 +113,7 @@ impl HTTPDriver {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_query(
         &self,
         storage_type: StorageType,

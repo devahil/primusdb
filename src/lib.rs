@@ -2,7 +2,7 @@
  * PrimusDB - Hybrid Database Engine
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.3.0-alpha
+ * Version: 1.3.1-alpha
  */
 
 /*!
@@ -167,6 +167,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::governor::engine::GovernorEngine;
+use crate::governor::GovernorConfig;
 use crate::query::UqlEngine;
 
 /// SQL parser module for driver SQL string support
@@ -178,15 +180,17 @@ pub mod ai;
 pub mod api;
 pub mod auth;
 pub mod cache;
+pub mod cdc;
 pub mod cli;
 pub mod cluster;
 pub mod consensus;
 pub mod crypto;
 pub mod drivers;
 pub mod error;
-pub mod metrics;
+pub mod governor;
 pub mod namespace;
-pub mod protocol;
+// pub mod protocol; // Temporarily disabled for compilation
+pub mod migration;
 pub mod query;
 pub mod storage;
 pub mod transaction;
@@ -381,7 +385,7 @@ pub struct PrimusDB {
     /// Consensus engine for distributed operations
     consensus_engine: Arc<dyn consensus::ConsensusEngine>,
     /// Transaction manager for ACID operations
-    pub transaction_manager: Arc<transaction::TransactionManager>,
+    transaction_manager: Arc<transaction::TransactionManager>,
     /// AI/ML engine for analytics and predictions
     ai_engine: Arc<ai::AIEngine>,
     /// UQL engine for unified queries across all storage engines
@@ -400,8 +404,43 @@ pub struct PrimusDB {
     federation_manager: Option<Arc<cluster::FederationManager>>,
     /// Data domain manager for cross-cluster replication domains (optional)
     domain_manager: Option<Arc<cluster::DataDomainManager>>,
-    /// Key-Value storage engine (CouchDB-compatible API)
-    kv_engine: Option<Arc<storage::keyvalue::KeyValueEngine>>,
+    /// Pending engine lifecycle operations scheduled via the API
+    /// Applied on next server restart.
+    pending_engine_changes: Mutex<Vec<EngineLifecycleOp>>,
+    /// Resource governor engine for policy enforcement
+    governor_engine: Arc<GovernorEngine>,
+    /// Active transactions started via the API (keyed by transaction ID)
+    active_transactions: Mutex<HashMap<String, transaction::Transaction>>,
+}
+
+/// Runtime engine lifecycle operation recorded via the API.
+/// Changes take effect on the next server restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EngineLifecycleOp {
+    Add {
+        engine_type: String,
+    },
+    Remove {
+        engine_type: String,
+        drop_data: bool,
+    },
+    Upgrade {
+        engine_type: String,
+    },
+}
+
+impl std::fmt::Display for EngineLifecycleOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineLifecycleOp::Add { engine_type } => write!(f, "add engine '{}'", engine_type),
+            EngineLifecycleOp::Remove { engine_type, .. } => {
+                write!(f, "remove engine '{}'", engine_type)
+            }
+            EngineLifecycleOp::Upgrade { engine_type } => {
+                write!(f, "upgrade engine '{}'", engine_type)
+            }
+        }
+    }
 }
 
 /// Types of storage engines available in PrimusDB
@@ -433,12 +472,15 @@ impl std::str::FromStr for StorageType {
     type Err = crate::Error;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "Columnar" | "columnar" => Ok(StorageType::Columnar),
-            "Vector" | "vector" => Ok(StorageType::Vector),
-            "Document" | "document" => Ok(StorageType::Document),
-            "Relational" | "relational" => Ok(StorageType::Relational),
-            "KeyValue" | "keyvalue" | "kv" => Ok(StorageType::KeyValue),
-            _ => Err(crate::Error::ValidationError(format!("Unknown storage type: {}", s))),
+            "Columnar" => Ok(StorageType::Columnar),
+            "Vector" => Ok(StorageType::Vector),
+            "Document" => Ok(StorageType::Document),
+            "Relational" => Ok(StorageType::Relational),
+            "KeyValue" => Ok(StorageType::KeyValue),
+            _ => Err(crate::Error::ValidationError(format!(
+                "Unknown storage type: {}",
+                s
+            ))),
         }
     }
 }
@@ -598,16 +640,12 @@ impl PrimusDB {
             StorageType::Relational,
             Arc::new(storage::relational::RelationalEngine::new(&config_clone)?),
         );
-
-        let crypto_manager = Arc::new(crypto::CryptoManager::new(&config_clone.security)?);
-        let kv_crypto = Arc::new(std::sync::Mutex::new(crypto::CryptoManager::new(&config_clone.security)?));
-        let kv_engine_raw = storage::keyvalue::KeyValueEngine::new(&config_clone, Some(kv_crypto))?;
-        let kv_engine: Arc<storage::keyvalue::KeyValueEngine> = Arc::new(kv_engine_raw);
         storage_engines.insert(
             StorageType::KeyValue,
-            kv_engine.clone() as Arc<dyn storage::StorageEngine>,
+            Arc::new(storage::keyvalue::KeyValueEngine::new(&config_clone)?),
         );
 
+        let crypto_manager = Arc::new(crypto::CryptoManager::new(&config_clone.security)?);
         let consensus_engine = Arc::new(consensus::HyperledgerStyleConsensus::new(
             &config_clone,
             storage_engines.clone(),
@@ -629,10 +667,16 @@ impl PrimusDB {
             Arc::new(RwLock::new(uql_engines)),
         ));
 
-        let bind_addr: std::net::SocketAddr = format!("{}:{}", config_clone.network.bind_address, config_clone.network.port)
-            .parse()
-            .unwrap_or_else(|_| "127.0.0.1:8080".parse().unwrap());
-        let cluster_manager = Arc::new(RwLock::new(cluster::ClusterManager::new(&config_clone.cluster, bind_addr)?));
+        let bind_addr: std::net::SocketAddr = format!(
+            "{}:{}",
+            config_clone.network.bind_address, config_clone.network.port
+        )
+        .parse()
+        .unwrap_or_else(|_| "127.0.0.1:8080".parse().unwrap());
+        let cluster_manager = Arc::new(RwLock::new(cluster::ClusterManager::new(
+            &config_clone.cluster,
+            bind_addr,
+        )?));
         let sync_config = cluster::sync::SyncConfig {
             replication_factor: 3,
             sync_interval_ms: 100,
@@ -658,9 +702,9 @@ impl PrimusDB {
             sync_db,
         )?);
 
-        let cluster_auth = Arc::new(tokio::sync::RwLock::new(
-            auth::ClusterAuthManager::new(auth::ClusterAuthConfig::default())?,
-        ));
+        let cluster_auth = Arc::new(tokio::sync::RwLock::new(auth::ClusterAuthManager::new(
+            auth::ClusterAuthConfig::default(),
+        )?));
 
         let namespace_controller = Arc::new(namespace::NamespaceController::new(&config)?);
         if config.namespaces.enabled {
@@ -672,7 +716,7 @@ impl PrimusDB {
             let fed = Arc::new(cluster::FederationManager::new(fed_config.clone()));
             let dm = Arc::new(
                 cluster::DataDomainManager::new(config.cluster.node_id.clone())
-                    .with_federation(fed.clone())
+                    .with_federation(fed.clone()),
             );
             (Some(fed), Some(dm))
         } else {
@@ -694,7 +738,9 @@ impl PrimusDB {
             producer_handle: Mutex::new(None),
             federation_manager,
             domain_manager,
-            kv_engine: Some(kv_engine),
+            pending_engine_changes: Mutex::new(Vec::new()),
+            governor_engine: Arc::new(GovernorEngine::new(GovernorConfig::default())),
+            active_transactions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -714,52 +760,55 @@ impl PrimusDB {
         self.domain_manager = Some(mgr);
     }
 
-    pub fn get_kv_engine(&self) -> Option<Arc<storage::keyvalue::KeyValueEngine>> {
-        self.kv_engine.clone()
+    /// Schedule adding a new storage engine via the lifecycle API.
+    ///
+    /// Records the operation — the change takes effect on next server restart.
+    /// Returns the list of all pending lifecycle operations.
+    pub fn schedule_engine_add(&self, engine_type: &str) -> Result<Vec<EngineLifecycleOp>> {
+        let mut pending = self.pending_engine_changes.lock().unwrap();
+        pending.push(EngineLifecycleOp::Add {
+            engine_type: engine_type.to_string(),
+        });
+        Ok(pending.clone())
     }
 
-    /// After a successful write, replicate the data to every DataDomain whose
-    /// storage type + table match.  Failures are only logged — the original
-    /// write has already succeeded.
-    async fn replicate_write_to_domains(
+    /// Schedule removing a storage engine via the lifecycle API.
+    ///
+    /// If `drop_data` is true the engine data directory will also be removed
+    /// on next restart. Returns all pending operations.
+    pub fn schedule_engine_remove(
         &self,
-        storage_type: &str,
-        table: &str,
-        data: &serde_json::Value,
-    ) {
-        let Some(ref dm) = self.domain_manager else { return };
-        if data.is_null() { return; }
+        engine_type: &str,
+        drop_data: bool,
+    ) -> Result<Vec<EngineLifecycleOp>> {
+        let mut pending = self.pending_engine_changes.lock().unwrap();
+        pending.push(EngineLifecycleOp::Remove {
+            engine_type: engine_type.to_string(),
+            drop_data,
+        });
+        Ok(pending.clone())
+    }
 
-        let domains = dm.find_matching_domains(storage_type, table).await;
-        if domains.is_empty() { return; }
+    /// Schedule upgrading a storage engine via the lifecycle API.
+    ///
+    /// Records the operation — the upgrade takes effect on next restart
+    /// (the server re-initialises the engine from the updated binary).
+    pub fn schedule_engine_upgrade(&self, engine_type: &str) -> Result<Vec<EngineLifecycleOp>> {
+        let mut pending = self.pending_engine_changes.lock().unwrap();
+        pending.push(EngineLifecycleOp::Upgrade {
+            engine_type: engine_type.to_string(),
+        });
+        Ok(pending.clone())
+    }
 
-        let cluster_id = &self.config.cluster.node_id;
-        let data_bytes = match serde_json::to_vec(data) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Failed to serialize data for cross-cluster replication: {e}");
-                return;
-            }
-        };
+    /// Return all currently scheduled (un-applied) lifecycle operations.
+    pub fn pending_engine_changes(&self) -> Vec<EngineLifecycleOp> {
+        self.pending_engine_changes.lock().unwrap().clone()
+    }
 
-        for domain_name in &domains {
-            let key = extract_record_key(data);
-            let start = std::time::Instant::now();
-            match dm
-                .replicate_cross_cluster(domain_name, storage_type, table, &key, &data_bytes, cluster_id)
-                .await
-            {
-                Ok(_) => {
-                    crate::metrics::record_replication(start.elapsed().as_secs_f64());
-                }
-                Err(e) => {
-                    crate::metrics::record_replication_failure();
-                    tracing::warn!(
-                        "Cross-cluster replication failed for domain '{domain_name}': {e}"
-                    );
-                }
-            }
-        }
+    /// Access the resource governor engine
+    pub fn governor_engine(&self) -> &GovernorEngine {
+        &self.governor_engine
     }
 
     /// Start federation background tasks (announce + heartbeat loops).
@@ -769,35 +818,21 @@ impl PrimusDB {
             let address = self.config.network.bind_address.clone();
             let port = self.config.network.port;
             let node_id = self.config.cluster.node_id.clone();
-            fed.clone().start_background_tasks(address, port, node_id, 1).await;
-
-            // Periodic Prometheus metrics update (every 30 s)
-            let fed_metrics = self.federation_manager.clone();
-            let dm_metrics = self.domain_manager.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    let online = match &fed_metrics {
-                        Some(f) => f.get_cluster_count().await,
-                        None => 0,
-                    };
-                    let total = match &fed_metrics {
-                        Some(f) => f.members.read().await.len(),
-                        None => 0,
-                    };
-                    let domain_count = match &dm_metrics {
-                        Some(d) => d.domains.read().await.len(),
-                        None => 0,
-                    };
-                    crate::metrics::update_federation_metrics(online, total, domain_count);
-                }
-            });
+            fed.clone()
+                .start_background_tasks(address, port, node_id, 1)
+                .await;
         }
     }
 
     pub fn config(&self) -> &PrimusDBConfig {
         &self.config
+    }
+
+    pub fn storage_engine(
+        &self,
+        engine_type: StorageType,
+    ) -> Option<Arc<dyn storage::StorageEngine>> {
+        self.storage_engines.get(&engine_type).cloned()
     }
 
     pub fn uql_engine(&self) -> Arc<UqlEngine> {
@@ -881,28 +916,24 @@ impl PrimusDB {
         let data = query.data.clone().unwrap_or(serde_json::Value::Null);
         let op_id = format!("op_{}", transaction.operations.len());
 
-        transaction.operations.push(transaction::TransactionOperation {
-            id: op_id,
-            operation_type: transaction::OperationType::Insert,
-            table: query.table.clone(),
-            data: data.clone(),
-            conditions: None,
-            before_image: None,
-            after_image: Some(data.clone()),
-            executed: true,
-            rollback_data: Some(data.clone()),
-            storage_type: query.storage_type.to_string(),
-        });
+        transaction
+            .operations
+            .push(transaction::TransactionOperation {
+                id: op_id,
+                operation_type: transaction::OperationType::Insert,
+                table: query.table.clone(),
+                data: data.clone(),
+                conditions: None,
+                before_image: None,
+                after_image: Some(data.clone()),
+                executed: true,
+                rollback_data: Some(data.clone()),
+                storage_type: query.storage_type.to_string(),
+            });
 
-        let count = engine.insert(query.table.as_str(), &data, transaction).await?;
-
-        // Cross-cluster replication
-        self.replicate_write_to_domains(
-            &query.storage_type.to_string(),
-            &query.table,
-            &data,
-        ).await;
-
+        let count = engine
+            .insert(query.table.as_str(), &data, transaction)
+            .await?;
         Ok(QueryResult::Insert(count))
     }
 
@@ -946,18 +977,20 @@ impl PrimusDB {
         let data = query.data.clone().unwrap_or(serde_json::Value::Null);
         let op_id = format!("op_{}", transaction.operations.len());
 
-        transaction.operations.push(transaction::TransactionOperation {
-            id: op_id,
-            operation_type: transaction::OperationType::Update,
-            table: query.table.clone(),
-            data: data.clone(),
-            conditions: query.conditions.clone(),
-            before_image: Some(serde_json::json!(before_records)),
-            after_image: None,
-            executed: true,
-            rollback_data: Some(serde_json::json!(before_records)),
-            storage_type: query.storage_type.to_string(),
-        });
+        transaction
+            .operations
+            .push(transaction::TransactionOperation {
+                id: op_id,
+                operation_type: transaction::OperationType::Update,
+                table: query.table.clone(),
+                data: data.clone(),
+                conditions: query.conditions.clone(),
+                before_image: Some(serde_json::json!(before_records)),
+                after_image: None,
+                executed: true,
+                rollback_data: Some(serde_json::json!(before_records)),
+                storage_type: query.storage_type.to_string(),
+            });
 
         let count = engine
             .update(
@@ -967,14 +1000,6 @@ impl PrimusDB {
                 transaction,
             )
             .await?;
-
-        // Cross-cluster replication
-        self.replicate_write_to_domains(
-            &query.storage_type.to_string(),
-            &query.table,
-            &data,
-        ).await;
-
         Ok(QueryResult::Update(count))
     }
 
@@ -998,30 +1023,24 @@ impl PrimusDB {
 
         let op_id = format!("op_{}", transaction.operations.len());
 
-        transaction.operations.push(transaction::TransactionOperation {
-            id: op_id,
-            operation_type: transaction::OperationType::Delete,
-            table: query.table.clone(),
-            data: serde_json::Value::Null,
-            conditions: query.conditions.clone(),
-            before_image: Some(serde_json::json!(deleted_records)),
-            after_image: None,
-            executed: true,
-            rollback_data: Some(serde_json::json!(deleted_records)),
-            storage_type: query.storage_type.to_string(),
-        });
+        transaction
+            .operations
+            .push(transaction::TransactionOperation {
+                id: op_id,
+                operation_type: transaction::OperationType::Delete,
+                table: query.table.clone(),
+                data: serde_json::Value::Null,
+                conditions: query.conditions.clone(),
+                before_image: Some(serde_json::json!(deleted_records)),
+                after_image: None,
+                executed: true,
+                rollback_data: Some(serde_json::json!(deleted_records)),
+                storage_type: query.storage_type.to_string(),
+            });
 
         let count = engine
             .delete(query.table.as_str(), query.conditions.as_ref(), transaction)
             .await?;
-
-        // Cross-cluster replication (send deleted records)
-        self.replicate_write_to_domains(
-            &query.storage_type.to_string(),
-            &query.table,
-            &serde_json::json!(deleted_records),
-        ).await;
-
         Ok(QueryResult::Delete(count))
     }
 
@@ -1231,7 +1250,10 @@ impl PrimusDB {
         view.referenced_tables = view
             .referenced_tables
             .into_iter()
-            .map(|t| self.resolve_table_name(&t, query.namespace.as_deref()).unwrap_or(t))
+            .map(|t| {
+                self.resolve_table_name(&t, query.namespace.as_deref())
+                    .unwrap_or(t)
+            })
             .collect();
         rel.create_view(
             &view.name,
@@ -1309,9 +1331,7 @@ impl PrimusDB {
     async fn handle_info_schema_columns(&self, query: &Query) -> Result<QueryResult> {
         let rel = self.get_relational_engine(query.storage_type)?;
         let table = self.resolve_table_name(&query.table, query.namespace.as_deref())?;
-        Ok(Self::conv_rq(
-            rel.get_information_schema_columns(&table)?,
-        ))
+        Ok(Self::conv_rq(rel.get_information_schema_columns(&table)?))
     }
 
     async fn handle_info_schema_constraints(&self, query: &Query) -> Result<QueryResult> {
@@ -1328,6 +1348,65 @@ impl PrimusDB {
             .await
     }
 
+    pub async fn begin_transaction(&self) -> Result<String> {
+        let tx = self.transaction_manager.begin_transaction().await?;
+        let tx_id = tx.id.clone();
+        self.active_transactions
+            .lock()
+            .unwrap()
+            .insert(tx_id.clone(), tx);
+        Ok(tx_id)
+    }
+
+    pub async fn commit_transaction(&self, transaction_id: String) -> Result<()> {
+        let tx = self
+            .active_transactions
+            .lock()
+            .unwrap()
+            .remove(&transaction_id)
+            .ok_or_else(|| {
+                Error::ValidationError(format!(
+                    "Transaction '{}' not found or already completed",
+                    transaction_id
+                ))
+            })?;
+        self.transaction_manager.commit_transaction(tx).await
+    }
+
+    pub async fn create_table(&self, storage_type: StorageType, table: &str) -> Result<()> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        let schema = storage::Schema {
+            fields: vec![],
+            indexes: vec![],
+            constraints: vec![],
+        };
+        engine.create_table(table, &schema).await
+    }
+
+    pub async fn drop_table(&self, storage_type: StorageType, table: &str) -> Result<()> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        engine.drop_table(table).await
+    }
+
+    pub async fn table_info(
+        &self,
+        storage_type: StorageType,
+        table: &str,
+    ) -> Result<storage::TableInfo> {
+        let engine = self
+            .storage_engines
+            .get(&storage_type)
+            .ok_or_else(|| Error::StorageEngineNotFound(storage_type))?;
+        engine.table_info(table).await
+    }
+
+    #[allow(clippy::await_holding_lock)]
     pub async fn get_cluster_status(&self) -> Result<cluster::ClusterStatusInfo> {
         let cm = self.cluster_manager.read().unwrap();
         Ok(cm.get_cluster_status().await)
@@ -1341,9 +1420,7 @@ impl PrimusDB {
         self.sync_coordinator.clone()
     }
 
-    pub fn get_cluster_auth(
-        &self,
-    ) -> Arc<tokio::sync::RwLock<auth::ClusterAuthManager>> {
+    pub fn get_cluster_auth(&self) -> Arc<tokio::sync::RwLock<auth::ClusterAuthManager>> {
         self.cluster_auth.clone()
     }
 
@@ -1381,11 +1458,7 @@ impl PrimusDB {
         }
     }
 
-    fn resolve_table_name(
-        &self,
-        table: &str,
-        namespace: Option<&str>,
-    ) -> Result<String> {
+    fn resolve_table_name(&self, table: &str, namespace: Option<&str>) -> Result<String> {
         match namespace {
             Some(ns_path) if !ns_path.is_empty() && self.config.namespaces.enabled => {
                 let ns = self
@@ -1512,27 +1585,4 @@ impl PrimusDB {
         });
         *self.producer_handle.lock().unwrap() = Some(handle);
     }
-}
-
-/// Try to extract a short record identifier from a JSON value for use as
-/// the replication key.  Checks common fields (`_id`, `id`, `key`, `name`);
-/// falls back to a truncated UUID.
-fn extract_record_key(data: &serde_json::Value) -> String {
-    if let Some(obj) = data.as_object() {
-        for field in &["_id", "id", "key", "name", "email", "product_id", "customer_id"] {
-            if let Some(val) = obj.get(*field) {
-                if let Some(s) = val.as_str() {
-                    return s.to_string();
-                }
-                if val.is_number() {
-                    return format!("{}", val);
-                }
-            }
-        }
-    } else if let Some(arr) = data.as_array() {
-        if let Some(first) = arr.first() {
-            return extract_record_key(first);
-        }
-    }
-    uuid::Uuid::new_v4().to_string()
 }

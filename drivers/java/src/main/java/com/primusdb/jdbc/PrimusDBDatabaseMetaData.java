@@ -305,12 +305,6 @@ public class PrimusDBDatabaseMetaData implements DatabaseMetaData {
     @Override public int getSQLStateType() throws SQLException { return sqlStateSQL; }
     @Override public boolean locatorsUpdateCopy() throws SQLException { return false; }
     @Override public boolean supportsStatementPooling() throws SQLException { return false; }
-    @Override public String getCatalogSeparator() throws SQLException { return "."; }
-    @Override public String getCatalogTerm() throws SQLException { return "catalog"; }
-    @Override public boolean isCatalogAtStart() throws SQLException { return true; }
-    @Override public String getProcedureTerm() throws SQLException { return "procedure"; }
-    @Override public String getSchemaTerm() throws SQLException { return "schema"; }
-    @Override public boolean supportsTransactionIsolationLevel(int level) throws SQLException { return level == java.sql.Connection.TRANSACTION_NONE; }
     @Override public RowIdLifetime getRowIdLifetime() throws SQLException { return RowIdLifetime.ROWID_UNSUPPORTED; }
     @Override public ResultSet getSchemas(String catalog, String schemaPattern) throws SQLException { return null; }
     @Override public boolean supportsStoredFunctionsUsingCallSyntax() throws SQLException { return false; }
@@ -320,6 +314,12 @@ public class PrimusDBDatabaseMetaData implements DatabaseMetaData {
     @Override public ResultSet getFunctionColumns(String catalog, String schemaPattern, String functionNamePattern, String columnNamePattern) throws SQLException { return null; }
     @Override public ResultSet getPseudoColumns(String catalog, String schemaPattern, String tableNamePattern, String columnNamePattern) throws SQLException { return null; }
     @Override public boolean generatedKeyAlwaysReturned() throws SQLException { return false; }
+    @Override public String getCatalogSeparator() throws SQLException { return "."; }
+    @Override public boolean isCatalogAtStart() throws SQLException { return true; }
+    @Override public String getCatalogTerm() throws SQLException { return "catalog"; }
+    @Override public String getProcedureTerm() throws SQLException { return "procedure"; }
+    @Override public String getSchemaTerm() throws SQLException { return "schema"; }
+    @Override public boolean supportsTransactionIsolationLevel(int level) throws SQLException { return level == Connection.TRANSACTION_NONE; }
     @Override public <T> T unwrap(Class<T> iface) throws SQLException { throw new SQLException("Not supported"); }
     @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return false; }
 }

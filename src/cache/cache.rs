@@ -306,6 +306,11 @@ impl MemoryCache {
         Ok(results)
     }
 
+    /// Get all keys currently stored in the cache
+    pub fn keys(&self) -> Vec<String> {
+        self.storage.read().unwrap().keys().cloned().collect()
+    }
+
     /// Get cache statistics
     pub fn get_statistics(&self) -> CacheStatistics {
         let mut stats = self.stats.read().unwrap().clone();

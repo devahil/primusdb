@@ -85,17 +85,12 @@ pub struct ClusterConfig {
     pub discovery_servers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum CompressionType {
     None,
+    #[default]
     Lz4,
     Zstd,
-}
-
-impl Default for CompressionType {
-    fn default() -> Self {
-        CompressionType::Lz4
-    }
 }
 
 /// Error type

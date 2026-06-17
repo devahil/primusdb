@@ -1,14 +1,14 @@
-use crate::Result;
 use crate::cluster::rpc::{
-    RpcClient, RpcMessage, RaftAppendRequest, RaftAppendResponse, RaftVoteRequest,
-    RaftVoteResponse, InstallSnapshotRequest,
+    InstallSnapshotRequest, RaftAppendRequest, RaftAppendResponse, RaftVoteRequest,
+    RaftVoteResponse, RpcClient, RpcMessage,
 };
 use crate::cluster::sync::consensus::{ConsensusConfig, ConsensusRole, ConsensusState, LogEntry};
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 pub type LogStore = Vec<Vec<u8>>;
@@ -157,7 +157,7 @@ impl RaftNode {
             }
         }
 
-        let quorum = (peers.len() + 1) / 2 + 1;
+        let quorum = peers.len().div_ceil(2) + 1;
         if votes_received >= quorum {
             info!(
                 "Elected leader for term {} with {}/{} votes",
@@ -208,7 +208,7 @@ impl RaftNode {
         let term = self.state.read().await.term;
         let peers = self.peers.read().await;
         let log = self.log.read().await;
-        let prev_log_index = if index > 1 { index - 1 } else { 0 };
+        let prev_log_index = index.saturating_sub(1);
         let prev_log_term = if prev_log_index > 0 && (prev_log_index as usize) <= log.len() {
             let prev: Vec<u8> = log[prev_log_index as usize - 1].clone();
             drop(log);
@@ -231,20 +231,17 @@ impl RaftNode {
                 entries: vec![entry_data.clone()],
                 leader_commit: *self.commit_index.read().await,
             });
-            match client.send(&req).await {
-                Ok(RpcMessage::AppendEntriesResponse(resp)) => {
-                    if resp.success {
-                        successes += 1;
-                    } else if resp.term > term {
-                        self.become_follower(resp.term, None).await;
-                        return Err(crate::Error::ClusterError("Stale leader".into()));
-                    }
+            if let Ok(RpcMessage::AppendEntriesResponse(resp)) = client.send(&req).await {
+                if resp.success {
+                    successes += 1;
+                } else if resp.term > term {
+                    self.become_follower(resp.term, None).await;
+                    return Err(crate::Error::ClusterError("Stale leader".into()));
                 }
-                _ => {}
             }
         }
 
-        let quorum = (peers.len() + 1) / 2 + 1;
+        let quorum = peers.len().div_ceil(2) + 1;
         if successes >= quorum {
             let mut ci = self.commit_index.write().await;
             *ci = (*ci).max(index);
@@ -273,10 +270,7 @@ impl RaftNode {
         Ok(())
     }
 
-    pub async fn handle_request_vote(
-        &self,
-        req: &RaftVoteRequest,
-    ) -> Result<RaftVoteResponse> {
+    pub async fn handle_request_vote(&self, req: &RaftVoteRequest) -> Result<RaftVoteResponse> {
         let mut state = self.state.write().await;
         let last_log_index = self.last_log_index().await;
         let last_log_term = self.last_log_term().await;
@@ -378,10 +372,7 @@ impl RaftNode {
         })
     }
 
-    pub async fn handle_install_snapshot(
-        &self,
-        req: &InstallSnapshotRequest,
-    ) -> Result<()> {
+    pub async fn handle_install_snapshot(&self, req: &InstallSnapshotRequest) -> Result<()> {
         {
             let mut state = self.state.write().await;
             if req.term >= state.term {

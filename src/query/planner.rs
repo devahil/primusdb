@@ -110,7 +110,7 @@ impl QueryPlanner {
 
     fn plan_select(&self, parsed: &ParsedQuery, plan: &mut QueryPlan) -> Result<()> {
         // Scan stage for each table
-        for (_idx, table) in parsed.source_tables.iter().enumerate() {
+        for table in parsed.source_tables.iter() {
             let engine = plan
                 .engine_routing
                 .get(table)
@@ -411,8 +411,7 @@ impl QueryPlanner {
 
         // Track which source tables each join depends on
         // The first join depends on all source tables; subsequent joins chain from previous
-        let mut join_idx = 0;
-        for join in &parsed.joins {
+        for (join_idx, join) in parsed.joins.iter().enumerate() {
             let left_engine = plan
                 .engine_routing
                 .get(&join.table)
@@ -495,8 +494,6 @@ impl QueryPlanner {
 
             // Register the joined result as a pseudo-table for chaining
             table_to_stage.insert(format!("__join_{}", join_idx), plan.stages.len() - 1);
-
-            join_idx += 1;
         }
 
         Ok(())

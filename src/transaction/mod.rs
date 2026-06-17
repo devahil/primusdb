@@ -292,7 +292,6 @@ use crate::storage::StorageEngine;
 use crate::StorageType;
 use crate::{consensus::ConsensusEngine, PrimusDBConfig, Result};
 use async_trait::async_trait;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -333,93 +332,6 @@ pub struct Transaction {
     pub isolation_level: IsolationLevel,
     /// Timeout in milliseconds (0 = no timeout)
     pub timeout_ms: u64,
-    /// Optional Ed25519 signature over the serialized transaction payload
-    pub signature: Option<String>,
-    /// Optional public key (hex-encoded) that produced the signature
-    pub public_key: Option<String>,
-}
-
-impl Default for Transaction {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            operations: Vec::new(),
-            status: TransactionStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            isolation_level: IsolationLevel::ReadCommitted,
-            timeout_ms: 0,
-            signature: None,
-            public_key: None,
-        }
-    }
-}
-
-impl Transaction {
-    /// Sign the transaction payload with an Ed25519 signing key.
-    ///
-    /// Serializes the core transaction fields (id, operations, status, created_at,
-    /// isolation_level, timeout_ms) as canonical JSON and signs them.
-    pub fn sign(&mut self, signing_key: &SigningKey) -> crate::Result<()> {
-        let payload = self.serializable_payload();
-        let signature = signing_key.sign(&payload);
-        self.signature = Some(hex::encode(signature.to_bytes()));
-        self.public_key = Some(hex::encode(signing_key.verifying_key().to_bytes()));
-        Ok(())
-    }
-
-    /// Verify the Ed25519 signature on this transaction.
-    ///
-    /// Returns `true` if the signature is valid for the serialized payload
-    /// under the stored `public_key`, or `false` if either is missing.
-    pub fn verify(&self) -> crate::Result<bool> {
-        let sig_hex = match &self.signature {
-            Some(s) => s,
-            None => return Ok(false),
-        };
-        let pk_hex = match &self.public_key {
-            Some(pk) => pk,
-            None => return Ok(false),
-        };
-        let sig_bytes =
-            hex::decode(sig_hex).map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let pk_bytes =
-            hex::decode(pk_hex).map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-
-        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes)
-            .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-        let pk = VerifyingKey::from_bytes(
-            &pk_bytes.try_into().map_err(|_| {
-                crate::Error::CryptoError("invalid public key length".to_string())
-            })?,
-        )
-        .map_err(|e| crate::Error::CryptoError(e.to_string()))?;
-
-        let payload = self.serializable_payload();
-        Ok(pk.verify(&payload, &sig).is_ok())
-    }
-
-    /// Canonical serialization used for signing and verification.
-    fn serializable_payload(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            id: &'a str,
-            operations: &'a [TransactionOperation],
-            status: &'a TransactionStatus,
-            created_at: &'a chrono::DateTime<chrono::Utc>,
-            isolation_level: &'a IsolationLevel,
-            timeout_ms: u64,
-        }
-        let p = Payload {
-            id: &self.id,
-            operations: &self.operations,
-            status: &self.status,
-            created_at: &self.created_at,
-            isolation_level: &self.isolation_level,
-            timeout_ms: self.timeout_ms,
-        };
-        serde_json::to_vec(&p).unwrap_or_default()
-    }
 }
 
 /// Individual operation within a transaction
@@ -465,10 +377,9 @@ pub struct TransactionOperation {
 ///
 /// Represents the current status of a transaction throughout its lifecycle.
 /// Used for monitoring, recovery, and coordination purposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransactionStatus {
     /// Transaction is actively executing operations
-    #[default]
     Active,
     /// Transaction has been successfully committed
     Committed,
@@ -484,15 +395,14 @@ pub enum TransactionStatus {
 ///
 /// Defines how concurrent transactions interact and what anomalies are prevented.
 /// Higher isolation levels provide stronger consistency guarantees but reduce performance.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IsolationLevel {
-    /// Prevents dirty reads but allows non-repeatable reads and phantom reads
-    /// Good balance between performance and consistency
-    #[default]
-    ReadCommitted,
     /// Lowest isolation level - allows dirty reads, non-repeatable reads, and phantom reads
     /// Best performance but weakest consistency guarantees
     ReadUncommitted,
+    /// Prevents dirty reads but allows non-repeatable reads and phantom reads
+    /// Good balance between performance and consistency
+    ReadCommitted,
     /// Prevents dirty reads and non-repeatable reads but allows phantom reads
     /// Stronger consistency for applications requiring consistent reads
     RepeatableRead,
@@ -537,7 +447,8 @@ pub struct Savepoint {
 
 pub struct TransactionManager {
     config: PrimusDBConfig,
-    active_transactions: std::sync::RwLock<HashMap<String, Transaction>>,
+    #[allow(dead_code)]
+    active_transactions: HashMap<String, Transaction>,
     transaction_log: Arc<dyn TransactionLogStore>,
     consensus_engine: Arc<dyn ConsensusEngine>,
     journal: Arc<JournalManager>,
@@ -593,17 +504,13 @@ impl TransactionManager {
                 })
                 .collect(),
             timestamp: transaction.created_at,
-            signature: transaction
-                .signature
-                .clone()
-                .unwrap_or_else(|| {
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(format!("{:?}", transaction).as_bytes());
-                    let hash = hasher.finalize();
-                    format!("sha256:{:x}", hash)
-                }),
-            public_key: transaction.public_key.clone().unwrap_or_default(),
+            signature: {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(format!("{:?}", transaction).as_bytes());
+                let hash = hasher.finalize();
+                format!("sha256:{:x}", hash)
+            },
             proposer: self.config.cluster.node_id.clone(),
         }
     }
@@ -617,7 +524,7 @@ impl TransactionManager {
 
         Ok(TransactionManager {
             config: config.clone(),
-            active_transactions: std::sync::RwLock::new(HashMap::new()),
+            active_transactions: HashMap::new(),
             transaction_log,
             consensus_engine,
             journal,
@@ -639,7 +546,6 @@ impl TransactionManager {
             updated_at: chrono::Utc::now(),
             isolation_level: IsolationLevel::ReadCommitted,
             timeout_ms: 30000, // 30 seconds default
-            ..Default::default()
         };
 
         // Log transaction start
@@ -648,7 +554,7 @@ impl TransactionManager {
             transaction_id: transaction_id.clone(),
             operation: TransactionOperation {
                 id: format!("begin_{}", transaction_id),
-                operation_type: OperationType::Insert, // Placeholder
+                operation_type: OperationType::Create,
                 table: "SYSTEM".to_string(),
                 data: serde_json::json!({"action": "BEGIN"}),
                 conditions: None,
@@ -663,11 +569,6 @@ impl TransactionManager {
         };
 
         self.transaction_log.append_log(&log_entry).await?;
-
-        // Store in active transactions
-        if let Ok(mut active) = self.active_transactions.write() {
-            active.insert(transaction_id.clone(), transaction.clone());
-        }
 
         Ok(transaction)
     }
@@ -706,11 +607,6 @@ impl TransactionManager {
             // Flush journal to ensure durability
             self.journal.flush().await?;
 
-            // Remove from active transactions
-            if let Ok(mut active) = self.active_transactions.write() {
-                active.remove(&transaction.id);
-            }
-
             info!("Transaction {} committed successfully", transaction.id);
             Ok(())
         } else {
@@ -726,15 +622,22 @@ impl TransactionManager {
         warn!("Rolling back transaction: {}", transaction_id);
 
         let logs = self.transaction_log.get_logs(&transaction_id).await?;
-        let dummy_tx = Transaction {
+
+        // Collect the actual operations that were executed, for rollback context
+        let rollback_ops: Vec<TransactionOperation> = logs
+            .iter()
+            .filter(|l| l.operation.executed)
+            .map(|l| l.operation.clone())
+            .collect();
+
+        let rollback_tx = Transaction {
             id: format!("rollback_{}", transaction_id),
-            operations: vec![],
-            status: TransactionStatus::Committed,
+            operations: rollback_ops,
+            status: TransactionStatus::RolledBack,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
-            isolation_level: IsolationLevel::Serializable,
-            timeout_ms: 0,
-            ..Default::default()
+            isolation_level: IsolationLevel::ReadCommitted,
+            timeout_ms: 30000,
         };
 
         for log in logs.iter().rev() {
@@ -742,11 +645,18 @@ impl TransactionManager {
                 continue;
             }
 
-            let storage_type: StorageType = log.operation.storage_type.parse().unwrap_or(StorageType::Document);
+            let storage_type: StorageType = log
+                .operation
+                .storage_type
+                .parse()
+                .unwrap_or(StorageType::Document);
             let engine = match self.engines.get(&storage_type) {
                 Some(e) => e,
                 None => {
-                    warn!("Engine not found for storage type {:?}, skipping rollback", storage_type);
+                    warn!(
+                        "Engine not found for storage type {:?}, skipping rollback",
+                        storage_type
+                    );
                     continue;
                 }
             };
@@ -754,7 +664,9 @@ impl TransactionManager {
             match log.operation.operation_type {
                 OperationType::Insert => {
                     if let Some(ref data) = log.operation.rollback_data {
-                        engine.delete(&log.operation.table, Some(data), &dummy_tx).await?;
+                        engine
+                            .delete(&log.operation.table, Some(data), &rollback_tx)
+                            .await?;
                         info!("Rolled back INSERT on {}", log.operation.table);
                     }
                 }
@@ -762,9 +674,17 @@ impl TransactionManager {
                     if let Some(ref before) = log.operation.before_image {
                         if let Some(records) = before.as_array() {
                             for record in records {
-                                if let Some(id_val) = record.get("_id").or_else(|| record.get("id")) {
+                                if let Some(id_val) = record.get("_id").or_else(|| record.get("id"))
+                                {
                                     let ident = serde_json::json!({"_id": id_val});
-                                    engine.update(&log.operation.table, Some(&ident), record, &dummy_tx).await?;
+                                    engine
+                                        .update(
+                                            &log.operation.table,
+                                            Some(&ident),
+                                            record,
+                                            &rollback_tx,
+                                        )
+                                        .await?;
                                 }
                             }
                         }
@@ -775,7 +695,9 @@ impl TransactionManager {
                     if let Some(ref deleted) = log.operation.rollback_data {
                         if let Some(records) = deleted.as_array() {
                             for record in records {
-                                engine.insert(&log.operation.table, record, &dummy_tx).await?;
+                                engine
+                                    .insert(&log.operation.table, record, &rollback_tx)
+                                    .await?;
                             }
                         }
                         info!("Rolled back DELETE on {}", log.operation.table);
@@ -794,15 +716,18 @@ impl TransactionManager {
         transaction_id: &str,
         savepoint_id: &str,
     ) -> Result<Savepoint> {
+        let logs = self.transaction_log.get_logs(transaction_id).await?;
+        let executed_count = logs.iter().filter(|l| l.operation.executed).count();
+
         info!(
-            "Creating savepoint {} for transaction {}",
-            savepoint_id, transaction_id
+            "Creating savepoint {} for transaction {} ({} operations)",
+            savepoint_id, transaction_id, executed_count
         );
 
         Ok(Savepoint {
             id: savepoint_id.to_string(),
             transaction_id: transaction_id.to_string(),
-            operations_count: 0,
+            operations_count: executed_count,
             timestamp: chrono::Utc::now(),
         })
     }
@@ -815,6 +740,90 @@ impl TransactionManager {
         warn!(
             "Rolling back transaction {} to savepoint {}",
             transaction_id, savepoint_id
+        );
+
+        let logs = self.transaction_log.get_logs(transaction_id).await?;
+
+        // Reverse-execute operations performed after the savepoint
+        let mut rolled_back = 0u64;
+        for log in logs.iter().rev() {
+            if !log.operation.executed {
+                continue;
+            }
+
+            let storage_type: StorageType = log
+                .operation
+                .storage_type
+                .parse()
+                .unwrap_or(StorageType::Document);
+            let engine = match self.engines.get(&storage_type) {
+                Some(e) => e,
+                None => {
+                    warn!("Engine not found for type {:?}, skipping", storage_type);
+                    continue;
+                }
+            };
+
+            let rollback_ctx = Transaction {
+                id: format!("rollback_sp_{}", transaction_id),
+                operations: vec![log.operation.clone()],
+                status: TransactionStatus::RolledBack,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                isolation_level: IsolationLevel::ReadCommitted,
+                timeout_ms: 30000,
+            };
+
+            match log.operation.operation_type {
+                OperationType::Insert => {
+                    if let Some(ref data) = log.operation.rollback_data {
+                        engine
+                            .delete(&log.operation.table, Some(data), &rollback_ctx)
+                            .await?;
+                        rolled_back += 1;
+                    }
+                }
+                OperationType::Update => {
+                    if let Some(ref before) = log.operation.before_image {
+                        if let Some(records) = before.as_array() {
+                            for record in records {
+                                let ident = record
+                                    .get("_id")
+                                    .or_else(|| record.get("id"))
+                                    .map(|v| serde_json::json!({"_id": v}))
+                                    .unwrap_or_default();
+                                engine
+                                    .update(
+                                        &log.operation.table,
+                                        Some(&ident),
+                                        record,
+                                        &rollback_ctx,
+                                    )
+                                    .await?;
+                                rolled_back += 1;
+                            }
+                        }
+                    }
+                }
+                OperationType::Delete => {
+                    if let Some(ref deleted) = log.operation.rollback_data {
+                        if let Some(records) = deleted.as_array() {
+                            for record in records {
+                                engine
+                                    .insert(&log.operation.table, record, &rollback_ctx)
+                                    .await?;
+                                rolled_back += 1;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        info!(
+            "Rolled back {} operations for transaction {} to savepoint {}",
+            rolled_back, transaction_id, savepoint_id
         );
         Ok(())
     }
@@ -880,7 +889,6 @@ impl JournalManager {
                 updated_at,
                 isolation_level: IsolationLevel::ReadCommitted,
                 timeout_ms: 0,
-                ..Default::default()
             });
         }
 

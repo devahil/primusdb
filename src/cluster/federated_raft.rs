@@ -1,6 +1,6 @@
 use crate::cluster::rpc::{
-    FedRaftAppendRequest, FedRaftAppendResponse, FedRaftLogEntry,
-    FedRaftVoteRequest, FedRaftVoteResponse, RpcMessage,
+    FedRaftAppendRequest, FedRaftAppendResponse, FedRaftLogEntry, FedRaftVoteRequest,
+    FedRaftVoteResponse, RpcMessage,
 };
 use crate::Result;
 use serde::{Deserialize, Serialize};
@@ -99,16 +99,20 @@ impl FederatedRaft {
         state.voted_for = Some(self.config.cluster_id.clone());
         state.leader_id = None;
         *self.election_reset.write().await = now_ms();
-        debug!("FedRaft: {} became candidate for term {}",
-            self.config.cluster_id, state.current_term);
+        debug!(
+            "FedRaft: {} became candidate for term {}",
+            self.config.cluster_id, state.current_term
+        );
     }
 
     pub async fn become_leader(&self) {
         let mut state = self.state.write().await;
         state.role = FedRaftRole::Leader;
         state.leader_id = Some(self.config.cluster_id.clone());
-        info!("FedRaft: {} became leader for term {}",
-            self.config.cluster_id, state.current_term);
+        info!(
+            "FedRaft: {} became leader for term {}",
+            self.config.cluster_id, state.current_term
+        );
     }
 
     pub async fn start_election(&self, peers: &[FedRaftPeer]) {
@@ -136,9 +140,11 @@ impl FederatedRaft {
         for peer in peers {
             if let Ok(Some(RpcMessage::FedRaftVoteResponse(resp))) =
                 crate::cluster::federation::connect_and_send(
-                    &peer.address, peer.port,
+                    &peer.address,
+                    peer.port,
                     RpcMessage::FedRaftVoteRequest(req.clone()),
-                ).await
+                )
+                .await
             {
                 if resp.vote_granted {
                     votes += 1;
@@ -155,7 +161,10 @@ impl FederatedRaft {
             self.send_heartbeats(peers).await;
         } else {
             self.become_follower(term, None).await;
-            warn!("FedRaft: election lost ({} votes, needed {})", votes, quorum);
+            warn!(
+                "FedRaft: election lost ({} votes, needed {})",
+                votes, quorum
+            );
         }
     }
 
@@ -184,9 +193,8 @@ impl FederatedRaft {
 
         for peer in peers {
             let rpc_msg = RpcMessage::FedRaftAppendEntries(req.clone());
-            let _ = crate::cluster::federation::connect_and_send(
-                &peer.address, peer.port, rpc_msg,
-            ).await;
+            let _ = crate::cluster::federation::connect_and_send(&peer.address, peer.port, rpc_msg)
+                .await;
         }
     }
 
@@ -198,9 +206,7 @@ impl FederatedRaft {
     ) -> Result<bool> {
         let state = self.state.read().await;
         if state.role != FedRaftRole::Leader {
-            return Err(crate::Error::ClusterError(
-                "FedRaft: not the leader".into()
-            ));
+            return Err(crate::Error::ClusterError("FedRaft: not the leader".into()));
         }
         let term = state.current_term;
         drop(state);
@@ -238,9 +244,11 @@ impl FederatedRaft {
         for peer in peers {
             if let Ok(Some(RpcMessage::FedRaftAppendEntriesResponse(resp))) =
                 crate::cluster::federation::connect_and_send(
-                    &peer.address, peer.port,
+                    &peer.address,
+                    peer.port,
                     RpcMessage::FedRaftAppendEntries(req.clone()),
-                ).await
+                )
+                .await
             {
                 if resp.success {
                     successes += 1;
@@ -248,7 +256,7 @@ impl FederatedRaft {
                 if resp.term > term {
                     self.become_follower(resp.term, None).await;
                     return Err(crate::Error::ClusterError(
-                        "FedRaft: stale leader detected".into()
+                        "FedRaft: stale leader detected".into(),
                     ));
                 }
             }
@@ -258,20 +266,21 @@ impl FederatedRaft {
             let mut state = self.state.write().await;
             state.commit_index = index;
             state.last_applied = index;
-            info!("FedRaft: committed entry {} (term {}, op={:?})",
-                index, term, op_type);
+            info!(
+                "FedRaft: committed entry {} (term {}, op={:?})",
+                index, term, op_type
+            );
             Ok(true)
         } else {
-            warn!("FedRaft: proposal failed ({} successes, needed {})",
-                successes, quorum);
+            warn!(
+                "FedRaft: proposal failed ({} successes, needed {})",
+                successes, quorum
+            );
             Ok(false)
         }
     }
 
-    pub async fn handle_vote_request(
-        &self,
-        req: &FedRaftVoteRequest,
-    ) -> FedRaftVoteResponse {
+    pub async fn handle_vote_request(&self, req: &FedRaftVoteRequest) -> FedRaftVoteResponse {
         let mut state = self.state.write().await;
 
         if req.term > state.current_term {
@@ -308,10 +317,7 @@ impl FederatedRaft {
         }
     }
 
-    pub async fn handle_append_entries(
-        &self,
-        req: &FedRaftAppendRequest,
-    ) -> FedRaftAppendResponse {
+    pub async fn handle_append_entries(&self, req: &FedRaftAppendRequest) -> FedRaftAppendResponse {
         let mut state = self.state.write().await;
 
         if req.term >= state.current_term {

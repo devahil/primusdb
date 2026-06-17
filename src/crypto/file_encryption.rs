@@ -144,7 +144,7 @@ impl FileEncryptionManager {
         let mut key = [0u8; 32];
 
         let mut hasher = Sha256::new();
-        hasher.update(&self.master_key);
+        hasher.update(self.master_key);
         hasher.update(salt);
         let result = hasher.finalize();
         key.copy_from_slice(&result[..32]);

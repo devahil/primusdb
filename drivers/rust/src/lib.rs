@@ -2,14 +2,17 @@
  * PrimusDB Rust Native Driver
  * Copyright (c) 2024-2026 PrimusDB Team <devahil@gmail.com>
  * License: GPL-3.0 - See LICENSE file for details
- * Version: 1.3.0-alpha - ER Model parity, cascade truncate, RETURNING, GROUP BY
+ * Version: 1.3.1-alpha - ER Model parity, cascade truncate, RETURNING, GROUP BY
  */
 
 use primusdb::cluster::ClusterStatusInfo;
+use primusdb::governor::{EnforcementAction, GovernorMetricsSnapshot, GovernorStatus, WorkloadType};
 use primusdb::query::{QueryLanguage, UqlQuery};
 use primusdb::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Native Rust driver for PrimusDB
 pub struct NativeDriver {
@@ -638,7 +641,11 @@ impl NativeDriver {
     }
 
     /// Get route decision for a shard key (in embedded mode, returns self)
-    pub async fn route_request(&self, shard_key: Option<&str>, _preferred_nodes: Option<&[String]>) -> Result<serde_json::Value> {
+    pub async fn route_request(
+        &self,
+        shard_key: Option<&str>,
+        _preferred_nodes: Option<&[String]>,
+    ) -> Result<serde_json::Value> {
         let status = self.db.get_cluster_status().await?;
         Ok(serde_json::json!({
             "node_id": status.node_id,
@@ -649,10 +656,71 @@ impl NativeDriver {
         }))
     }
 
+    // ==================== Resource Governor ====================
+
+    /// Start a new governor-tracked execution
+    pub async fn governor_start_execution(
+        &self,
+        namespace: String,
+        workload_type: WorkloadType,
+        user: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<String> {
+        let handle = self
+            .db
+            .governor_engine()
+            .start_execution(namespace, workload_type, user, role)
+            .await;
+        Ok(handle.id().to_string())
+    }
+
+    /// Finish a governor-tracked execution
+    pub async fn governor_finish_execution(&self, execution_id: Uuid) -> Result<()> {
+        self.db
+            .governor_engine()
+            .finish_execution(execution_id)
+            .await;
+        Ok(())
+    }
+
+    /// Check if the governor engine is enabled
+    pub async fn governor_is_enabled(&self) -> Result<bool> {
+        Ok(self.db.governor_engine().is_enabled().await)
+    }
+
+    /// Get the current governor status
+    pub async fn governor_status(&self) -> Result<GovernorStatus> {
+        Ok(self.db.governor_engine().status().await)
+    }
+
+    /// Get a metrics snapshot from the governor
+    pub async fn governor_metrics(&self) -> Result<GovernorMetricsSnapshot> {
+        Ok(self.db.governor_engine().metrics_snapshot().await)
+    }
+
+    /// Check a resource limit against the governor
+    pub async fn governor_check_limit(
+        &self,
+        execution_id: Uuid,
+        field: &str,
+        current: u64,
+        limit: Option<u64>,
+    ) -> Result<EnforcementAction> {
+        self.db
+            .governor_engine()
+            .check_limit(execution_id, field, current, limit)
+            .await
+            .map_err(|e| primusdb::Error::GovernorError(e))
+    }
+
     // ==================== UQL / SQL Execution ====================
 
     /// Execute a raw SQL query through the UQL engine
-    pub fn execute_sql(&self, sql: &str, params: Option<HashMap<String, serde_json::Value>>) -> Result<primusdb::query::UqlResult> {
+    pub fn execute_sql(
+        &self,
+        sql: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<primusdb::query::UqlResult> {
         let uql_query = UqlQuery {
             query: sql.to_string(),
             query_type: QueryLanguage::Sql,
@@ -790,6 +858,7 @@ impl NativeDriver {
     }
 
     /// Select data with GROUP BY, HAVING, DISTINCT, ORDER BY support
+    #[allow(clippy::too_many_arguments)] // public API: 9 params for flexible query building
     pub async fn select_grouped(
         &self,
         _storage_type: StorageType,
@@ -867,6 +936,7 @@ impl NativeDriver {
     }
 
     /// Add a foreign key constraint to a relational table
+    #[allow(clippy::too_many_arguments)] // public API: 8 params for FK definition
     pub async fn add_foreign_key(
         &self,
         storage_type: StorageType,
@@ -899,7 +969,171 @@ impl NativeDriver {
         table: &str,
         constraint_name: &str,
     ) -> Result<serde_json::Value> {
-        self.drop_constraint(storage_type, table, constraint_name).await
+        self.drop_constraint(storage_type, table, constraint_name)
+            .await
+    }
+}
+
+/// Error type for the Rust native driver
+#[derive(Debug)]
+pub enum DriverError {
+    ExecutionError(String),
+}
+
+impl fmt::Display for DriverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DriverError::ExecutionError(msg) => write!(f, "Driver execution error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for DriverError {}
+
+impl From<primusdb::Error> for DriverError {
+    fn from(e: primusdb::Error) -> Self {
+        DriverError::ExecutionError(e.to_string())
+    }
+}
+
+impl From<serde_json::Error> for DriverError {
+    fn from(e: serde_json::Error) -> Self {
+        DriverError::ExecutionError(e.to_string())
+    }
+}
+
+/// High-level client wrapping Arc<PrimusDB>
+pub struct PrimusDBClient {
+    db: Arc<PrimusDB>,
+}
+
+impl PrimusDBClient {
+    /// Create a new client, wrapping a PrimusDB instance in Arc
+    pub fn new(db: PrimusDB) -> Self {
+        Self { db: Arc::new(db) }
+    }
+
+    /// Create a client from an existing Arc<PrimusDB>
+    pub fn from_arc(db: Arc<PrimusDB>) -> Self {
+        Self { db }
+    }
+
+    /// Access the underlying PrimusDB
+    pub fn db(&self) -> &Arc<PrimusDB> {
+        &self.db
+    }
+
+    /// Create a prepared statement from a SQL template with `?` placeholders.
+    /// Requires the client to be wrapped in `Arc` so the statement can share the reference.
+    pub fn prepare(self: &Arc<Self>, sql: &str) -> PreparedStatement {
+        PreparedStatement::new(self.clone(), sql)
+    }
+}
+
+impl Clone for PrimusDBClient {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+        }
+    }
+}
+
+/// A prepared SQL statement with bound parameters
+pub struct PreparedStatement {
+    sql: String,
+    params: Vec<serde_json::Value>,
+    client: Arc<PrimusDBClient>,
+}
+
+impl PreparedStatement {
+    /// Create a new prepared statement bound to a client reference
+    pub fn new(client: Arc<PrimusDBClient>, sql: &str) -> Self {
+        Self {
+            sql: sql.to_string(),
+            params: Vec::new(),
+            client,
+        }
+    }
+
+    /// Bind an integer parameter at the given index (0-based)
+    pub fn set_int(&mut self, index: usize, value: i64) {
+        self.ensure_capacity(index);
+        self.params[index] = serde_json::json!(value);
+    }
+
+    /// Bind a string parameter at the given index (0-based)
+    pub fn set_string(&mut self, index: usize, value: &str) {
+        self.ensure_capacity(index);
+        self.params[index] = serde_json::json!(value);
+    }
+
+    /// Bind a double parameter at the given index (0-based)
+    pub fn set_double(&mut self, index: usize, value: f64) {
+        self.ensure_capacity(index);
+        self.params[index] = serde_json::json!(value);
+    }
+
+    /// Bind a boolean parameter at the given index (0-based)
+    pub fn set_bool(&mut self, index: usize, value: bool) {
+        self.ensure_capacity(index);
+        self.params[index] = serde_json::json!(value);
+    }
+
+    /// Bind a NULL parameter at the given index (0-based)
+    pub fn set_null(&mut self, index: usize) {
+        self.ensure_capacity(index);
+        self.params[index] = serde_json::Value::Null;
+    }
+
+    /// Ensure the params vector is large enough for the given index
+    fn ensure_capacity(&mut self, index: usize) {
+        if index >= self.params.len() {
+            self.params.resize(index + 1, serde_json::Value::Null);
+        }
+    }
+
+    /// Replace `?` placeholders with bound parameter values
+    pub fn build_sql(&self) -> String {
+        let mut result = self.sql.clone();
+        let mut param_idx = 0;
+        while let Some(pos) = result.find('?') {
+            if param_idx >= self.params.len() {
+                break;
+            }
+            let value = &self.params[param_idx];
+            let replacement = match value {
+                serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                serde_json::Value::Null => "NULL".to_string(),
+                _ => value.to_string(),
+            };
+            result.replace_range(pos..pos + 1, &replacement);
+            param_idx += 1;
+        }
+        result
+    }
+
+    /// Execute the prepared statement, returning the full result as JSON
+    pub fn execute(&self) -> std::result::Result<serde_json::Value, DriverError> {
+        let sql = self.build_sql();
+        let uql_query = primusdb::query::UqlQuery {
+            query: sql,
+            query_type: primusdb::query::QueryLanguage::Sql,
+            parameters: None,
+        };
+        let result = self.client.db.uql_execute_query(&uql_query)?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Execute the prepared statement and return the resulting records
+    pub fn execute_query(&self) -> std::result::Result<Vec<serde_json::Value>, DriverError> {
+        let sql = self.build_sql();
+        let uql_query = primusdb::query::UqlQuery {
+            query: sql,
+            query_type: primusdb::query::QueryLanguage::Sql,
+            parameters: None,
+        };
+        let result = self.client.db.uql_execute_query(&uql_query)?;
+        Ok(result.records.into_iter().map(|r| r.data).collect())
     }
 }
 
@@ -1175,7 +1409,11 @@ impl Database {
         self.driver.cluster_nodes().await
     }
 
-    pub async fn route_request(&self, shard_key: Option<&str>, preferred_nodes: Option<&[String]>) -> Result<serde_json::Value> {
+    pub async fn route_request(
+        &self,
+        shard_key: Option<&str>,
+        preferred_nodes: Option<&[String]>,
+    ) -> Result<serde_json::Value> {
         self.driver.route_request(shard_key, preferred_nodes).await
     }
 }
@@ -1264,5 +1502,36 @@ mod tests {
 
         // Just test that it builds successfully
         assert!(driver.db().get_cluster_status().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_prepared_statement_bind_and_execute() {
+        let (driver, _temp_dir) = setup_test_db().await;
+        let client = Arc::new(PrimusDBClient::from_arc(driver.db().clone()));
+
+        // Test SQL construction and parameter binding
+        let mut stmt = client.prepare("SELECT * FROM users WHERE age > ? AND name = ?");
+        stmt.set_int(0, 21);
+        stmt.set_string(1, "Alice");
+        let sql = stmt.build_sql();
+        assert_eq!(sql, "SELECT * FROM users WHERE age > 21 AND name = 'Alice'");
+
+        // Test all parameter types
+        let mut stmt2 = client.prepare("INSERT INTO items VALUES (?, ?, ?, ?)");
+        stmt2.set_int(0, 42);
+        stmt2.set_string(1, "hello");
+        stmt2.set_double(2, 3.14);
+        stmt2.set_bool(3, true);
+        let sql2 = stmt2.build_sql();
+        assert_eq!(sql2, "INSERT INTO items VALUES (42, 'hello', 3.14, true)");
+
+        // Test NULL binding
+        let mut stmt3 = client.prepare("UPDATE t SET x = ? WHERE id = ?");
+        stmt3.set_null(0);
+        stmt3.set_int(1, 99);
+        let sql3 = stmt3.build_sql();
+        assert_eq!(sql3, "UPDATE t SET x = NULL WHERE id = 99");
+
+        println!("✓ PreparedStatement bind and execute test passed");
     }
 }

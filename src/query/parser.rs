@@ -130,7 +130,7 @@ impl fmt::Display for Token {
 pub struct Tokenizer {
     input: Vec<char>,
     pos: usize,
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::vec_box)]
     nested_queries: Vec<Box<ParsedQuery>>,
     #[allow(dead_code)]
     window_functions: Vec<WindowFunctionColumn>,
@@ -445,6 +445,7 @@ impl Tokenizer {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    #[allow(clippy::vec_box)]
     nested_queries: Vec<Box<ParsedQuery>>,
     window_functions: Vec<WindowFunctionColumn>,
 }
@@ -1427,9 +1428,9 @@ impl Parser {
             }
             Token::Rename => {
                 self.advance();
-                if self.peek_is(&Token::Identifier("to".to_string())) {
-                    self.advance();
-                } else if self.peek_is(&Token::Identifier("TO".to_string())) {
+                if self.peek_is(&Token::Identifier("to".to_string()))
+                    || self.peek_is(&Token::Identifier("TO".to_string()))
+                {
                     self.advance();
                 }
                 let new_name = self.parse_identifier()?;
@@ -1616,7 +1617,12 @@ impl Parser {
                 Token::Gte => ">=",
                 Token::Lt => "<",
                 Token::Lte => "<=",
-                _ => unreachable!(),
+                other => {
+                    return Err(crate::Error::ValidationError(format!(
+                        "Expected comparison operator, found {:?}",
+                        other
+                    )))
+                }
             };
             let right = self.parse_additive()?;
             return Ok(format!("{} {} {}", left, op_str, right));
@@ -1644,7 +1650,12 @@ impl Parser {
                 Token::Star => "*",
                 Token::Slash => "/",
                 Token::Percent => "%",
-                _ => unreachable!(),
+                other => {
+                    return Err(crate::Error::ValidationError(format!(
+                        "Expected arithmetic operator, found {:?}",
+                        other
+                    )))
+                }
             };
             let right = self.parse_unary()?;
             left = format!("({} {} {})", left, op_str, right);
@@ -1841,7 +1852,10 @@ impl Parser {
                 if let Token::Number(s) = n {
                     Ok(s)
                 } else {
-                    unreachable!()
+                    Err(crate::Error::ValidationError(format!(
+                        "Expected number, found {:?}",
+                        n
+                    )))
                 }
             }
             Token::String(_) => {
@@ -1849,7 +1863,10 @@ impl Parser {
                 if let Token::String(s) = s {
                     Ok(format!("'{}'", s))
                 } else {
-                    unreachable!()
+                    Err(crate::Error::ValidationError(format!(
+                        "Expected string, found {:?}",
+                        s
+                    )))
                 }
             }
             Token::Null => {
@@ -1920,10 +1937,695 @@ impl Parser {
     }
 }
 
+// ── sqlparser-rs Adapter ────────────────────────────────────────
+// Replaces the ad-hoc SQL parser with sqlparser-rs for standard SQL.
+// Falls back to the old parser for edge cases or extended syntax.
+
+use sqlparser::ast::{
+    self, Expr, GroupByExpr, ObjectName, ObjectType, Select, SelectItem, SetExpr, Statement,
+    TableFactor, TableWithJoins, Value,
+};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser as SqlParser;
+
+fn parse_with_sqlparser(sql: &str) -> Result<ParsedQuery> {
+    let dialect = GenericDialect {};
+    let statements = SqlParser::parse_sql(&dialect, sql)
+        .map_err(|e| crate::Error::ValidationError(format!("SQL parse error: {}", e)))?;
+
+    if statements.len() != 1 {
+        return Err(crate::Error::ValidationError(
+            "Only single SQL statements are supported".to_string(),
+        ));
+    }
+
+    let stmt = statements.into_iter().next().unwrap();
+    convert_statement(stmt)
+}
+
+fn convert_statement(stmt: Statement) -> Result<ParsedQuery> {
+    match stmt {
+        Statement::Query(query) => convert_query(*query),
+        Statement::Insert(insert) => convert_insert(insert),
+        Statement::Update {
+            table,
+            assignments,
+            selection,
+            ..
+        } => convert_update(table, assignments, selection),
+        Statement::Delete(delete) => convert_delete(delete),
+        Statement::CreateTable(create) => convert_create_table(create),
+        Statement::Drop {
+            object_type, names, ..
+        } => convert_drop(object_type, names),
+        _ => Err(crate::Error::ValidationError(
+            "Unsupported SQL statement type".to_string(),
+        )),
+    }
+}
+
+fn convert_query(query: sqlparser::ast::Query) -> Result<ParsedQuery> {
+    let mut ctes = Vec::new();
+    if let Some(ref with) = query.with {
+        for cte in &with.cte_tables {
+            let cte_query = convert_query(*cte.query.clone())?;
+            let columns = if cte.alias.columns.is_empty() {
+                None
+            } else {
+                Some(cte.alias.columns.iter().map(|c| c.value.clone()).collect())
+            };
+            ctes.push(CTEDefinition {
+                name: cte.alias.name.value.clone(),
+                columns,
+                query: Box::new(cte_query),
+            });
+        }
+    }
+
+    let order_by: Vec<OrderByClause> = query
+        .order_by
+        .as_ref()
+        .map(|o| o.exprs.iter().map(order_by_to_clause).collect())
+        .unwrap_or_default();
+
+    let limit = query
+        .limit
+        .as_ref()
+        .and_then(expr_to_u64)
+        .map(|v| v as usize);
+    let offset = query
+        .offset
+        .as_ref()
+        .and_then(|o| expr_to_u64(&o.value))
+        .map(|v| v as usize);
+
+    match &*query.body {
+        SetExpr::Select(select) => {
+            let mut pq = convert_select(select.as_ref().clone())?;
+            pq.ctes = ctes;
+            pq.order_by = order_by;
+            pq.limit = limit;
+            pq.offset = offset;
+            Ok(pq)
+        }
+        SetExpr::SetOperation { .. } => Err(crate::Error::ValidationError(
+            "Set operations (UNION/INTERSECT/EXCEPT) not yet supported".to_string(),
+        )),
+        _ => Err(crate::Error::ValidationError(
+            "Unsupported query expression".to_string(),
+        )),
+    }
+}
+
+fn expr_to_u64(expr: &Expr) -> Option<u64> {
+    match expr {
+        Expr::Value(Value::Number(n, _)) => n.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn group_by_to_strings(gb: &GroupByExpr) -> Vec<String> {
+    match gb {
+        GroupByExpr::Expressions(exprs, _) => exprs.iter().map(expr_to_string).collect(),
+        GroupByExpr::All(_) => vec!["ALL".to_string()],
+    }
+}
+
+fn has_window_function(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(f) => f.over.is_some(),
+        Expr::Nested(e) => has_window_function(e),
+        Expr::BinaryOp { left, right, .. } => {
+            has_window_function(left) || has_window_function(right)
+        }
+        Expr::UnaryOp { expr: e, .. } => has_window_function(e),
+        _ => false,
+    }
+}
+
+fn convert_select(select: Select) -> Result<ParsedQuery> {
+    // Window functions are not yet supported by the sqlparser adapter —
+    // fall back to the old parser for these.
+    for item in &select.projection {
+        if let SelectItem::UnnamedExpr(expr) = item {
+            if has_window_function(expr) {
+                return Err(crate::Error::ValidationError(
+                    "Window functions not supported in sqlparser adapter".to_string(),
+                ));
+            }
+        }
+        if let SelectItem::ExprWithAlias { expr, .. } = item {
+            if has_window_function(expr) {
+                return Err(crate::Error::ValidationError(
+                    "Window functions not supported in sqlparser adapter".to_string(),
+                ));
+            }
+        }
+    }
+
+    let distinct = select.distinct.is_some();
+
+    let mut source_tables = Vec::new();
+    let mut joins = Vec::new();
+
+    for table_with_joins in &select.from {
+        if let TableFactor::Table { name, .. } = &table_with_joins.relation {
+            source_tables.push(object_name_to_string(name));
+        }
+
+        for join in &table_with_joins.joins {
+            let join_table = match &join.relation {
+                TableFactor::Table { name, .. } => object_name_to_string(name),
+                _ => continue,
+            };
+
+            let join_type = match &join.join_operator {
+                ast::JoinOperator::Inner(_) => JoinType::Inner,
+                ast::JoinOperator::LeftOuter(_) => JoinType::Left,
+                ast::JoinOperator::RightOuter(_) => JoinType::Right,
+                ast::JoinOperator::FullOuter(_) => JoinType::Full,
+                ast::JoinOperator::CrossJoin | ast::JoinOperator::CrossApply => JoinType::Cross,
+                _ => JoinType::Inner,
+            };
+
+            let condition = match &join.join_operator {
+                ast::JoinOperator::Inner(c)
+                | ast::JoinOperator::LeftOuter(c)
+                | ast::JoinOperator::RightOuter(c)
+                | ast::JoinOperator::FullOuter(c) => match c {
+                    ast::JoinConstraint::On(expr) => expr_to_string(expr),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+
+            joins.push(JoinClause {
+                join_type,
+                table: join_table,
+                condition,
+                engine_hint: None,
+            });
+        }
+    }
+
+    let columns: Vec<String> = select
+        .projection
+        .iter()
+        .map(select_item_to_string)
+        .collect();
+    let conditions = select.selection.as_ref().map(expr_to_string);
+    let group_by = group_by_to_strings(&select.group_by);
+    let having = select.having.as_ref().map(expr_to_string);
+    let aggregations = extract_aggregations_from_columns(&columns);
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Select,
+        source_tables,
+        target_table: None,
+        columns,
+        conditions,
+        joins,
+        order_by: vec![],
+        group_by,
+        aggregations,
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct,
+        having,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+fn convert_insert(insert: sqlparser::ast::Insert) -> Result<ParsedQuery> {
+    let target_table = Some(object_name_to_string(&insert.table_name));
+
+    let columns: Vec<String> = insert.columns.iter().map(|c| c.value.clone()).collect();
+
+    let conditions = insert
+        .source
+        .as_ref()
+        .map(|source| match source.body.as_ref() {
+            SetExpr::Values(values) => {
+                let rows: Vec<String> = values
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(expr_to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .collect();
+                rows.join("; ")
+            }
+            _ => "(SELECT ...)".to_string(),
+        });
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Insert,
+        source_tables: vec![],
+        target_table,
+        columns,
+        conditions,
+        joins: vec![],
+        order_by: vec![],
+        group_by: vec![],
+        aggregations: vec![],
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct: false,
+        having: None,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+fn convert_update(
+    table: TableWithJoins,
+    assignments: Vec<ast::Assignment>,
+    selection: Option<Expr>,
+) -> Result<ParsedQuery> {
+    let target_table = match &table.relation {
+        TableFactor::Table { name, .. } => Some(object_name_to_string(name)),
+        _ => {
+            return Err(crate::Error::ValidationError(
+                "UPDATE target must be a table".to_string(),
+            ))
+        }
+    };
+
+    let set_clauses: Vec<String> = assignments
+        .iter()
+        .map(|a| {
+            let col = format!("{}", a.target);
+            let val = expr_to_string(&a.value);
+            format!("{} = {}", col, val)
+        })
+        .collect();
+
+    let conditions = selection.as_ref().map(expr_to_string);
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Update,
+        source_tables: vec![],
+        target_table,
+        columns: set_clauses,
+        conditions,
+        joins: vec![],
+        order_by: vec![],
+        group_by: vec![],
+        aggregations: vec![],
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct: false,
+        having: None,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+fn convert_delete(delete: ast::Delete) -> Result<ParsedQuery> {
+    let target_table = if !delete.tables.is_empty() {
+        Some(object_name_to_string(&delete.tables[0]))
+    } else {
+        let tables = match &delete.from {
+            ast::FromTable::WithFromKeyword(tables) | ast::FromTable::WithoutKeyword(tables) => {
+                tables
+            }
+        };
+        tables.first().and_then(|t| match &t.relation {
+            TableFactor::Table { name, .. } => Some(object_name_to_string(name)),
+            _ => None,
+        })
+    };
+
+    let conditions = delete.selection.as_ref().map(expr_to_string);
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Delete,
+        source_tables: vec![],
+        target_table,
+        columns: vec![],
+        conditions,
+        joins: vec![],
+        order_by: vec![],
+        group_by: vec![],
+        aggregations: vec![],
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct: false,
+        having: None,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+fn convert_create_table(create: ast::CreateTable) -> Result<ParsedQuery> {
+    let target_table = Some(object_name_to_string(&create.name));
+
+    let columns: Vec<String> = create
+        .columns
+        .iter()
+        .map(|col| format!("{} {}", col.name.value, col.data_type))
+        .collect();
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Create,
+        source_tables: vec![],
+        target_table,
+        columns,
+        conditions: None,
+        joins: vec![],
+        order_by: vec![],
+        group_by: vec![],
+        aggregations: vec![],
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct: false,
+        having: None,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+fn convert_drop(object_type: ObjectType, names: Vec<ObjectName>) -> Result<ParsedQuery> {
+    if !matches!(object_type, ObjectType::Table) {
+        return Err(crate::Error::ValidationError(format!(
+            "Unsupported DROP object type: {:?}",
+            object_type
+        )));
+    }
+
+    let target_table = names.first().map(object_name_to_string);
+
+    Ok(ParsedQuery {
+        operation: QueryOperation::Drop,
+        source_tables: vec![],
+        target_table,
+        columns: vec![],
+        conditions: None,
+        joins: vec![],
+        order_by: vec![],
+        group_by: vec![],
+        aggregations: vec![],
+        limit: None,
+        offset: None,
+        set_operations: vec![],
+        nested_queries: vec![],
+        distinct: false,
+        having: None,
+        ctes: vec![],
+        window_functions: vec![],
+    })
+}
+
+// ── Expression / Item conversion helpers ─────────────────────────
+
+fn expr_to_string(expr: &Expr) -> String {
+    match expr {
+        Expr::Identifier(ident) => ident.value.clone(),
+        Expr::CompoundIdentifier(idents) => idents
+            .iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>()
+            .join("."),
+        Expr::Wildcard => "*".to_string(),
+        Expr::QualifiedWildcard(ids) => format!(
+            "{}.*",
+            ids.0
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<_>>()
+                .join(".")
+        ),
+        Expr::Value(v) => value_to_string(v),
+        Expr::BinaryOp { left, op, right } => {
+            format!("{} {} {}", expr_to_string(left), op, expr_to_string(right))
+        }
+        Expr::UnaryOp { op, expr: e } => {
+            format!("{}{}", op, expr_to_string(e))
+        }
+        Expr::Nested(inner) => format!("({})", expr_to_string(inner)),
+        Expr::Function(func) => {
+            let args = function_args_to_strings(&func.args);
+            format!("{}({})", func.name, args.join(", "))
+        }
+        Expr::InList {
+            expr: e,
+            list,
+            negated,
+        } => {
+            let items: Vec<String> = list.iter().map(expr_to_string).collect();
+            if *negated {
+                format!("{} NOT IN ({})", expr_to_string(e), items.join(", "))
+            } else {
+                format!("{} IN ({})", expr_to_string(e), items.join(", "))
+            }
+        }
+        Expr::InSubquery {
+            expr: e,
+            subquery: _,
+            negated,
+        } => {
+            if *negated {
+                format!("{} NOT IN (SELECT ...)", expr_to_string(e))
+            } else {
+                format!("{} IN (SELECT ...)", expr_to_string(e))
+            }
+        }
+        Expr::Between {
+            expr: e,
+            negated,
+            low,
+            high,
+        } => {
+            if *negated {
+                format!(
+                    "{} NOT BETWEEN {} AND {}",
+                    expr_to_string(e),
+                    expr_to_string(low),
+                    expr_to_string(high)
+                )
+            } else {
+                format!(
+                    "{} BETWEEN {} AND {}",
+                    expr_to_string(e),
+                    expr_to_string(low),
+                    expr_to_string(high)
+                )
+            }
+        }
+        Expr::Like {
+            expr: e,
+            negated,
+            pattern,
+            ..
+        } => {
+            if *negated {
+                format!("{} NOT LIKE {}", expr_to_string(e), expr_to_string(pattern))
+            } else {
+                format!("{} LIKE {}", expr_to_string(e), expr_to_string(pattern))
+            }
+        }
+        Expr::ILike {
+            expr: e,
+            negated,
+            pattern,
+            ..
+        } => {
+            if *negated {
+                format!(
+                    "{} NOT ILIKE {}",
+                    expr_to_string(e),
+                    expr_to_string(pattern)
+                )
+            } else {
+                format!("{} ILIKE {}", expr_to_string(e), expr_to_string(pattern))
+            }
+        }
+        Expr::IsNull(e) => format!("{} IS NULL", expr_to_string(e)),
+        Expr::IsNotNull(e) => format!("{} IS NOT NULL", expr_to_string(e)),
+        Expr::InUnnest { expr: e, .. } => format!("{} IN (SELECT ...)", expr_to_string(e)),
+        Expr::Subquery(_) => "(SELECT ...)".to_string(),
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            let mut out = "CASE".to_string();
+            if let Some(op) = operand {
+                out.push(' ');
+                out.push_str(&expr_to_string(op));
+            }
+            for (cond, res) in conditions.iter().zip(results.iter()) {
+                out.push_str(&format!(
+                    " WHEN {} THEN {}",
+                    expr_to_string(cond),
+                    expr_to_string(res)
+                ));
+            }
+            if let Some(els) = else_result {
+                out.push_str(&format!(" ELSE {}", expr_to_string(els)));
+            }
+            out.push_str(" END");
+            out
+        }
+        Expr::Cast {
+            expr: e, data_type, ..
+        } => {
+            format!("CAST({} AS {})", expr_to_string(e), data_type)
+        }
+        Expr::Extract { field, expr: e, .. } => {
+            format!("EXTRACT({} FROM {})", field, expr_to_string(e))
+        }
+        Expr::Exists { subquery, .. } => {
+            let _ = subquery;
+            "EXISTS (SELECT ...)".to_string()
+        }
+        _ => format!("{:?}", expr),
+    }
+}
+
+fn function_args_to_strings(args: &sqlparser::ast::FunctionArguments) -> Vec<String> {
+    match args {
+        sqlparser::ast::FunctionArguments::None => vec![],
+        sqlparser::ast::FunctionArguments::Subquery(_) => vec!["(SELECT ...)".to_string()],
+        sqlparser::ast::FunctionArguments::List(list) => list
+            .args
+            .iter()
+            .map(|arg| match arg {
+                sqlparser::ast::FunctionArg::Unnamed(expr) => function_arg_expr_to_string(expr),
+                sqlparser::ast::FunctionArg::Named {
+                    name, arg: expr, ..
+                } => format!("{} => {}", name.value, function_arg_expr_to_string(expr)),
+            })
+            .collect(),
+    }
+}
+
+fn function_arg_expr_to_string(expr: &sqlparser::ast::FunctionArgExpr) -> String {
+    match expr {
+        sqlparser::ast::FunctionArgExpr::Expr(e) => expr_to_string(e),
+        sqlparser::ast::FunctionArgExpr::QualifiedWildcard(name) => {
+            format!("{}.*", object_name_to_string(name))
+        }
+        sqlparser::ast::FunctionArgExpr::Wildcard => "*".to_string(),
+    }
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Number(n, _) => n.clone(),
+        Value::SingleQuotedString(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::DoubleQuotedString(s) => format!("\"{}\"", s),
+        Value::Boolean(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        Value::Null => "NULL".to_string(),
+        Value::Placeholder(param) => format!("${}", param),
+        _ => format!("{:?}", value),
+    }
+}
+
+fn select_item_to_string(item: &SelectItem) -> String {
+    match item {
+        SelectItem::UnnamedExpr(expr) => expr_to_string(expr),
+        SelectItem::ExprWithAlias { expr, alias } => {
+            format!("{} AS {}", expr_to_string(expr), alias.value)
+        }
+        SelectItem::QualifiedWildcard(name, _) => {
+            format!(
+                "{}.*",
+                name.0
+                    .iter()
+                    .map(|i| i.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            )
+        }
+        SelectItem::Wildcard(_) => "*".to_string(),
+    }
+}
+
+fn object_name_to_string(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .map(|i| i.value.clone())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn order_by_to_clause(ob: &sqlparser::ast::OrderByExpr) -> OrderByClause {
+    let column = expr_to_string(&ob.expr);
+    let direction = match ob.asc {
+        Some(true) | None => "ASC",
+        Some(false) => "DESC",
+    };
+    OrderByClause {
+        column,
+        direction: direction.to_string(),
+    }
+}
+
+fn extract_aggregations_from_columns(columns: &[String]) -> Vec<AggregationClause> {
+    let agg_keywords: [(&str, AggregationType); 7] = [
+        ("COUNT(", AggregationType::Count),
+        ("SUM(", AggregationType::Sum),
+        ("AVG(", AggregationType::Avg),
+        ("MIN(", AggregationType::Min),
+        ("MAX(", AggregationType::Max),
+        ("GROUP_CONCAT(", AggregationType::GroupConcat),
+        ("ARRAY_AGG(", AggregationType::ArrayAgg),
+    ];
+
+    let mut aggs = Vec::new();
+    for col in columns {
+        let upper = col.to_uppercase();
+        for &(kw, ref agg_type) in &agg_keywords {
+            if upper.contains(kw) {
+                let inner = col[col.find('(').map(|i| i + 1).unwrap_or(0)
+                    ..col.rfind(')').unwrap_or(col.len())]
+                    .trim()
+                    .to_string();
+                let alias = col.find(" AS ").map(|i| col[i + 4..].trim().to_string());
+                aggs.push(AggregationClause {
+                    agg_type: agg_type.clone(),
+                    column: inner,
+                    alias,
+                });
+                break;
+            }
+        }
+    }
+    aggs
+}
+
 // ── Public API ──────────────────────────────────────────────────
 
 /// Query parser for multiple query languages
 pub struct QueryParser;
+
+impl Default for QueryParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl QueryParser {
     pub fn new() -> Self {
@@ -1980,6 +2682,10 @@ impl QueryParser {
     }
 
     fn parse_sql(&self, query: &str) -> Result<ParsedQuery> {
+        // Try sqlparser-rs first for standard SQL; fall back to the old parser.
+        if let Ok(pq) = parse_with_sqlparser(query) {
+            return Ok(pq);
+        }
         let mut tokenizer = Tokenizer::new(query);
         let tokens = tokenizer.tokenize()?;
         let mut parser = Parser::new(tokens);
@@ -2015,7 +2721,7 @@ impl QueryParser {
             for (key, val) in obj {
                 if key.starts_with('$') {
                     // Top-level operator: treat as condition group
-                    if let Some(sql) = Self::json_operator_to_sql(key, &val) {
+                    if let Some(sql) = Self::json_operator_to_sql(key, val) {
                         all_conditions.push(sql);
                     }
                 } else {
@@ -2028,7 +2734,7 @@ impl QueryParser {
                         }
                     } else {
                         // Direct equality: {"users": "active"}
-                        let val_sql = Self::json_value_to_sql_literal(&val);
+                        let val_sql = Self::json_value_to_sql_literal(val);
                         all_conditions.push(format!("{} = {}", key, val_sql));
                     }
                 }
@@ -2174,10 +2880,8 @@ impl QueryParser {
                 "$lte" => format!("{} <= {}", field, val_sql),
                 "$in" => {
                     if let Some(arr) = val.as_array() {
-                        let items: Vec<String> = arr
-                            .iter()
-                            .map(|v| Self::json_value_to_sql_literal(v))
-                            .collect();
+                        let items: Vec<String> =
+                            arr.iter().map(Self::json_value_to_sql_literal).collect();
                         format!("{} IN ({})", field, items.join(", "))
                     } else {
                         format!("{} IN ({})", field, val_sql)
@@ -2185,10 +2889,8 @@ impl QueryParser {
                 }
                 "$nin" => {
                     if let Some(arr) = val.as_array() {
-                        let items: Vec<String> = arr
-                            .iter()
-                            .map(|v| Self::json_value_to_sql_literal(v))
-                            .collect();
+                        let items: Vec<String> =
+                            arr.iter().map(Self::json_value_to_sql_literal).collect();
                         format!("{} NOT IN ({})", field, items.join(", "))
                     } else {
                         format!("{} NOT IN ({})", field, val_sql)
@@ -2244,7 +2946,7 @@ impl QueryParser {
                 if let Some(arr) = val.as_array() {
                     let parts: Vec<String> = arr
                         .iter()
-                        .filter_map(|v| Self::json_mango_selector_to_sql(v))
+                        .filter_map(Self::json_mango_selector_to_sql)
                         .collect();
                     if parts.is_empty() {
                         None
@@ -2259,7 +2961,7 @@ impl QueryParser {
                 if let Some(arr) = val.as_array() {
                     let parts: Vec<String> = arr
                         .iter()
-                        .filter_map(|v| Self::json_mango_selector_to_sql(v))
+                        .filter_map(Self::json_mango_selector_to_sql)
                         .collect();
                     if parts.is_empty() {
                         None
@@ -2274,7 +2976,7 @@ impl QueryParser {
                 if let Some(arr) = val.as_array() {
                     let parts: Vec<String> = arr
                         .iter()
-                        .filter_map(|v| Self::json_mango_selector_to_sql(v))
+                        .filter_map(Self::json_mango_selector_to_sql)
                         .collect();
                     if parts.is_empty() {
                         None
@@ -2353,10 +3055,7 @@ impl QueryParser {
                 format!("'{}'", escaped)
             }
             serde_json::Value::Array(arr) => {
-                let items: Vec<String> = arr
-                    .iter()
-                    .map(|v| Self::json_value_to_sql_literal(v))
-                    .collect();
+                let items: Vec<String> = arr.iter().map(Self::json_value_to_sql_literal).collect();
                 format!("({})", items.join(", "))
             }
             serde_json::Value::Object(_) => {
@@ -3148,7 +3847,10 @@ mod tests {
         let pq = parse_sql("WITH cte (id, name) AS (SELECT id, name FROM users) SELECT * FROM cte");
         assert_eq!(pq.ctes.len(), 1);
         assert_eq!(pq.ctes[0].name, "cte");
-        assert_eq!(pq.ctes[0].columns, Some(vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(
+            pq.ctes[0].columns,
+            Some(vec!["id".to_string(), "name".to_string()])
+        );
     }
 
     #[test]
@@ -3189,7 +3891,8 @@ mod tests {
 
     #[test]
     fn test_window_partition_by() {
-        let pq = parse_sql("SELECT RANK() OVER (PARTITION BY dept ORDER BY salary DESC) FROM employees");
+        let pq =
+            parse_sql("SELECT RANK() OVER (PARTITION BY dept ORDER BY salary DESC) FROM employees");
         assert_eq!(pq.window_functions.len(), 1);
         assert_eq!(pq.window_functions[0].function, "RANK");
         assert_eq!(pq.window_functions[0].window.partition_by, vec!["dept"]);

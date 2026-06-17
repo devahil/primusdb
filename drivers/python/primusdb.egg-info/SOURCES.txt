@@ -1,0 +1,9 @@
+README.md
+setup.py
+primusdb/__init__.py
+primusdb.egg-info/PKG-INFO
+primusdb.egg-info/SOURCES.txt
+primusdb.egg-info/dependency_links.txt
+primusdb.egg-info/requires.txt
+primusdb.egg-info/top_level.txt
+tests/test_client.py

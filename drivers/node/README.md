@@ -440,6 +440,42 @@ async function cachingExample() {
 cachingExample().catch(console.error);
 ```
 
+### PreparedStatement Usage
+```typescript
+import { PrimusDB, PreparedStatement } from 'primusdb';
+
+async function preparedStatementExample() {
+  const db = new PrimusDB('localhost', 8080);
+  await db.connect();
+
+  // Create a prepared statement with ? placeholders
+  const stmt = db.prepare('SELECT * FROM users WHERE age > ? AND city = ?');
+
+  // Bind parameters by index (0-based)
+  stmt.setInt(0, 25);
+  stmt.setString(1, 'New York');
+
+  // Execute and fetch results
+  const users = await stmt.executeQuery();
+  console.log('Users:', users);
+
+  // Reuse with different parameters
+  stmt.setInt(0, 18);
+  stmt.setString(1, 'London');
+  const youngerUsers = await stmt.executeQuery();
+
+  // For non-query statements (INSERT, UPDATE, DELETE)
+  const insertStmt = db.prepare('INSERT INTO users (name, age) VALUES (?, ?)');
+  insertStmt.setString(0, 'Alice');
+  insertStmt.setInt(1, 30);
+  await insertStmt.execute();
+
+  await db.disconnect();
+}
+
+preparedStatementExample().catch(console.error);
+```
+
 ### Distributed Cache Clustering
 ```typescript
 async function clusterExample() {

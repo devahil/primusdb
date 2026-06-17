@@ -60,7 +60,6 @@ pub enum DriverFeature {
     InformationSchema,
     TruncateCascade,
     ExtendedDataTypes,
-    KeyValue,
 }
 
 #[derive(Debug, Clone)]
@@ -578,7 +577,7 @@ impl Default for PrimusDBConfig {
                 discovery_servers: vec![],
             },
             namespaces: Default::default(),
-        federation: None,
+            federation: None,
         }
     }
 }

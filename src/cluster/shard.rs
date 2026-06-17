@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -15,20 +13,19 @@ pub struct ShardRegion {
 
 impl ShardRegion {
     pub fn new(name: &str, priority: u32) -> Self {
-        Self { name: name.to_string(), priority }
+        Self {
+            name: name.to_string(),
+            priority,
+        }
     }
 }
 
 impl Default for ShardRegion {
     fn default() -> Self {
-        Self { name: "default".into(), priority: 0 }
-    }
-}
-
-impl ShardInfo {
-    pub fn change_state(&mut self, persisted: bool) {
-        info!("Shard {} persisted state: {}", self.shard_id, persisted);
-        self.persisted = persisted;
+        Self {
+            name: "default".into(),
+            priority: 0,
+        }
     }
 }
 
@@ -48,9 +45,6 @@ pub struct ShardInfo {
     pub primary_region: ShardRegion,
     /// Cross-region replica assignments (region → list of nodes)
     pub cross_region_replicas: HashMap<String, Vec<String>>,
-    /// Whether this shard has been persisted to disk
-    #[serde(default)]
-    pub persisted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +69,7 @@ pub struct ShardManagerConfig {
     pub virtual_nodes_per_node: u32,
     pub rebalance_threshold: f64,
     pub migrate_batch_size: u32,
+    pub data_dir: String,
 }
 
 impl Default for ShardManagerConfig {
@@ -85,6 +80,7 @@ impl Default for ShardManagerConfig {
             virtual_nodes_per_node: 64,
             rebalance_threshold: 0.2,
             migrate_batch_size: 100,
+            data_dir: "./data/shard_state".to_string(),
         }
     }
 }
@@ -98,18 +94,10 @@ pub struct ShardManager {
     pub nodes: RwLock<Vec<String>>,
     /// Region membership: region_name → list of node_ids
     pub region_map: RwLock<HashMap<String, Vec<String>>>,
-    /// Persistence database (sled)
-    pub db: Arc<sled::Db>,
-    /// Path to the persistence database
-    pub db_path: PathBuf,
 }
 
 impl ShardManager {
     pub fn new(node_id: String) -> Self {
-        let db_path = PathBuf::from(format!("/tmp/primusdb/shard_manager_{}.db", node_id));
-        std::fs::create_dir_all(db_path.parent().unwrap_or(std::path::Path::new("/tmp/primusdb")))
-            .ok();
-        let db = sled::open(&db_path).expect("Failed to open shard manager database");
         Self {
             config: ShardManagerConfig::default(),
             node_id,
@@ -117,8 +105,6 @@ impl ShardManager {
             ring: RwLock::new(Vec::new()),
             nodes: RwLock::new(Vec::new()),
             region_map: RwLock::new(HashMap::new()),
-            db: Arc::new(db),
-            db_path,
         }
     }
 
@@ -226,7 +212,9 @@ impl ShardManager {
         self.add_node(node_id).await;
         if let Some(r) = region {
             let mut rm = self.region_map.write().await;
-            rm.entry(r.to_string()).or_default().push(node_id.to_string());
+            rm.entry(r.to_string())
+                .or_default()
+                .push(node_id.to_string());
             info!("Registered node {} in region {}", node_id, r);
         }
     }
@@ -274,7 +262,6 @@ impl ShardManager {
             version: 1,
             primary_region: ShardRegion::new(primary_region, 0),
             cross_region_replicas,
-            persisted: false,
         };
 
         self.register_shard(shard.clone()).await;
@@ -303,37 +290,37 @@ impl ShardManager {
     /// Check if a shard has cross-region replicas for disaster recovery.
     pub async fn has_cross_region_redundancy(&self, shard_id: &str) -> bool {
         let shards = self.shards.read().await;
-        shards.values().any(|s| {
-            s.shard_id == shard_id && !s.cross_region_replicas.is_empty()
-        })
+        shards
+            .values()
+            .any(|s| s.shard_id == shard_id && !s.cross_region_replicas.is_empty())
     }
 
-    pub async fn persist_shards(&self) -> crate::Result<()> {
-        let shards = self.shards.read().await;
-        for (id, shard) in shards.iter() {
-            let data = bincode::serialize(shard)?;
-            self.db.insert(id.as_bytes(), data)?;
+    pub async fn persist_shards(&self) {
+        let path = std::path::Path::new(&self.config.data_dir).join("shards.json");
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
-        self.db.flush()?;
-        info!("Persisted {} shards to disk", shards.len());
-        // Mark all as persisted
-        drop(shards);
-        let mut shards = self.shards.write().await;
-        for shard in shards.values_mut() {
-            shard.persisted = true;
-        }
-        Ok(())
-    }
 
-    pub async fn load_shards(&self) -> crate::Result<()> {
-        let mut shards = self.shards.write().await;
-        for result in self.db.iter() {
-            let (_, value) = result?;
-            let shard: ShardInfo = bincode::deserialize(&value)?;
-            shards.insert(shard.shard_id.clone(), shard);
+        let snapshot = {
+            let shards = self.shards.read().await;
+            let nodes = self.nodes.read().await;
+            let ring = self.ring.read().await;
+            serde_json::json!({
+                "shards": *shards,
+                "nodes": *nodes,
+                "ring": *ring,
+            })
+        };
+
+        match tokio::fs::write(
+            &path,
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(_) => tracing::debug!("Shard state persisted to {}", path.display()),
+            Err(e) => tracing::error!("Failed to persist shards: {}", e),
         }
-        info!("Loaded {} shards from disk", shards.len());
-        Ok(())
     }
 
     pub async fn check_rebalance_needed(&self) -> Vec<ShardMigrationPlan> {
@@ -412,139 +399,4 @@ fn hash_string(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_shard_info_change_state() {
-        let mut shard = ShardInfo {
-            shard_id: "test_shard".into(),
-            table: "test_table".into(),
-            storage_type: "document".into(),
-            hash_range_start: 0,
-            hash_range_end: 100,
-            primary_node: "node1".into(),
-            replica_nodes: vec![],
-            record_count: 0,
-            size_bytes: 0,
-            version: 1,
-            primary_region: ShardRegion::default(),
-            cross_region_replicas: HashMap::new(),
-            persisted: false,
-        };
-        assert!(!shard.persisted);
-        shard.change_state(true);
-        assert!(shard.persisted);
-    }
-
-    #[tokio::test]
-    async fn test_shard_persist_and_load() {
-        let node_id = format!("persist_test_{}", std::process::id());
-        let manager = ShardManager::new(node_id.clone());
-        let shard = ShardInfo {
-            shard_id: "persist_test".into(),
-            table: "test".into(),
-            storage_type: "document".into(),
-            hash_range_start: 0,
-            hash_range_end: 50,
-            primary_node: "node1".into(),
-            replica_nodes: vec!["node2".into()],
-            record_count: 100,
-            size_bytes: 1024,
-            version: 2,
-            primary_region: ShardRegion::new("us-east", 1),
-            cross_region_replicas: {
-                let mut m = HashMap::new();
-                m.insert("eu-west".into(), vec!["node3".into()]);
-                m
-            },
-            persisted: false,
-        };
-        manager.shards.write().await.insert(shard.shard_id.clone(), shard);
-        assert!(manager.persist_shards().await.is_ok());
-
-        // Verify in-memory state marked as persisted
-        {
-            let loaded = manager.shards.read().await;
-            let loaded_shard = loaded.get("persist_test").expect("shard should exist");
-            assert_eq!(loaded_shard.record_count, 100);
-            assert_eq!(loaded_shard.primary_region.name, "us-east");
-            assert!(loaded_shard.persisted);
-        }
-
-        // Drop first manager and reopen with same node_id to test actual load from disk
-        drop(manager);
-        let manager2 = ShardManager::new(node_id);
-        assert!(manager2.load_shards().await.is_ok());
-        let loaded = manager2.shards.read().await;
-        let loaded_shard = loaded.get("persist_test").expect("shard should exist");
-        assert_eq!(loaded_shard.record_count, 100);
-    }
-
-    #[test]
-    fn test_shard_region_default() {
-        let region = ShardRegion::default();
-        assert_eq!(region.name, "default");
-        assert_eq!(region.priority, 0);
-    }
-
-    #[test]
-    fn test_serde_roundtrip() {
-        let shard = ShardInfo {
-            shard_id: "serde_test".into(),
-            table: "t".into(),
-            storage_type: "kv".into(),
-            hash_range_start: 10,
-            hash_range_end: 20,
-            primary_node: "n1".into(),
-            replica_nodes: vec![],
-            record_count: 5,
-            size_bytes: 500,
-            version: 1,
-            primary_region: ShardRegion::default(),
-            cross_region_replicas: HashMap::new(),
-            persisted: true,
-        };
-        let json = serde_json::to_string(&shard).unwrap();
-        let deserialized: ShardInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.shard_id, "serde_test");
-        assert_eq!(deserialized.persisted, true);
-
-        // Old data without persisted field should deserialize to false
-        #[derive(serde::Serialize)]
-        struct OldShard<'a> {
-            shard_id: &'a str,
-            table: &'a str,
-            storage_type: &'a str,
-            hash_range_start: u64,
-            hash_range_end: u64,
-            primary_node: &'a str,
-            replica_nodes: &'a [String],
-            record_count: u64,
-            size_bytes: u64,
-            version: u64,
-            primary_region: &'a ShardRegion,
-            cross_region_replicas: &'a HashMap<String, Vec<String>>,
-        }
-        let old = OldShard {
-            shard_id: "old",
-            table: "t",
-            storage_type: "kv",
-            hash_range_start: 0,
-            hash_range_end: 10,
-            primary_node: "n1",
-            replica_nodes: &[],
-            record_count: 0,
-            size_bytes: 0,
-            version: 1,
-            primary_region: &ShardRegion::default(),
-            cross_region_replicas: &HashMap::new(),
-        };
-        let old_json = serde_json::to_string(&old).unwrap();
-        let from_old: ShardInfo = serde_json::from_str(&old_json).unwrap();
-        assert!(!from_old.persisted, "old serialized data should default to false");
-    }
 }

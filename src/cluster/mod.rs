@@ -1,31 +1,31 @@
-use crate::{ClusterConfig, PrimusDBConfig, Result};
-use crate::cluster::rpc::{ClusterNodeInfo, RpcMessage, RpcServer, RpcHandler};
 use crate::cluster::membership::{ClusterMember, MemberStatus, MembershipManager};
 use crate::cluster::raft::RaftNode;
-use crate::cluster::shard::{ShardManager, ShardMigrationPlan};
 use crate::cluster::replication::ReplicationEngine;
+use crate::cluster::rpc::{ClusterNodeInfo, RpcHandler, RpcMessage, RpcServer};
+use crate::cluster::shard::{ShardManager, ShardMigrationPlan};
+use crate::{ClusterConfig, PrimusDBConfig, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
-pub mod rpc;
-pub mod raft;
-pub mod membership;
-pub mod shard;
-pub mod replication;
-pub mod gateway;
-pub mod sync;
-pub mod federation;
 pub mod domain;
 pub mod federated_raft;
-pub use sync::*;
-pub use gateway::*;
-pub use federation::*;
+pub mod federation;
+pub mod gateway;
+pub mod membership;
+pub mod raft;
+pub mod replication;
+pub mod rpc;
+pub mod shard;
+pub mod sync;
 pub use domain::*;
+pub use federation::*;
+pub use gateway::*;
+pub use sync::*;
 
 pub struct ClusterManager {
     pub config: ClusterConfig,
@@ -97,13 +97,11 @@ impl ClusterManager {
 
     pub async fn init_db(&mut self, config: &PrimusDBConfig) -> Result<()> {
         let data_dir = format!("{}/cluster", config.storage.data_dir);
-        std::fs::create_dir_all(&data_dir).map_err(|e|
-            crate::Error::ClusterError(format!("Create cluster dir: {}", e))
-        )?;
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| crate::Error::ClusterError(format!("Create cluster dir: {}", e)))?;
 
-        let db = sled::open(&data_dir).map_err(|e|
-            crate::Error::ClusterError(format!("Open cluster db: {}", e))
-        )?;
+        let db = sled::open(&data_dir)
+            .map_err(|e| crate::Error::ClusterError(format!("Open cluster db: {}", e)))?;
         self.db = Some(db);
 
         // Restore persisted state
@@ -113,11 +111,12 @@ impl ClusterManager {
 
     async fn restore_state(&self) -> Result<()> {
         if let Some(db) = &self.db {
-            if let Some(peers_bytes) = db.get("peers").map_err(|e|
-                crate::Error::ClusterError(format!("DB read peers: {}", e))
-            )? {
-                let stored: Vec<ClusterNodeInfo> = bincode::deserialize(&peers_bytes)
-                    .unwrap_or_default();
+            if let Some(peers_bytes) = db
+                .get("peers")
+                .map_err(|e| crate::Error::ClusterError(format!("DB read peers: {}", e)))?
+            {
+                let stored: Vec<ClusterNodeInfo> =
+                    bincode::deserialize(&peers_bytes).unwrap_or_default();
                 for node in &stored {
                     let member = ClusterMember {
                         node_id: node.node_id.clone(),
@@ -154,12 +153,10 @@ impl ClusterManager {
                 .collect();
             let data = bincode::serialize(&nodes)
                 .map_err(|e| crate::Error::ClusterError(format!("Serialize peers: {}", e)))?;
-            db.insert("peers", data).map_err(|e|
-                crate::Error::ClusterError(format!("DB write peers: {}", e))
-            )?;
-            db.flush().map_err(|e|
-                crate::Error::ClusterError(format!("DB flush: {}", e))
-            )?;
+            db.insert("peers", data)
+                .map_err(|e| crate::Error::ClusterError(format!("DB write peers: {}", e)))?;
+            db.flush()
+                .map_err(|e| crate::Error::ClusterError(format!("DB flush: {}", e)))?;
         }
         Ok(())
     }
@@ -179,7 +176,8 @@ impl ClusterManager {
 
         self.membership.register_self().await;
 
-        let bind_addr: SocketAddr = format!("{}:{}", self.address, self.port).parse()
+        let bind_addr: SocketAddr = format!("{}:{}", self.address, self.port)
+            .parse()
             .map_err(|e| crate::Error::ClusterError(format!("Bind addr: {}", e)))?;
 
         let handler = self.create_rpc_handler();
@@ -232,132 +230,130 @@ impl ClusterManager {
         let raft = self.raft_node.clone();
         let peers_initialized = self.peers_initialized.clone();
 
-        Arc::new(move |msg: RpcMessage, addr: std::net::SocketAddr| -> Result<RpcMessage> {
-            let rt = tokio::runtime::Handle::current();
-            match msg {
-                RpcMessage::JoinRequest(req) => {
-                    let members = rt.block_on(async {
-                        membership.members.read().await
-                    });
-                    let accepted_nodes: Vec<ClusterNodeInfo> = members
-                        .values()
-                        .map(|m| ClusterNodeInfo {
-                            node_id: m.node_id.clone(),
-                            address: m.address.clone(),
-                            port: m.port,
-                            roles: m.roles.clone(),
-                            status: format!("{:?}", m.status),
-                        })
-                        .collect();
-                    let resp = rt.block_on(membership.handle_join(&req, &accepted_nodes));
-                    rt.block_on(shard_manager.add_node(&req.node_id));
-                    let _ = rt.block_on(shard_manager.persist_shards());
-                    {
-                        let w = rt.block_on(peers_initialized.write());
-                        drop(w);
+        Arc::new(
+            move |msg: RpcMessage, addr: std::net::SocketAddr| -> Result<RpcMessage> {
+                let rt = tokio::runtime::Handle::current();
+                match msg {
+                    RpcMessage::JoinRequest(req) => {
+                        let members = rt.block_on(async { membership.members.read().await });
+                        let accepted_nodes: Vec<ClusterNodeInfo> = members
+                            .values()
+                            .map(|m| ClusterNodeInfo {
+                                node_id: m.node_id.clone(),
+                                address: m.address.clone(),
+                                port: m.port,
+                                roles: m.roles.clone(),
+                                status: format!("{:?}", m.status),
+                            })
+                            .collect();
+                        let resp = rt.block_on(membership.handle_join(&req, &accepted_nodes));
+                        rt.block_on(shard_manager.add_node(&req.node_id));
+                        rt.block_on(shard_manager.persist_shards());
+                        {
+                            let w = rt.block_on(peers_initialized.write());
+                            drop(w);
+                        }
+                        Ok(RpcMessage::JoinResponse(resp))
                     }
-                    Ok(RpcMessage::JoinResponse(resp))
-                }
-                RpcMessage::Ping(ping) => {
-                    if ping.sender_id != node_id {
-                        rt.block_on(membership.mark_alive(&ping.sender_id, ping.incarnation));
+                    RpcMessage::Ping(ping) => {
+                        if ping.sender_id != node_id {
+                            rt.block_on(membership.mark_alive(&ping.sender_id, ping.incarnation));
+                        }
+                        Ok(RpcMessage::Ack(crate::cluster::rpc::AckMessage {
+                            sender_id: node_id.clone(),
+                            sequence: ping.sequence,
+                            ok: true,
+                        }))
                     }
-                    Ok(RpcMessage::Ack(crate::cluster::rpc::AckMessage {
-                        sender_id: node_id.clone(),
-                        sequence: ping.sequence,
-                        ok: true,
-                    }))
-                }
-                RpcMessage::PingReq(req) => {
-                    let target_exists = rt.block_on(async {
-                        membership.get_member(&req.target_id).await.is_some()
-                    });
-                    Ok(RpcMessage::Ack(crate::cluster::rpc::AckMessage {
-                        sender_id: node_id.clone(),
-                        sequence: req.sequence,
-                        ok: target_exists,
-                    }))
-                }
-                RpcMessage::Heartbeat(hb) => {
-                    if hb.node_id != node_id {
-                        rt.block_on(membership.mark_alive(&hb.node_id, 1));
+                    RpcMessage::PingReq(req) => {
+                        let target_exists = rt.block_on(async {
+                            membership.get_member(&req.target_id).await.is_some()
+                        });
+                        Ok(RpcMessage::Ack(crate::cluster::rpc::AckMessage {
+                            sender_id: node_id.clone(),
+                            sequence: req.sequence,
+                            ok: target_exists,
+                        }))
                     }
-                    Ok(RpcMessage::Heartbeat(crate::cluster::rpc::HeartbeatMessage {
-                        node_id: node_id.clone(),
-                        term: 0,
-                        leader_id: None,
-                        cpu_usage: 0.0,
-                        memory_usage: 0.0,
-                        storage_usage: 0.0,
-                        active_connections: 0,
-                    }))
-                }
-                RpcMessage::RequestVote(req) => {
-                    if let Some(ref raft_node) = raft {
-                        let resp = rt.block_on(raft_node.handle_request_vote(&req))?;
-                        Ok(RpcMessage::VoteResponse(
-                            crate::cluster::rpc::RaftVoteResponse {
-                                term: resp.term,
-                                vote_granted: resp.vote_granted,
-                                node_id: resp.node_id,
-                            },
-                        ))
-                    } else {
-                        Ok(RpcMessage::VoteResponse(
-                            crate::cluster::rpc::RaftVoteResponse {
-                                term: 0,
-                                vote_granted: false,
+                    RpcMessage::Heartbeat(hb) => {
+                        if hb.node_id != node_id {
+                            rt.block_on(membership.mark_alive(&hb.node_id, 1));
+                        }
+                        Ok(RpcMessage::Heartbeat(
+                            crate::cluster::rpc::HeartbeatMessage {
                                 node_id: node_id.clone(),
-                            },
-                        ))
-                    }
-                }
-                RpcMessage::AppendEntries(req) => {
-                    if let Some(ref raft_node) = raft {
-                        let resp = rt.block_on(raft_node.handle_append_entries(&req))?;
-                        Ok(RpcMessage::AppendEntriesResponse(
-                            crate::cluster::rpc::RaftAppendResponse {
-                                term: resp.term,
-                                success: resp.success,
-                                match_index: resp.match_index,
-                                node_id: resp.node_id,
-                                last_log_index: resp.last_log_index,
-                            },
-                        ))
-                    } else {
-                        Ok(RpcMessage::AppendEntriesResponse(
-                            crate::cluster::rpc::RaftAppendResponse {
                                 term: 0,
-                                success: false,
-                                match_index: 0,
-                                node_id: node_id.clone(),
-                                last_log_index: 0,
+                                leader_id: None,
+                                cpu_usage: 0.0,
+                                memory_usage: 0.0,
+                                storage_usage: 0.0,
+                                active_connections: 0,
                             },
                         ))
                     }
-                }
-                RpcMessage::ReplicaWrite(req) => {
-                    // Local write acknowledgment (storage engine write handled by caller)
-                    Ok(RpcMessage::ReplicaWriteAck(
-                        crate::cluster::rpc::ReplicaWriteAck {
-                            operation_id: req.operation_id,
-                            node_id: node_id.clone(),
-                            success: true,
-                            term: req.term,
-                        },
-                    ))
-                }
-                RpcMessage::ReplicaRead(_req) => {
-                    Ok(RpcMessage::ReplicaReadResponse(
+                    RpcMessage::RequestVote(req) => {
+                        if let Some(ref raft_node) = raft {
+                            let resp = rt.block_on(raft_node.handle_request_vote(&req))?;
+                            Ok(RpcMessage::VoteResponse(
+                                crate::cluster::rpc::RaftVoteResponse {
+                                    term: resp.term,
+                                    vote_granted: resp.vote_granted,
+                                    node_id: resp.node_id,
+                                },
+                            ))
+                        } else {
+                            Ok(RpcMessage::VoteResponse(
+                                crate::cluster::rpc::RaftVoteResponse {
+                                    term: 0,
+                                    vote_granted: false,
+                                    node_id: node_id.clone(),
+                                },
+                            ))
+                        }
+                    }
+                    RpcMessage::AppendEntries(req) => {
+                        if let Some(ref raft_node) = raft {
+                            let resp = rt.block_on(raft_node.handle_append_entries(&req))?;
+                            Ok(RpcMessage::AppendEntriesResponse(
+                                crate::cluster::rpc::RaftAppendResponse {
+                                    term: resp.term,
+                                    success: resp.success,
+                                    match_index: resp.match_index,
+                                    node_id: resp.node_id,
+                                    last_log_index: resp.last_log_index,
+                                },
+                            ))
+                        } else {
+                            Ok(RpcMessage::AppendEntriesResponse(
+                                crate::cluster::rpc::RaftAppendResponse {
+                                    term: 0,
+                                    success: false,
+                                    match_index: 0,
+                                    node_id: node_id.clone(),
+                                    last_log_index: 0,
+                                },
+                            ))
+                        }
+                    }
+                    RpcMessage::ReplicaWrite(req) => {
+                        // Local write acknowledgment (storage engine write handled by caller)
+                        Ok(RpcMessage::ReplicaWriteAck(
+                            crate::cluster::rpc::ReplicaWriteAck {
+                                operation_id: req.operation_id,
+                                node_id: node_id.clone(),
+                                success: true,
+                                term: req.term,
+                            },
+                        ))
+                    }
+                    RpcMessage::ReplicaRead(_req) => Ok(RpcMessage::ReplicaReadResponse(
                         crate::cluster::rpc::ReplicaReadResponse {
                             found: false,
                             data: None,
                             node_id: node_id.clone(),
                         },
-                    ))
-                }
-                RpcMessage::MetadataSync(_) => {
-                    Ok(RpcMessage::MetadataSync(
+                    )),
+                    RpcMessage::MetadataSync(_) => Ok(RpcMessage::MetadataSync(
                         crate::cluster::rpc::MetadataSyncMessage {
                             node_id: node_id.clone(),
                             term: 0,
@@ -365,18 +361,18 @@ impl ClusterManager {
                             total_records: 0,
                             checksum: String::new(),
                         },
-                    ))
+                    )),
+                    RpcMessage::ShardTransfer(req) => {
+                        info!("Received shard transfer request for shard {}", req.shard_id);
+                        Ok(RpcMessage::ShardTransfer(req))
+                    }
+                    _ => {
+                        debug!("Unhandled RPC message from {}", addr);
+                        Err(crate::Error::ClusterError("Unhandled RPC type".into()))
+                    }
                 }
-                RpcMessage::ShardTransfer(req) => {
-                    info!("Received shard transfer request for shard {}", req.shard_id);
-                    Ok(RpcMessage::ShardTransfer(req))
-                }
-                _ => {
-                    debug!("Unhandled RPC message from {}", addr);
-                    Err(crate::Error::ClusterError("Unhandled RPC type".into()))
-                }
-            }
-        })
+            },
+        )
     }
 
     async fn init_raft(&mut self) -> Result<()> {
@@ -385,17 +381,20 @@ impl ClusterManager {
         let mut peers = HashMap::new();
 
         for member in members.values() {
-            if member.node_id != self.node_id
-                && matches!(member.status, MemberStatus::Alive)
-            {
-                let addr: SocketAddr = format!("{}:{}", member.address, member.port).parse()
+            if member.node_id != self.node_id && matches!(member.status, MemberStatus::Alive) {
+                let addr: SocketAddr = format!("{}:{}", member.address, member.port)
+                    .parse()
                     .map_err(|e| crate::Error::ClusterError(format!("Peer addr: {}", e)))?;
-                let client = Arc::new(
-                    crate::cluster::rpc::RpcClient::new(member.node_id.clone(), addr)
-                );
+                let client = Arc::new(crate::cluster::rpc::RpcClient::new(
+                    member.node_id.clone(),
+                    addr,
+                ));
                 if client.connect().await.is_ok() {
                     peers.insert(member.node_id.clone(), client.clone());
-                    clients_raft.write().await.insert(member.node_id.clone(), client);
+                    clients_raft
+                        .write()
+                        .await
+                        .insert(member.node_id.clone(), client);
                 }
             }
         }
@@ -502,9 +501,13 @@ impl ClusterManager {
             alive_count,
             is_leader,
             leader_id,
-            health_status: if alive_count >= 3 { "Healthy" }
-                else if alive_count > 1 { "Degraded" }
-                else { "Standalone" },
+            health_status: if alive_count >= 3 {
+                "Healthy"
+            } else if alive_count > 1 {
+                "Degraded"
+            } else {
+                "Standalone"
+            },
             replication_factor: 3,
             uptime_ms: 0,
         }
@@ -512,9 +515,17 @@ impl ClusterManager {
 }
 
 impl ClusterManager {
-    pub fn get_node_for_operation(&self, _operation_type: &str) -> Option<String> {
-        // Use consistent hash ring to find nodes
-        None // Simplified; actual routing uses shard manager
+    pub async fn get_node_for_operation(&self, operation_type: &str) -> Option<String> {
+        let members = self.membership.members.read().await;
+        if members.is_empty() {
+            return None;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        operation_type.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % members.len();
+        let node_id = members.keys().nth(idx)?.clone();
+        Some(node_id)
     }
 
     pub async fn check_rebalance_needed(&self) -> Vec<ShardMigrationPlan> {
@@ -592,6 +603,9 @@ fn now_ms() -> u64 {
 }
 
 // Helper for Raft's apply channel
-pub fn create_apply_channel() -> (mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>) {
+pub fn create_apply_channel() -> (
+    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedReceiver<Vec<u8>>,
+) {
     mpsc::unbounded_channel()
 }

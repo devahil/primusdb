@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub enum RpcMessage {
     MerkleResponse(MerkleResponse),
     ConflictResolve(ConflictResolveMessage),
 
-    // Federation (multi-cluster super-scalar, v1.3.0-alpha)
+    // Federation (multi-cluster super-scalar, v1.3.1-alpha)
     FedClusterAnnounce(FedClusterAnnounce),
     FedClusterAck(FedClusterAck),
     FedDomainJoin(FedDomainJoin),
@@ -54,7 +54,7 @@ pub enum RpcMessage {
     FedNamespaceResolve(FedNamespaceResolveRequest),
     FedNamespaceResolveAck(FedNamespaceResolveAck),
 
-    // Federated Raft (cross-cluster consensus, v1.3.0-alpha)
+    // Federated Raft (cross-cluster consensus, v1.3.1-alpha)
     FedRaftVoteRequest(FedRaftVoteRequest),
     FedRaftVoteResponse(FedRaftVoteResponse),
     FedRaftAppendEntries(FedRaftAppendRequest),
@@ -379,14 +379,10 @@ impl RpcServer {
         Self { bind_addr }
     }
 
-    pub async fn start(
-        self,
-        handler: RpcHandler,
-        shutdown_rx: mpsc::Receiver<()>,
-    ) -> Result<()> {
-        let listener = TcpListener::bind(self.bind_addr)
-            .await
-            .map_err(|e| crate::Error::ClusterError(format!("RPC bind {}: {}", self.bind_addr, e)))?;
+    pub async fn start(self, handler: RpcHandler, shutdown_rx: mpsc::Receiver<()>) -> Result<()> {
+        let listener = TcpListener::bind(self.bind_addr).await.map_err(|e| {
+            crate::Error::ClusterError(format!("RPC bind {}: {}", self.bind_addr, e))
+        })?;
 
         info!("RPC server listening on {}", self.bind_addr);
 

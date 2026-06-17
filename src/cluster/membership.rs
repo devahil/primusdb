@@ -1,9 +1,9 @@
-use crate::Result;
 use crate::cluster::rpc::{
-    ClusterNodeInfo, JoinRequest, JoinResponse, PingMessage, PingReqMessage,
-    RpcClient, RpcMessage,
+    ClusterNodeInfo, JoinRequest, JoinResponse, PingMessage, PingReqMessage, RpcClient, RpcMessage,
 };
+use crate::Result;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -69,11 +69,7 @@ pub struct MembershipManager {
 }
 
 impl MembershipManager {
-    pub fn new(
-        node_id: String,
-        bind_addr: SocketAddr,
-        seed_servers: Vec<String>,
-    ) -> Self {
+    pub fn new(node_id: String, bind_addr: SocketAddr, seed_servers: Vec<String>) -> Self {
         Self {
             node_id,
             bind_addr,
@@ -95,7 +91,9 @@ impl MembershipManager {
 
     pub async fn add_member(&self, member: ClusterMember) {
         let mut members = self.members.write().await;
-        let entry = members.entry(member.node_id.clone()).or_insert_with(|| member.clone());
+        let entry = members
+            .entry(member.node_id.clone())
+            .or_insert_with(|| member.clone());
         if member.incarnation > entry.incarnation || entry.status == MemberStatus::Dead {
             *entry = member;
         }
@@ -257,10 +255,7 @@ impl MembershipManager {
             // Cleanup dead members
             self.cleanup_dead_members(cleanup_interval).await;
 
-            tokio::time::sleep(Duration::from_millis(
-                probe_interval.min(gossip_interval),
-            ))
-            .await;
+            tokio::time::sleep(Duration::from_millis(probe_interval.min(gossip_interval))).await;
         }
     }
 
@@ -358,15 +353,31 @@ impl MembershipManager {
         for client in clients.values() {
             for member in &members_snapshot {
                 // Send membership updates as heartbeat metadata
-                let meta = RpcMessage::MetadataSync(
-                    crate::cluster::rpc::MetadataSyncMessage {
-                        node_id: member.node_id.clone(),
-                        term: 0,
-                        shard_count: 0,
-                        total_records: 0,
-                        checksum: String::new(),
-                    },
+                let status_code: u8 = match member.status {
+                    MemberStatus::Alive => 0,
+                    MemberStatus::Suspect => 1,
+                    MemberStatus::Dead => 2,
+                    MemberStatus::Left => 3,
+                };
+                let member_data = format!(
+                    "{}:{}:{}:{}:{}:{:.2}:{:.2}:{:.2}",
+                    member.node_id,
+                    member.address,
+                    member.port,
+                    status_code,
+                    member.incarnation,
+                    member.cpu_usage,
+                    member.memory_usage,
+                    member.storage_usage
                 );
+                let checksum = format!("{:x}", sha2::Sha256::digest(member_data.as_bytes()));
+                let meta = RpcMessage::MetadataSync(crate::cluster::rpc::MetadataSyncMessage {
+                    node_id: member.node_id.clone(),
+                    term: member.incarnation,
+                    shard_count: member.roles.len() as u32,
+                    total_records: member.last_seen,
+                    checksum,
+                });
                 let _ = client.send(&meta).await;
             }
         }

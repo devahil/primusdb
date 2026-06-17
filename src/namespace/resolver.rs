@@ -42,7 +42,10 @@ impl NamespaceResolver {
         }
         let exists = self.controller.get_by_path(path).unwrap_or(None).is_some();
         let mut cache = self.cache.write().unwrap();
-        cache.insert(path.to_string(), if exists { "valid" } else { "invalid" }.to_string());
+        cache.insert(
+            path.to_string(),
+            if exists { "valid" } else { "invalid" }.to_string(),
+        );
         exists
     }
 

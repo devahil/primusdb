@@ -85,7 +85,7 @@ pub struct MerkleNode {
 }
 
 /// Reconciliation statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReconciliationStats {
     /// Total conflicts found
     pub conflicts_found: u64,
@@ -99,19 +99,6 @@ pub struct ReconciliationStats {
     pub bytes_transferred: u64,
     /// Duration in milliseconds
     pub duration_ms: u64,
-}
-
-impl Default for ReconciliationStats {
-    fn default() -> Self {
-        Self {
-            conflicts_found: 0,
-            conflicts_resolved: 0,
-            records_pulled: 0,
-            records_pushed: 0,
-            bytes_transferred: 0,
-            duration_ms: 0,
-        }
-    }
 }
 
 /// Vector clock ordering result
@@ -129,12 +116,14 @@ pub enum VClockOrder {
 
 /// Compare two vector clocks to determine causality.
 /// Returns how `local` relates to `remote`.
-pub fn compare_vector_clocks(local: &HashMap<String, u64>, remote: &HashMap<String, u64>) -> VClockOrder {
+pub fn compare_vector_clocks(
+    local: &HashMap<String, u64>,
+    remote: &HashMap<String, u64>,
+) -> VClockOrder {
     let mut local_newer = false;
     let mut remote_newer = false;
 
-    let all_keys: std::collections::HashSet<&String> =
-        local.keys().chain(remote.keys()).collect();
+    let all_keys: std::collections::HashSet<&String> = local.keys().chain(remote.keys()).collect();
 
     for key in all_keys {
         let lv = local.get(key).copied().unwrap_or(0);
@@ -165,9 +154,7 @@ pub fn resolve_cross_cluster_conflict(
         VClockOrder::Equal | VClockOrder::After => {
             (local.clone(), ConflictResolutionStrategy::KeepLocal)
         }
-        VClockOrder::Before => {
-            (remote.clone(), ConflictResolutionStrategy::KeepRemote)
-        }
+        VClockOrder::Before => (remote.clone(), ConflictResolutionStrategy::KeepRemote),
         VClockOrder::Concurrent => {
             // Concurrent writes: merge by taking the one with more recent timestamp
             if local.timestamp >= remote.timestamp {

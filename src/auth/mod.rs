@@ -118,7 +118,6 @@ pub enum ResourceType {
     Vector,
     Document,
     Relational,
-    KeyValue,
     Namespace,
     Cluster,
     Admin,
@@ -699,19 +698,19 @@ impl AuthManager {
         action: Action,
     ) -> crate::Result<bool> {
         for scope in &validation.scopes {
-            if scope.resource == ResourceType::All || scope.resource == resource {
-                if scope.actions.contains(&action) || scope.actions.contains(&Action::Admin) {
-                    return Ok(true);
-                }
+            if (scope.resource == ResourceType::All || scope.resource == resource)
+                && (scope.actions.contains(&action) || scope.actions.contains(&Action::Admin))
+            {
+                return Ok(true);
             }
         }
 
         for privilege in &validation.privileges {
-            if privilege.resource == ResourceType::All || privilege.resource == resource {
-                if privilege.actions.contains(&action) || privilege.actions.contains(&Action::Admin)
-                {
-                    return Ok(true);
-                }
+            if (privilege.resource == ResourceType::All || privilege.resource == resource)
+                && (privilege.actions.contains(&action)
+                    || privilege.actions.contains(&Action::Admin))
+            {
+                return Ok(true);
             }
         }
 

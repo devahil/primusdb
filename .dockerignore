@@ -1,0 +1,17 @@
+target/
+data/
+backups/
+docs/
+examples/
+drivers/
+scripts/
+.git/
+.gitignore
+.dockerignore
+*.md
+*.sh
+Dockerfile
+docker-compose*.yml
+.env
+node_modules/
+.DS_Store

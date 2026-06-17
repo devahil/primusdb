@@ -196,7 +196,7 @@ pub enum Operation {
 }
 ```
 
-## Security Model (Real Implementations)
+## Security Model
 
 ### Authentication
 - **Certificate-Based**: X.509 v3 certificates for node authentication
@@ -204,13 +204,13 @@ pub enum Operation {
 - **Trust Anchors**: Certificate authority for trust establishment
 
 ### Encryption
-- **AES-256-GCM** (`ring::aead::AES_256_GCM`): Authenticated encryption for message confidentiality
+- **AES-256-GCM**: Authenticated encryption for message confidentiality
 - **Ephemeral Keys**: Perfect forward secrecy with ECDHE
 - **Key Rotation**: Automatic key rotation for long-running connections
 
 ### Integrity
-- **Ed25519 Signatures** (`ring::signature::Ed25519KeyPair`): Cryptographic signatures for message authenticity
-- **HMAC Authentication**: Additional message integrity verification via `ring::hmac`
+- **Ed25519 Signatures**: Cryptographic signatures for message authenticity
+- **HMAC Authentication**: Additional message integrity verification
 - **Merkle Trees**: Hierarchical integrity verification for bulk operations
 
 ## Journaling System
@@ -266,6 +266,7 @@ for all PrimusDB distributed operations, ensuring data integrity, availability,
 and consistency across global-scale deployments.
 */
 
+pub mod api;
 pub mod handlers;
 pub mod journaling;
 pub mod messaging;

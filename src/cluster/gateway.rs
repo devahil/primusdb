@@ -7,20 +7,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::warn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum NodeSelectorStrategy {
     RoundRobin,
+    #[default]
     LeastLoaded,
     LowestLatency,
     ShardAware,
     Random,
     DomainAware,
-}
-
-impl Default for NodeSelectorStrategy {
-    fn default() -> Self {
-        Self::LeastLoaded
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -149,13 +144,7 @@ impl ClusterGateway {
         self
     }
 
-    pub async fn register_node(
-        &self,
-        node_id: &str,
-        host: &str,
-        port: u16,
-        shards: Vec<String>,
-    ) {
+    pub async fn register_node(&self, node_id: &str, host: &str, port: u16, shards: Vec<String>) {
         let mut nodes = self.nodes.write().await;
         if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
             existing.host = host.to_string();
@@ -211,7 +200,8 @@ impl ClusterGateway {
             let mut sorted = latencies.clone();
             sorted.sort_unstable();
             let p99_idx = ((sorted.len() as f64) * 0.99) as usize;
-            metrics.p99_latency_ms = *sorted.get(p99_idx.min(sorted.len() - 1)).unwrap_or(&0) as f64;
+            metrics.p99_latency_ms =
+                *sorted.get(p99_idx.min(sorted.len() - 1)).unwrap_or(&0) as f64;
         }
     }
 
@@ -324,7 +314,7 @@ impl ClusterGateway {
 
         // Domain-aware strategy check
         if let NodeSelectorStrategy::DomainAware = self.config.strategy {
-            if let (Some(key), Some(ref dm)) = (shard_key, self.domain_manager.as_ref()) {
+            if let (Some(key), Some(dm)) = (shard_key, self.domain_manager.as_ref()) {
                 let domains = dm.list_domains().await;
                 for domain in &domains {
                     if domain.collections.iter().any(|c| key.starts_with(c))
@@ -350,14 +340,14 @@ impl ClusterGateway {
         let nodes = self.nodes.read().await;
         let healthy: Vec<&GatewayNode> = nodes
             .iter()
-            .filter(|n| {
-                n.health == NodeHealth::Healthy || n.health == NodeHealth::Degraded
-            })
+            .filter(|n| n.health == NodeHealth::Healthy || n.health == NodeHealth::Degraded)
             .filter(|n| !n.circuit_open || n.circuit_open_until <= now_ms())
             .collect();
 
         if healthy.is_empty() {
-            return Err(crate::Error::ClusterError("No healthy nodes available".into()));
+            return Err(crate::Error::ClusterError(
+                "No healthy nodes available".into(),
+            ));
         }
 
         // If preferred nodes specified, try them first
@@ -385,14 +375,21 @@ impl ClusterGateway {
                 .filter(|n| n.shards.iter().any(|s| key.starts_with(s)))
                 .collect();
             if !shard_nodes.is_empty() {
-                let node = select_best_node(&shard_nodes, &self.config, &self.round_robin_index, &self.nodes).await;
+                let node = select_best_node(
+                    &shard_nodes,
+                    &self.config,
+                    &self.round_robin_index,
+                    &self.nodes,
+                )
+                .await;
                 metrics.routed_requests += 1;
                 return Ok(node);
             }
         }
 
         // Strategy-based selection from all healthy nodes
-        let node = select_best_node(&healthy, &self.config, &self.round_robin_index, &self.nodes).await;
+        let node =
+            select_best_node(&healthy, &self.config, &self.round_robin_index, &self.nodes).await;
         metrics.routed_requests += 1;
         Ok(node)
     }
@@ -432,7 +429,10 @@ impl ClusterGateway {
                 let nodes = self.nodes.read().await;
                 let mut metrics = self.metrics.write().await;
                 metrics.active_nodes = nodes.len();
-                metrics.healthy_nodes = nodes.iter().filter(|n| n.health == NodeHealth::Healthy).count();
+                metrics.healthy_nodes = nodes
+                    .iter()
+                    .filter(|n| n.health == NodeHealth::Healthy)
+                    .count();
             }
         }
     }
@@ -493,7 +493,8 @@ impl ClusterGateway {
                 let latency = start.elapsed().as_secs_f64() * 1000.0;
                 if resp.status().is_success() {
                     self.record_success(&route.node_id, latency).await;
-                    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                    let json: serde_json::Value =
+                        resp.json().await.unwrap_or(serde_json::Value::Null);
                     Ok(json)
                 } else {
                     let status = resp.status().as_u16();
@@ -515,8 +516,8 @@ impl ClusterGateway {
     }
 }
 
-async fn select_best_node<'a>(
-    candidates: &[&'a GatewayNode],
+async fn select_best_node(
+    candidates: &[&GatewayNode],
     config: &GatewayConfig,
     round_robin_index: &RwLock<usize>,
     _nodes: &RwLock<Vec<GatewayNode>>,
@@ -539,21 +540,19 @@ async fn select_best_node<'a>(
             *idx += 1;
             (*selected).clone()
         }
-        NodeSelectorStrategy::LeastLoaded => {
-            candidates
-                .iter()
-                .min_by_key(|n| n.active_connections)
-                .map(|n| (*n).clone())
-                .unwrap_or_else(|| candidates[0].clone())
-        }
-        NodeSelectorStrategy::LowestLatency => {
-            candidates
-                .iter()
-                .min_by(|a, b| a.ewma_latency_ms.partial_cmp(&b.ewma_latency_ms).unwrap())
-                .map(|n| (*n).clone())
-                .unwrap_or_else(|| candidates[0].clone())
-        }
-        NodeSelectorStrategy::ShardAware | NodeSelectorStrategy::Random | NodeSelectorStrategy::DomainAware => {
+        NodeSelectorStrategy::LeastLoaded => candidates
+            .iter()
+            .min_by_key(|n| n.active_connections)
+            .map(|n| (*n).clone())
+            .unwrap_or_else(|| candidates[0].clone()),
+        NodeSelectorStrategy::LowestLatency => candidates
+            .iter()
+            .min_by(|a, b| a.ewma_latency_ms.partial_cmp(&b.ewma_latency_ms).unwrap())
+            .map(|n| (*n).clone())
+            .unwrap_or_else(|| candidates[0].clone()),
+        NodeSelectorStrategy::ShardAware
+        | NodeSelectorStrategy::Random
+        | NodeSelectorStrategy::DomainAware => {
             let idx = fast_random_usize() % candidates.len();
             candidates[idx].clone()
         }
@@ -570,7 +569,10 @@ async fn select_best_node<'a>(
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 fn fast_random_usize() -> usize {

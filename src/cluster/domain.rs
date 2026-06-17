@@ -1,5 +1,5 @@
-use crate::cluster::rpc::{FedDataReplicaRequest, FedDataReplicaAck, RpcClient, RpcMessage};
 use crate::cluster::federation::FederationManager;
+use crate::cluster::rpc::{FedDataReplicaAck, FedDataReplicaRequest, RpcClient, RpcMessage};
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,20 +8,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum DomainReplicationMode {
+    #[default]
     Sync,
     Async,
     Quorum,
 }
 
-impl Default for DomainReplicationMode {
-    fn default() -> Self {
-        Self::Sync
-    }
-}
-
 impl DomainReplicationMode {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "sync" => Self::Sync,
@@ -82,6 +78,7 @@ impl DataDomainManager {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_domain(
         &self,
         name: &str,
@@ -108,7 +105,10 @@ impl DataDomainManager {
 
         let mut domains = self.domains.write().await;
         domains.insert(name.to_string(), domain.clone());
-        info!("DataDomain '{}' created with {} members", name, member_count);
+        info!(
+            "DataDomain '{}' created with {} members",
+            name, member_count
+        );
         Ok(domain)
     }
 
@@ -126,11 +126,7 @@ impl DataDomainManager {
         info!("DataDomain '{}' deleted", name);
     }
 
-    pub async fn add_cluster_to_domain(
-        &self,
-        domain_name: &str,
-        cluster_id: &str,
-    ) -> Result<()> {
+    pub async fn add_cluster_to_domain(&self, domain_name: &str, cluster_id: &str) -> Result<()> {
         let mut domains = self.domains.write().await;
         if let Some(domain) = domains.get_mut(domain_name) {
             if !domain.member_clusters.contains(&cluster_id.to_string()) {
@@ -154,10 +150,7 @@ impl DataDomainManager {
         if let Some(domain) = domains.get_mut(domain_name) {
             domain.member_clusters.retain(|c| c != cluster_id);
             domain.version += 1;
-            info!(
-                "Cluster '{}' left DataDomain '{}'",
-                cluster_id, domain_name
-            );
+            info!("Cluster '{}' left DataDomain '{}'", cluster_id, domain_name);
         }
         Ok(())
     }
@@ -173,7 +166,12 @@ impl DataDomainManager {
     ) -> Result<Vec<FedDataReplicaAck>> {
         let domain = match self.domains.read().await.get(domain_name) {
             Some(d) => d.clone(),
-            None => return Err(crate::Error::ClusterError(format!("Domain '{}' not found", domain_name))),
+            None => {
+                return Err(crate::Error::ClusterError(format!(
+                    "Domain '{}' not found",
+                    domain_name
+                )))
+            }
         };
 
         let targets: Vec<&String> = domain
@@ -210,12 +208,18 @@ impl DataDomainManager {
                 match members.get(target.as_str()) {
                     Some(member) => (member.info.address.clone(), member.info.port),
                     None => {
-                        warn!("Target cluster '{}' not found in federation for domain replication", target);
+                        warn!(
+                            "Target cluster '{}' not found in federation for domain replication",
+                            target
+                        );
                         continue;
                     }
                 }
             } else {
-                warn!("Federation not configured for cross-cluster replication to '{}'", target);
+                warn!(
+                    "Federation not configured for cross-cluster replication to '{}'",
+                    target
+                );
                 continue;
             };
 
@@ -252,14 +256,36 @@ impl DataDomainManager {
         Ok(acks)
     }
 
-    pub async fn handle_replica_request(
-        &self,
-        req: FedDataReplicaRequest,
-    ) -> FedDataReplicaAck {
+    pub async fn handle_replica_request(&self, req: FedDataReplicaRequest) -> FedDataReplicaAck {
         debug!(
-            "Received cross-cluster replica for domain '{}', key '{}' from '{}'",
-            req.domain_name, req.key, req.source_cluster
+            "Received cross-cluster replica for domain '{}', key '{}' from '{}' ({} bytes)",
+            req.domain_name,
+            req.key,
+            req.source_cluster,
+            req.data.len()
         );
+
+        // Store the pending replication for processing
+        self.pending_replications
+            .write()
+            .await
+            .insert(req.operation_id.clone(), req.clone());
+
+        // Record sync status
+        {
+            let mut status = self.replica_status.write().await;
+            status.insert(
+                format!("{}:{}", req.domain_name, req.source_cluster),
+                DomainReplicaStatus {
+                    domain_name: req.domain_name.clone(),
+                    cluster_id: req.source_cluster.clone(),
+                    last_sync_ms: now_ms(),
+                    records_pending: 0,
+                    lag_ms: 0,
+                    healthy: true,
+                },
+            );
+        }
 
         FedDataReplicaAck {
             operation_id: req.operation_id,
@@ -289,7 +315,6 @@ impl DataDomainManager {
         statuses
     }
 
-    /// Check if a storage type + collection pair belongs to any domain.
     pub async fn storage_belongs_to_domain(
         &self,
         storage_type: &str,
@@ -306,33 +331,6 @@ impl DataDomainManager {
         None
     }
 
-    /// Find all domains whose `storage_types` and `collections`/`tables` match
-    /// the given write.  Uses case-insensitive storage type comparison so that
-    /// "columnar" and "Columnar" both work.
-    pub async fn find_matching_domains(
-        &self,
-        storage_type: &str,
-        table: &str,
-    ) -> Vec<String> {
-        let st_lower = storage_type.to_lowercase();
-        self.domains
-            .read()
-            .await
-            .values()
-            .filter(|d| {
-                let type_match = d
-                    .storage_types
-                    .iter()
-                    .any(|t| t.to_lowercase() == st_lower);
-                let collection_match = d.collections.is_empty()
-                    || d.collections.iter().any(|c| c == table);
-                let table_match = d.tables.iter().any(|t| t == table);
-                type_match && (collection_match || table_match || d.collections.is_empty())
-            })
-            .map(|d| d.name.clone())
-            .collect()
-    }
-
     // ---- DataDomain Auto-Balance ----
 
     pub async fn check_balance(&self) -> Vec<DomainBalancePlan> {
@@ -346,12 +344,17 @@ impl DataDomainManager {
 
             let load_per_cluster = if let Some(ref fed) = self.federation {
                 let members = fed.members.read().await;
-                domain.member_clusters.iter().map(|cid| {
-                    let load = members.get(cid)
-                        .map(|m| m.consecutive_failures as f64 + m.info.avg_latency_ms / 100.0)
-                        .unwrap_or(1.0);
-                    (cid.clone(), load)
-                }).collect::<Vec<_>>()
+                domain
+                    .member_clusters
+                    .iter()
+                    .map(|cid| {
+                        let load = members
+                            .get(cid)
+                            .map(|m| m.consecutive_failures as f64 + m.info.avg_latency_ms / 100.0)
+                            .unwrap_or(1.0);
+                        (cid.clone(), load)
+                    })
+                    .collect::<Vec<_>>()
             } else {
                 continue;
             };
@@ -364,11 +367,13 @@ impl DataDomainManager {
                 / load_per_cluster.len() as f64;
             let threshold = avg_load * 0.3;
 
-            let overloaded: Vec<_> = load_per_cluster.iter()
+            let overloaded: Vec<_> = load_per_cluster
+                .iter()
                 .filter(|(_, l)| *l > avg_load + threshold)
                 .collect();
 
-            let underloaded: Vec<_> = load_per_cluster.iter()
+            let underloaded: Vec<_> = load_per_cluster
+                .iter()
                 .filter(|(_, l)| *l < avg_load - threshold)
                 .collect();
 
@@ -395,8 +400,12 @@ impl DataDomainManager {
                 plans.push(DomainBalancePlan {
                     domain_name: name.clone(),
                     moves,
-                    reason: format!("auto-balance: {} overloaded, {} underloaded (avg={:.2})",
-                        overloaded.len(), underloaded.len(), avg_load),
+                    reason: format!(
+                        "auto-balance: {} overloaded, {} underloaded (avg={:.2})",
+                        overloaded.len(),
+                        underloaded.len(),
+                        avg_load
+                    ),
                 });
             }
         }
