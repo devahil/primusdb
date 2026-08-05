@@ -5,6 +5,132 @@ All notable changes to PrimusDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2-alpha] - 2026-08-04
+
+> **Technical note**: This release removes the TUI (terminal user interface) to redirect all development effort toward the core database engine. The TUI had deep architectural problems (~150 fields in a god object, irrecoverable mouse model, 21 non-functional workspaces, CRUD operations silently ignored, zero integration tests) whose repair cost outweighed any benefit. Instead, effort was invested in fixing critical bugs (silent data loss, panics on corrupt data, swallowed API errors), optimizing hot paths, removing ~55 dead code items, and a complete documentation cleanup — changes that directly impact production reliability and performance.
+
+### Added
+
+#### TimeSeries Storage Engine
+- **New storage engine**: Complete `TimeSeriesEngine` for IoT metrics, logs, and temporal data. Tag-based partitioning, range queries, aggregation (avg/min/max/sum/count). (`crates/primusdb-storage/src/timeseries.rs`)
+
+#### AuditLogger Integration
+- **Auth event auditing**: `AuthManager` logs user creation and authentication events. (`src/auth/mod.rs`)
+
+#### Namespace Management
+- **Namespace isolation**: Full namespace support across all CRUD and DDL/ER operations via `NamespacedStorageEngine` wrapper. (`src/namespace/`)
+
+#### System Database
+- **System Database Module** (`src/system/`): Internal metadata, configuration, and audit persistence layer:
+  - `SystemDatabase` — orchestrator that initializes all sub-modules, opens sled-backed store at `{data_dir}/system/`
+  - `SystemCatalog` — key-value metadata store with categories (server.version, engine.registry, system.created_at, etc.)
+  - `ConfigStore` — persistent configuration values with `ConfigSource` precedence tracking, snapshot CRUD, config bundle export/import (JSON round-trip), and validation
+  - `MigrationManager` — schema versioning with `run_pending()`, `applied_migrations()`, `current_version()`, `is_migrated()`
+  - `AuditLogger` — event logging with pruning at 10,000 events; query methods `recent()`, `by_type()`, `count()`
+  - `SystemDatabase::init()` is idempotent — safe to call multiple times
+  - 29 unit tests covering all sub-modules
+- **System Database REST API**: 2 new endpoints:
+  - `GET /api/v1/system/export` — returns JSON bundle of config, catalog, audit, server info
+  - `POST /api/v1/system/import` — accepts JSON bundle to merge config entries
+- **PrimusDB System DB Integration**: `PrimusDB` struct gains `system: Option<Arc<SystemDatabase>>` field, auto-initialized in `PrimusDB::new()` via `config.storage.data_dir`; accessible via `primusdb.system_db()`
+
+#### Doctor Diagnostics
+- **Doctor flags**: `primusdb doctor` now supports `--config`, `--system-db`, `--notebooks`, `--rag` flags for targeted diagnostic checks.
+
+#### Interactive REPL Shell
+- **`primusdb shell` and `primusdb connect`**: new interactive console built on `rustyline`, replacing the removed TUI as the terminal interface:
+  - `ReplState` keeps the active server URL and current database context; `use <db>` / `use none` switch databases across queries
+  - Each line is tokenized with `shlex` and re-parsed through the full clap CLI (`Cli::try_parse_from`), so every CLI command works in the shell
+  - REPL-only commands: `connect <url>`, `disconnect`, `use`, `help`, `history`, `clear`, `exit`/`quit`
+  - Autocompletion of the clap command tree plus live database names from `GET /api/v1/databases`
+  - Command history persisted to `~/.config/primusdb/history`
+  - Synchronous execution on its own `current_thread` runtime to avoid async recursion with `run_cli`
+
+#### Health & Discovery Metadata
+- **`GET /api/v1/health`** now returns operational metadata: `node_id`, `instance_id`, `version`, `uptime_seconds`, `architecture` (previously just a bare status object)
+- **Instance discovery** (`primusdb instance list`): fixed response parsing — `parse_instance` now unwraps the `{data: ...}` API envelope correctly
+
+#### Persistent Inverted Index for Unified Search (`src/search/`)
+- **`PersistentSearchIndex`** (`src/search/index.rs`): sled-backed inverted index keyed by `"engine\ttable"`. Segment cache warmed at open, per-segment `dirty` flags persisted, `insert_document`/`remove_document` incremental maintenance, `drop_table`, `document_count`/`segment_count`.
+- **`SearchConfig { persistent_index: bool }`** (default `true`): wired into `PrimusDBConfig.search` (serde-compatible, `Default` implemented).
+- **`PrimusDB.search_index`**: opened at `{data_dir}/search` in `PrimusDB::new()`; a failed open degrades to `None` (live-scan fallback) with a warning. Exposed via `PrimusDB::search_index()`.
+- **Incremental maintenance in `execute_query`**: `Create` updates the index incrementally (id from the `id` field, else the record JSON); `Update`/`Delete`/`Truncate`/`RenameTable` mark the segment dirty; rebuilds are lazy on the next search. Best-effort and non-fatal by design — index failures never fail a committed write.
+- **`SearchService::search`** now queries the persistent index, rebuilding dirty or missing segments from live data (`rebuild_segment`); live scan remains the fallback when no index exists.
+- Tests: `test_persistent_search_index_lifecycle` (dirty on delete → lazy rebuild → stale hits disappear) and `test_persistent_search_index_survives_restart` (segments restored from disk, clean, search answered from disk).
+
+#### Capability Negotiation (`src/capabilities.rs`)
+- **Contract**: `ServerCapabilities` (protocol version, server info, engine capabilities, features) with `PROTOCOL_VERSION = 1`; `PrimusDB::capabilities()` builds the snapshot from the capability registry (`ALL_ENGINES` + `list_tables`).
+- **REST**: `GET /api/v1/capabilities` (`capabilities_handler`).
+- **REPL**: banner now prints version/node/instance/table count; table completion for `query`/`sql`/`search`/`ts`/`vector`/`analyze`/`anomalies`/`info` is driven by server capabilities and refreshed when the server changes.
+- **Drivers**: capability negotiation in all five drivers — Rust `NativeDriver::capabilities()`/`negotiate(required_features, required_engines)`; Python `fetch_capabilities()`/`negotiate()`; Node, Ruby, and Java equivalents against `/api/v1/capabilities`.
+
+#### Integrity Evidence for Cluster Reconciliation (`src/integrity/`)
+- **`ChainEvidence`**: compact signed-chain evidence (sequence count, last hash, checkpoint root) offered to peers before exchanging full records — an integrity-first handshake.
+- **`IntegrityService::chain_evidence(db)`** and **`IntegrityService::reconcile(db, peer_records)`**.
+- **`compare_chains` hardening**: validates the local chain too — new `local_chain_valid` field and `InvalidLocal` verdict; `plan_repair` requires operator intervention for `InvalidLocal` as well.
+- **REST**: `GET /api/v1/databases/:db/integrity/reconcile/evidence` and `POST /api/v1/databases/:db/integrity/reconcile` (body `{ "peer_records": [...] }` → `{ report, repair_plan }`; nothing applied automatically).
+- **CLI**: `primusdb integrity evidence {db}` and `primusdb integrity reconcile {db} --peer-url ...` (fetches peer evidence and records before comparing).
+- Tests: unit `test_invalid_local_chain` + E2E `test_integrity_reconciliation_evidence`.
+
+### Removed
+- **TUI removed**: The terminal user interface (~25K lines, ratatui + crossterm) was removed from the codebase.
+
+  **Technical justification**: The TUI had fundamental architectural problems that made it unreliable:
+  - **God object**: `TuiApp` contained ~150 mutable fields — any section could mutate another's state, making data flow impossible to reason about
+  - **Broken mouse model**: Sidebar click mapping used raw data counts instead of the flattened tree structure, so coordinates never matched the rendered tree. Multiple fixes (HEADER_HEIGHT, scroll tracking) could not correct the fundamental mismatch
+  - **Unregistered workspaces**: 21 workspace implementations existed as files but were never registered in `TuiApp::new()` — keyboard shortcuts for CRUD operations silently did nothing
+  - **CRUD actions silently discarded**: `WorkspaceAction::ExecCommand` and the command palette called functions that returned action strings that were ignored — CRUD operations appeared to execute but were discarded
+  - **Broken API consumption**: `fetch_namespaces` could not parse the `{data: [{path: ...}]}` API format — returned raw JSON as a string, causing the sidebar to display garbage
+  - **Zero integration tests**: 179 unit tests existed but none tested the TUI integrated with a real server
+  - **High maintenance cost**: ratatui + crossterm added ~3min to compilation times and ~8MB to the binary. Every storage engine change required updating renders, event handlers, and state fields in 3+ files
+
+  **Decision**: Remove the TUI and focus on CLI (+25 commands) and REST API (100+ endpoints) as primary interfaces. The CLI already supports all database operations and the REST API enables integration with external tools, web UIs, and monitoring systems.
+- **Legacy/orphaned source files removed**: `src/cli/legacy.rs` (~1,400 lines of superseded CLI code), `src/parser.rs` (deprecated parser with no callers), `src/metrics.rs` (only consumed by the disabled protocol), `src/drivers/` (orphaned driver docs module not referenced from `lib.rs`)
+- **Unused dependencies dropped (12)**: `bytes`, `tower`, `hyper`, `tonic`, `config`, `ndarray`, `approx`, `zstd`, `anyhow`, `urlencoding`, `hex-literal`, `secp256k1`
+- **Additional dead items removed**: ~20 orphaned struct fields/methods/variants across the engine (e.g. `HyperledgerStyleConsensus` RNG+config, `DataChunk` unused metadata fields, `TransactionManager::active_transactions`, `SyncCoordinator::pending_writes`, `RpcClient` timeout, `RaftNode::election_reset`, `TrustManager` config, `Check::fail`) — plus the 8-byte `bytes` payload in timeseries `DataChunk`
+
+### Changed
+- `PrimusDB::new()` now initializes the system database from `config.storage.data_dir` on startup
+- `PrimusDB::init_system_db()` extended with runtime config and server info persistence
+- Doctor command now accepts 4 additional optional flags (`--config`, `--system-db`, `--notebooks`, `--rag`)
+- Version string updated to `1.3.2-alpha`
+- **`db create` is now idempotent**: creating an already-existing database succeeds instead of erroring; an explicit `--namespace` argument sets a nested namespace path (previously the `description` field was repurposed to smuggle the namespace — now a proper `CreateDatabaseRequest.namespace` field)
+- `src/bin/cli.rs` reduced to a deprecated thin wrapper delegating to `primusdb::cli::run_cli` (parity with `primusdb shell`)
+- `PrimusDBConfig` gains the `search` field; every config literal and test fixture updated
+- Unified search documentation updated to state honestly when the persistent index is used vs. the live-scan fallback
+
+### Fixed
+- **Bincode serialization**: Replaced `bincode::serialize`/`bincode::deserialize` with `serde_json::to_vec`/`serde_json::from_slice` in catalog, config_store, and audit modules
+- **Storage engine crash on corrupt data**: `try_into().unwrap()` on sled key bytes in columnar/vector engines — now returns proper error instead of panic
+- **Silent data loss in document engine**: 22 sites where sled `insert`/`flush` errors were ignored with `let _` — now propagated via `map_err` + `?`
+- **Consensus keypair not persisted**: `db.insert("node_keypair", ...)` result was silently dropped — node could restart with inconsistent identity
+- **API error swallowing**: 5 `.ok()` sites in API handlers that returned 200 on parse failures — now return 400 with error body
+- **Query engine error swallowing**: `evaluate_condition().unwrap_or(false)` in relational engine — query evaluation errors now propagate instead of returning empty results
+- **Revision parsing in key-value engine**: `parts[0].parse().unwrap_or(0)` silently produced revision 0 on invalid format — now returns proper error
+- **Vector similarity missing bounds check**: `cosine_similarity` and `euclidean_distance` silently produced wrong results on mismatched input dimensions
+- **`/status` endpoint**: returned the whole server struct as JSON and reported an HTTP error when the server was not fully started — now returns a stable status payload
+- **Health/discovery parsing**: `parse_instance` could not read the `{data: [...]}` API envelope; health field mapping was corrected to match the server's actual JSON
+- **Protocol `Channel::new()`**: initialized 5 struct fields for 4 (field count mismatch) — fixed
+- **Duplicate `BackupStatus`**: defined in both the backup module and CLI output module, breaking compilation — unified
+- **`db create` idempotency**: `create_database` previously errored when the database already existed — now a no-op success
+
+### Optimization
+- **Dead code removed**: ~55 `#[allow(dead_code)]` markers cleaned — unused struct fields, methods, and enum variants removed
+- **Hot-path allocations reduced**: `format!("table:{}", table)` on every sled operation replaced with cached `table_key()` helper in columnar, vector, and relational engines
+- **Iterator idiom**: 29 sites changed from `for x in vec.iter()` to `for x in &vec`
+- **Error propagation**: `.ok()` on production paths replaced with `?` in timeseries, CDC, system DB, and API modules (14 sites)
+- **Dependency weight removed**: dropping the 12 unused crates shortens the compile graph and trims binary size; keeping `graph.rs`/`fulltext.rs` out of the crate means no dead-code scanning or compile cost for those modules
+
+### Documentation
+- **Deep inline documentation**: every module in the crate re-documented (~7,000+ lines) with ASCII architecture diagrams, module-layout trees, operational semantics, and error-path explanations — including `src/lib.rs` module map with all 6 storage engines, `src/storage/`, `src/query/`, `src/cli/`, `src/cluster/`, `src/api/`, `src/governor/`, `src/migration/`, `src/system/`, `src/cache/`, `src/consensus/`, `src/crypto/`
+- **docs/ brought in sync with the codebase**: `docs/tui/*` (14 files) marked `DEPRECATED` (TUI removed); `docs/features/graph.md` and `docs/features/fulltext.md` marked "NOT AVAILABLE" (orphaned sources, not compiled); `code-layout.md`, `reference/api.md`, `operations/health-checks.md`, `usage/cli.md`, and release notes updated to reflect the real CLI/REPL/REST surface
+
+### Testing
+- 407 tests passing (lib + integration + driver)
+- `cargo clippy --workspace -- -D warnings` — 0 warnings (17 pre-existing lints fixed this cycle: redundant references, `values()`/`values_mut()` collections, `?` on `Option`, `from_str`→`parse_from`, `is_some_and`, collapsible/redundant matches, `manual_flatten`, reference-to-reference)
+- `cargo fmt --all --check` — 0 errors
+- `cargo build --all-features` — clean
+
 ## [1.3.1-alpha] - 2026-06-17
 
 ### Added
@@ -55,7 +181,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Governor documentation** (3 new pages + updated references):
   - `docs/features/governor.md` — feature overview, CLI commands, REST table, metrics reference
   - `docs/operations/resource-governor.md` — day-to-day operations, POST endpoints with curl examples
-  - `docs/tui/governor-panel.md` — TUI governor panel layout and usage
   - `docs/reference/api.md` — complete governor REST API section (9 endpoints documented)
   - `docs/usage/drivers.md` — governor driver API table with code examples
 - **8 new governor unit tests**: execution lifecycle, policy enforcement, metrics aggregation, limit checking, violation recording
@@ -69,7 +194,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Governor counters moved from static globals to per-instance `Inner` fields (thread-safe, testable)
 - `metrics_snapshot()` now aggregates real counter data instead of returning zeroed structs
 - Execution-insert ordering in `engine.rs` fixed to insert at end of list
-- TUI governor panel version string synced to `1.3.1-alpha`
 - All driver header versions synced to `1.3.1-alpha`
 
 ### Fixed
@@ -693,3 +817,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Architecture Planning**: Defined hybrid storage approach
 - **Requirements**: Established core functionality roadmap
+
+### v1.3.3-alpha
+- **TUI removed**: The terminal user interface (ratatui/crossterm) was removed from the codebase. All references cleaned from docs. Remaining: CLI (+25 commands), REST API, system database, config store, backup/restore, migration, cluster, federation, governor, CDC, notebook, RAG, report builder, file browser, monitoring, security, settings, and all storage engines.

@@ -1,6 +1,8 @@
 # PrimusDB TUI Guide
 
-The PrimusDB Terminal User Interface (TUI) provides an interactive, keyboard-driven dashboard for managing databases, running queries, monitoring instances, and performing migrations.
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead. See the [CLI Guide](../cli/README.md) for the current interface.
+
+The PrimusDB Terminal User Interface (TUI) provides a friendly, mouse-capable, keyboard-driven dashboard for database administration, querying, monitoring, and configuration.
 
 ## Quick Start
 
@@ -8,106 +10,111 @@ The PrimusDB Terminal User Interface (TUI) provides an interactive, keyboard-dri
 # Launch the TUI (auto-discovers local instances)
 primusdb tui
 
-# Launch and auto-connect to a specific server
+# Launch and auto-connect
 primusdb tui --server http://localhost:8080
+primusdb tui --endpoint http://localhost:8080 --namespace myapp --safe-mode
 ```
 
 ## Layout
 
-The TUI is split into four horizontal regions:
-
 ```
-┌─ Header ──────────────────────────────────────────┐
-│  PrimusDB  ● connected  http://localhost:8080      │
-├── Navigation ──┬─ Content ─────────────────────────┤
-│  ▶ Dashboard   │  [section content here]           │
-│    Instances   │                                   │
-│    Clusters    │                                   │
-│    ...         │                                   │
-├────────────────┴─ Input ──────────────────────────┤
-│  Query  Type SQL and press Enter to execute...     │
-├────────────────── Status ─────────────────────────┤
-│  12:34:56  Connected to http://localhost:8080      │
-└───────────────────────────────────────────────────┘
+┌─ HEADER (version | connection status) ───────────────────────┐
+├─────────┬────────────────────────────────────────────────────┤
+│         │                                                    │
+│ Sidebar │              Content Panel                         │
+│ (16     │   (section-specific content)                       │
+│  nav    │                                                    │
+│  items) │                                                    │
+│         │                                                    │
+├─────────┴────────────────────────────────────────────────────┤
+│ INPUT BAR: Query / Command / Config Input                    │
+├──────────────────────────────────────────────────────────────┤
+│ STATUS BAR: Server ● │ v1.3.2 │ ns:default │ db:mydb │ Section│
+├──────────────────────────────────────────────────────────────┤
+│ EVENT BAR: Latest activity message                           │
+└──────────────────────────────────────────────────────────────┘
 ```
-
-### Regions
-
-| Region | Description |
-|--------|-------------|
-| **Header** | App name, connection status indicator (●/○), current URL |
-| **Sidebar** | Vertical navigation list of all 22 sections |
-| **Content** | Main panel — renders the currently selected section |
-| **Input bar** | Query input, command palette input, or migration wizard URL/namespace input |
-| **Status bar** | Event log — shows recent activity messages |
 
 ## Sections
 
-The TUI has 22 navigable sections:
-
 | # | Section | Description |
 |---|---------|-------------|
-| 1 | **Dashboard** | Health overview, ASCII charts, discovery results, backups summary |
-| 2 | **Instances** | Discovered PrimusDB instances — select to connect |
-| 3 | **Clusters** | Cluster status, topology diagram, nodes, events |
-| 4 | **Nodes** | Cluster node table |
-| 5 | **Engines** | Storage engine information |
-| 6 | **Databases** | List databases |
-| 7 | **Namespaces** | List namespaces |
-| 8 | **Tables/Collections** | Table listing |
-| 9 | **Vector Indexes** | Vector index listing |
-| 10 | **Graph** | Graph data |
-| 11 | **AIML** | AI/ML data |
-| 12 | **Queries** | Execute SQL queries, view results with scrolling |
-| 13 | **Backups** | Backup file listing with detail columns |
-| 14 | **Restores** | Backup restore entries |
-| 15 | **Migrations** | Migration info + interactive 12-step migration wizard |
-| 16 | **Users** | User management |
-| 17 | **Roles** | Role management |
-| 18 | **Metrics** | Real-time performance metrics |
-| 19 | **Logs** | Server logs (journalctl) |
-| 20 | **Diagnostics** | Server diagnostics |
-| 21 | **Settings** | Server configuration |
-| 22 | **Help** | Keybindings reference, version info |
+| 1 | **Dashboard** | Server health, uptime, version, engines, cluster summary |
+| 2 | **Query Console** | SQL/UQL editor with history, results, export |
+| 3 | **Databases & Engines** | List engines, databases/tables |
+| 4 | **Namespaces** | List, create, delete, switch active namespace |
+| 5 | **Cluster** | Node list, Raft status, membership, shard distribution |
+| 6 | **Federation** | Federated clusters, DataDomains, balance plans |
+| 7 | **Resource Governor** | Live executions, policies, violations, metrics |
+| 8 | **Backup & Restore** | Create, inspect, verify, restore backups |
+| 9 | **Metrics & Logs** | Prometheus metrics, log tail with level filters |
+| 10 | **Configuration Studio** | Interactive config CRUD, snapshots, export/import |
+| 11 | **Table Explorer** | Browse tables across storage engines |
+| 12 | **Report Builder** | Create and execute report definitions |
+| 13 | **Notebook** | Multi-cell notebook (SQL, Analysis, RAG, Markdown) |
+| 14 | **RAG Workspace** | Vector collection search with similarity scores |
+| 15 | **Settings** | Connection, auth, refresh, theme, mouse, namespace |
+| 16 | **Help** | Keyboard/mouse reference, version, tips |
 
-## Migration Wizard
+## Key Features
 
-Press `Ctrl+M` in the Migrations section to launch the interactive 12-step wizard:
+- **Mouse support**: Click sidebar to navigate, click items to select, scroll to scroll, right-click for help
+- **Command palette**: Press `:` for fuzzy-filtered command execution
+- **Contextual help**: Press `?` for section-specific help
+- **Event log**: Press `e` to toggle the full event log viewer
+- **Safe mode**: Destructive actions require confirmation (default)
+- **Onboarding**: Connection wizard on first launch with auto-discovery
+- **Status bar**: Shows connection state, version, namespace, database, cluster state, section name, keyboard hints
+- **Empty states**: Helpful messages with next-action guidance when disconnected or no data
 
-1. **Intro** — Overview of the migration process
-2. **Source type** — Select MySQL, PostgreSQL, MongoDB, or CouchDB
-3. **Source URL** — Enter the connection string
-4. **Test connection** — Automatically tests the source connection
-5. **Namespace** — Enter the target PrimusDB namespace
-6. **Migration mode** — Choose copy, schema-only, data-only, or dry-run
-7. **Inspect objects** — Automatically inspects source schema
-8. **Select objects** — Toggle individual tables/collections with Space
-9. **Preview plan** — Shows the generated migration plan
-10. **Dry-run** — Executes a trial run (or skips if dry-run mode selected)
-11. **Confirm** — Final confirmation before import
-12. **Progress + Report** — Real-time progress bar, then saveable report
+## Navigation
 
-Use `Esc` to go back one step at any time.
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Next / previous section |
+| `Enter` | Select / execute |
+| `Esc` | Back / close overlay |
+| `:` | Command palette |
+| `?` | Contextual help |
+| `r` | Refresh |
+| `e` | Toggle event log |
+| `q` | Quit (with confirmation) |
+
+## Status Bar
+
+The enhanced status bar shows at a glance:
+- `●` / `○` connection indicator
+- Server URL
+- PrimusDB version
+- Active namespace
+- Selected database
+- Cluster state
+- Current section name
+- Contextual keyboard shortcuts
+- Latest event message
 
 ## Command Palette
 
-Press `:` to open the command palette:
+Press `:` and type to filter:
 
 | Command | Action |
 |---------|--------|
-| `:help` | Open the help page |
-| `:quit` | Quit the TUI |
-| `:refresh` | Refresh the current section |
-| `:connect <url>` | Connect to a server |
+| `:help` | Open help |
+| `:quit` | Quit |
+| `:connect <url>` | Connect |
+| `:disconnect` | Disconnect |
+| `:events` | Toggle event log |
+| `:clear` | Clear results |
+| `:dashboard` | Go to Dashboard |
+| `:query` | Go to Query Console |
+| `:status` | Refresh status |
+| `:backup create` | Create backup |
 
-## States
+## Detailed Documentation
 
-Each section handles the following states:
-
-| State | Indicator |
-|-------|-----------|
-| **Loading** | Spinner + message (e.g. "Discovering instances...") |
-| **Disconnected** | Red "Not connected" message with guidance |
-| **Empty** | Gray "No data" message with refresh hint |
-| **Error** | Red error message |
-| **OK** | Normal data display with color-coded status |
+- [UX Guide](ux-guide.md) — Full UX design principles and interaction patterns
+- [Mouse Support](mouse-support.md) — Mouse interaction reference and troubleshooting
+- [Keyboard Shortcuts](keyboard-shortcuts.md) — Complete keybinding reference
+- [Screens](screens.md) — Visual reference for all 16 sections
+- [Troubleshooting](troubleshooting.md) — Common issues and solutions
+- [IDE Workspaces](ide-workspaces.md) — Advanced workspace documentation

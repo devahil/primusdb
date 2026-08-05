@@ -1,5 +1,7 @@
 # TUI Resource Governor Panel
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The Resource Governor panel provides a live view of execution governance
 activity — active executions, recent violations, and a metrics snapshot.
 

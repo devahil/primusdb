@@ -1,18 +1,19 @@
-# Migration Guide
+# CLI Migration Guide
 
 This guide helps users transition from the legacy `primusdb-server` and `primusdb-cli` binaries to the new unified `primusdb` CLI.
 
+> **Note:** This is about migrating CLI **binaries**. For migrating **databases** from external systems (PostgreSQL, MySQL, MongoDB, CouchDB), see the [Database Migration Guide](../migration/README.md).
+
 ## Overview
 
-Starting with **v1.3.1-alpha**, PrimusDB introduces a single unified binary `primusdb` that replaces both `primusdb-server` and `primusdb-cli`. The legacy binaries still exist but print deprecation warnings and are scheduled for removal in **v1.4.0**.
+Starting with **v1.3.2-alpha**, PrimusDB ships a single unified binary `primusdb` that replaces both `primusdb-server` and `primusdb-cli`. The legacy binaries **have been removed**; use the unified binary for everything.
 
 ## Migration Timeline
 
 | Version | Status |
 |---------|--------|
-| v1.3.1-alpha | Legacy binaries active. Unified CLI introduced in `src/main.rs`. |
-| v1.3.1-alpha | Unified CLI is the default. Legacy binaries print deprecation warning. |
-| v1.4.0 | Legacy binaries may be removed. All users must migrate. |
+| v1.3.1-alpha | `primusdb-server` and `primusdb-cli` still shipped alongside `primusdb`. |
+| v1.3.2-alpha | Unified CLI is the only binary. Legacy binaries removed (`src/bin/` deleted); server and CLI components migrated into `primusdb server start` and `primusdb <command>`. |
 
 ## `primusdb-server` → `primusdb server`
 
@@ -28,7 +29,7 @@ The server lifecycle commands move under the `primusdb server` subcommand.
 | `primusdb-server --config prod.toml` | `primusdb server start --config prod.toml` |
 | `primusdb-server --data-dir /var/lib/primusdb` | `primusdb server start --data-dir /var/lib/primusdb` |
 | `primusdb-server --log-level debug` | `primusdb server start --log-level debug` |
-| `primusdb-server --cluster` | `primusdb server start --cluster` |
+| `primusdb-server --cluster` | `primusdb server start --cluster-id my-cluster --federation-discovery coordinator:8080` |
 
 **Note:** The old `--host` and `--port` separate flags are consolidated into a single `--bind` flag in the new CLI (format: `host:port`).
 
@@ -54,7 +55,7 @@ The server lifecycle commands move under the `primusdb server` subcommand.
 
 | Old | New |
 |-----|-----|
-| `primusdb-server --cluster --federation-id default` | `primusdb server start --cluster --federation-id default` |
+| `primusdb-server --cluster --federation-id default` | `primusdb server start --cluster-id my-cluster --federation-id default` |
 | `primusdb-server --cluster-id mycluster` | `primusdb server start --cluster-id mycluster` |
 | `primusdb-server --region us-east` | `primusdb server start --region us-east` |
 | `primusdb-server --federation-discovery peer1:8080` | `primusdb server start --federation-discovery peer1:8080` |
@@ -134,10 +135,11 @@ The old CRUD subcommands are replaced by SQL queries:
 
 ## Breaking Changes
 
-1. **`--host` and `--port` consolidated:** The old server used `--host` and `--port` as separate flags. The new CLI uses `--bind host:port`.
-2. **No `--mode` flag:** The unified CLI always operates in client mode for server operations. Embedded mode is available for direct database access.
-3. **CRUD via SQL:** Direct CRUD subcommands are replaced by SQL queries. Use `primusdb query` with standard SQL syntax.
-4. **Default port:** The old CLI server defaulted to `8080`. The new CLI defaults to `127.0.0.1:8080`.
+1. **Legacy binaries removed:** `primusdb-server` and `primusdb-cli` no longer exist. Use `primusdb server start` / `primusdb <command>`.
+2. **`--host` and `--port` consolidated:** The old server used `--host` and `--port` as separate flags. The new CLI uses `--bind host:port`.
+3. **No `--mode` flag:** The unified CLI always operates in client mode for server operations. Embedded mode is available for direct database access.
+4. **CRUD via SQL:** Direct CRUD subcommands are replaced by SQL queries. Use `primusdb query` with standard SQL syntax.
+5. **Default port:** The old CLI server defaulted to `8080`. The new CLI defaults to `127.0.0.1:8080`.
 
 ## Migration Script Example
 
@@ -159,7 +161,7 @@ primusdb ai predict sales-model '{"quarter":"Q1"}'
 
 # Old: primusdb-server --host 0.0.0.0 --port 8080 --cluster
 # New:
-primusdb server start --bind 0.0.0.0:8080 --cluster
+primusdb server start --bind 0.0.0.0:8080 --cluster-id my-cluster --federation-discovery coordinator:8080
 ```
 
 ## Verification

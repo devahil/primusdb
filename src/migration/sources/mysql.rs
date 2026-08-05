@@ -1,3 +1,10 @@
+//! MySQL source implementation for the migration framework.
+//!
+//! Connects via the `mysql` crate and reads column metadata from
+//! `INFORMATION_SCHEMA.COLUMNS`. Enabled by the `mysql-source` feature; a
+//! fallback implementation reports [`crate::Error::Unsupported`] when the
+//! feature is disabled.
+
 #[allow(unused_imports)]
 use super::super::source::{
     MigrationSource, RowStream, SourceColumn, SourceDatabase, SourceObject, SourceSchema,
@@ -14,6 +21,8 @@ pub struct MySqlSource {
 }
 
 impl MySqlSource {
+    /// Creates a source from a MySQL URL, keeping a masked copy of the URL for
+    /// display.
     pub fn new(url: &str) -> Result<Self> {
         let masked = crate::migration::report::MigrationReport::mask_url(url);
         Ok(Self {

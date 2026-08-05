@@ -1,3 +1,25 @@
+//! # Namespace — Multi-Tenant Hierarchy and Isolation
+//!
+//! Provides a hierarchical, dot-separated namespace system (e.g. `root.tenant`)
+//! backed by sled, with RBAC integration, policy inheritance and transparent
+//! resource scoping through [`NamespacedStorageEngine`].
+//!
+//! ```text
+//! NamespaceController (sled-backed, cached)
+//!   |
+//!   +-- namespaces  tree: namespace:{id} / path:{path}  -> Namespace
+//!   +-- resources   tree: resource:{ns_id}:{type}:{name} -> NamespaceResource
+//!   +-- roles       tree: role:{ns_id}:{role_id}        -> NamespaceRole
+//!   +-- user_bindings tree: user_binding:{ns_id}:{user} -> NamespaceUserBinding
+//!   |
+//!   +-- NamespaceResolver  (cached path validation)
+//!   +-- NamespacedStorageEngine (physical-name prefixing adapter)
+//! ```
+//!
+//! Namespace paths are validated against `^[a-zA-Z_][a-zA-Z0-9_]{0,63}$`
+//! per dot-separated component. Physical resource names are derived from a
+//! SHA-256 hash of the namespace path to guarantee global uniqueness.
+
 pub mod resolver;
 pub mod storage;
 
@@ -10,6 +32,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::StorageType;
 
+/// Validates a single dot-separated namespace component. Components must be
+/// 1-64 characters, start with a letter or underscore, and contain only
+/// alphanumeric characters or underscores.
 pub fn validate_namespace_component(component: &str) -> bool {
     if component.is_empty() || component.len() > 64 {
         return false;
@@ -26,6 +51,8 @@ pub fn validate_namespace_component(component: &str) -> bool {
     true
 }
 
+/// Validates a full namespace path, enforcing non-empty, a maximum length of
+/// 1024 chars, and well-formed dot-separated components.
 pub fn validate_namespace_path(path: &str) -> crate::Result<()> {
     if path.is_empty() {
         return Err(crate::Error::ValidationError(
@@ -48,6 +75,8 @@ pub fn validate_namespace_path(path: &str) -> crate::Result<()> {
     Ok(())
 }
 
+/// Computes the globally-unique physical name for a resource from its
+/// namespace path and logical name: `ns_{hash6}__{resource}`.
 pub fn compute_physical_name(namespace_path: &str, resource_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(namespace_path.as_bytes());
@@ -56,19 +85,29 @@ pub fn compute_physical_name(namespace_path: &str, resource_name: &str) -> Strin
     format!("ns_{}__{}", short_hash, resource_name)
 }
 
+/// Returns the parent path of `path` (everything before the last dot), or
+/// `None` if the path has no dots.
 pub fn parent_path(path: &str) -> Option<String> {
     let dot = path.rfind('.')?;
     Some(path[..dot].to_string())
 }
 
+/// Tuning options for the namespace subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceConfig {
+    /// Whether namespace enforcement is enabled globally.
     pub enabled: bool,
+    /// Fallback namespace used when no explicit path is provided.
     pub default_namespace: String,
+    /// Whether namespaces must be strictly isolated.
     pub strict_isolation: bool,
+    /// Whether cross-namespace queries are permitted.
     pub allow_cross_namespace_queries: bool,
+    /// Maximum number of entries held in the in-memory cache.
     pub cache_size: usize,
+    /// Maximum nesting depth for namespace paths.
     pub max_depth: u32,
+    /// Whether legacy un-namespaced requests are allowed.
     pub allow_legacy_without_namespace: bool,
 }
 
@@ -86,25 +125,40 @@ impl Default for NamespaceConfig {
     }
 }
 
+/// Controls how a namespace's policies merge with inherited parent policies.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum InheritanceMode {
+    /// Child limits are enforced as the strictest of child and parent values.
     DenyOverride,
+    /// Only the namespace's own policies apply; no parent inheritance.
     ExplicitOnly,
+    /// Child values override parents when explicitly set (non-zero).
     #[default]
     AllowOverride,
 }
 
+/// Policy set governing a namespace's resources, users and quotas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespacePolicies {
+    /// How policies are inherited from parent namespaces.
     pub inheritance_mode: InheritanceMode,
+    /// Maximum allowed namespace depth.
     pub max_depth: u32,
+    /// Maximum number of attachable resources.
     pub max_resources: u32,
+    /// Maximum number of user bindings.
     pub max_users: u32,
+    /// Maximum storage quota in bytes.
     pub max_storage_bytes: u64,
+    /// Storage engines permitted in this namespace.
     pub allowed_storage_types: Vec<StorageType>,
+    /// Actions permitted within the namespace.
     pub allowed_actions: Vec<String>,
+    /// Whether child namespace resources count toward the quota.
     pub include_children_in_quota: bool,
+    /// Data retention window in days, if enforced.
     pub retention_days: Option<u32>,
+    /// Extension point for custom policy keys.
     pub custom_policies: HashMap<String, serde_json::Value>,
 }
 
@@ -131,70 +185,119 @@ impl Default for NamespacePolicies {
     }
 }
 
+/// Granular permissions grantable to roles within a namespace.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum NamespacePermission {
+    /// Create resources.
     Create,
+    /// Read resources.
     Read,
+    /// Update resources.
     Update,
+    /// Delete resources.
     Delete,
+    /// Attach a resource to the namespace.
     AttachResource,
+    /// Detach a resource from the namespace.
     DetachResource,
+    /// Manage user bindings.
     ManageUsers,
+    /// Manage role definitions.
     ManageRoles,
+    /// Manage namespace policies.
     ManagePolicies,
+    /// Read across namespaces.
     CrossNamespaceRead,
+    /// Write across namespaces.
     CrossNamespaceWrite,
+    /// All permissions.
     FullAccess,
 }
 
+/// A namespace node in the hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Namespace {
+    /// Unique namespace id.
     pub id: String,
+    /// Dot-separated hierarchical path.
     pub path: String,
+    /// Path of the parent namespace, if any.
     pub parent_path: Option<String>,
+    /// Human-readable description.
     pub description: String,
+    /// Policy set applied to this namespace.
     pub policies: NamespacePolicies,
+    /// Optional storage segment id the namespace is pinned to.
     pub segment_id: Option<String>,
+    /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Last-update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Whether the namespace is active.
     pub is_active: bool,
+    /// Arbitrary metadata key/value pairs.
     pub metadata: HashMap<String, String>,
 }
 
+/// A resource attached to a namespace, mapped to its physical name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceResource {
+    /// Unique resource id.
     pub id: String,
+    /// Id of the owning namespace.
     pub namespace_id: String,
+    /// Storage engine type of the resource.
     pub storage_type: StorageType,
+    /// Logical (user-visible) resource name.
     pub resource_name: String,
+    /// Physical name used by the underlying storage engine.
     pub physical_name: String,
+    /// Attachment timestamp.
     pub created_at: DateTime<Utc>,
 }
 
+/// Binds a user to a role within a namespace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceUserBinding {
+    /// Namespace the binding applies to.
     pub namespace_id: String,
+    /// Id of the bound user.
     pub user_id: String,
+    /// Id of the granted role.
     pub role_id: String,
+    /// Timestamp the binding was granted.
     pub granted_at: DateTime<Utc>,
+    /// Who granted the binding.
     pub granted_by: String,
+    /// Optional expiry for the binding.
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// A named set of permissions within a namespace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceRole {
+    /// Unique role id.
     pub id: String,
+    /// Namespace the role belongs to.
     pub namespace_id: String,
+    /// Role name.
     pub name: String,
+    /// Role description.
     pub description: String,
+    /// Permissions granted by this role.
     pub permissions: Vec<NamespacePermission>,
+    /// Whether child namespaces inherit this role.
     pub inheritable: bool,
 }
 
+/// Namespace resolution context carried through a request lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceContext {
+    /// Namespace active for the current operation.
     pub current_namespace: Option<String>,
+    /// Namespace the request originated from.
     pub original_namespace: Option<String>,
+    /// Whether resolution completed.
     pub resolved: bool,
 }
 
@@ -208,6 +311,8 @@ impl Default for NamespaceContext {
     }
 }
 
+/// Central controller for namespace CRUD, policy resolution and resource
+/// attachment, with an in-memory cache over a sled-backed store.
 pub struct NamespaceController {
     config: NamespaceConfig,
     db: Arc<Db>,
@@ -216,6 +321,8 @@ pub struct NamespaceController {
 }
 
 impl NamespaceController {
+    /// Opens the `{data_dir}/namespace` sled database using the namespace
+    /// configuration from `config`.
     pub fn new(config: &crate::PrimusDBConfig) -> crate::Result<Self> {
         let ns_config = config.namespaces.clone();
         let path = format!("{}/namespace", config.storage.data_dir);
@@ -229,14 +336,18 @@ impl NamespaceController {
         })
     }
 
+    /// Returns the active namespace configuration.
     pub fn config(&self) -> &NamespaceConfig {
         &self.config
     }
 
+    /// Returns a reference to the underlying sled database.
     pub fn db(&self) -> &Arc<Db> {
         &self.db
     }
 
+    /// Seeds the `root` and default namespaces, then rebuilds the in-memory
+    /// cache from persisted state.
     pub fn init(&self) -> crate::Result<()> {
         self.ensure_system_namespaces()?;
         self.rebuild_cache()?;
@@ -321,6 +432,8 @@ impl NamespaceController {
         Ok(())
     }
 
+    /// Looks up a namespace by its hierarchical path, falling back to disk on
+    /// a cache miss.
     pub fn get_by_path(&self, path: &str) -> crate::Result<Option<Namespace>> {
         {
             let path_index = self.path_index.read().unwrap();
@@ -346,6 +459,7 @@ impl NamespaceController {
         Ok(None)
     }
 
+    /// Looks up a namespace by its id, falling back to disk on a cache miss.
     pub fn get_by_id(&self, id: &str) -> crate::Result<Option<Namespace>> {
         {
             let cache = self.cache.read().unwrap();
@@ -368,6 +482,8 @@ impl NamespaceController {
         Ok(None)
     }
 
+    /// Creates a new namespace, validating path syntax, depth, uniqueness and
+    /// the existence of its parent. Returns the persisted [`Namespace`].
     pub fn create(
         &self,
         path: &str,
@@ -452,6 +568,8 @@ impl NamespaceController {
         path_index.insert(ns.path.clone(), ns.id);
     }
 
+    /// Applies a partial [`NamespaceUpdate`] to an existing namespace and
+    /// persists the result.
     pub fn update(&self, path: &str, updates: NamespaceUpdate) -> crate::Result<Namespace> {
         let ns = self.get_by_path(path)?.ok_or_else(|| {
             crate::Error::ValidationError(format!("Namespace '{}' not found", path))
@@ -484,6 +602,8 @@ impl NamespaceController {
         Ok(updated)
     }
 
+    /// Deletes a namespace. System namespaces (`root`, the default namespace)
+    /// and namespaces with children cannot be deleted.
     pub fn delete(&self, path: &str) -> crate::Result<()> {
         if path == "root" || path == self.config.default_namespace {
             return Err(crate::Error::ValidationError(format!(
@@ -517,6 +637,7 @@ impl NamespaceController {
         Ok(())
     }
 
+    /// Lists all namespaces sorted by path.
     pub fn list_all(&self) -> crate::Result<Vec<Namespace>> {
         let cache = self.cache.read().unwrap();
         let mut namespaces: Vec<Namespace> = cache.values().cloned().collect();
@@ -524,6 +645,7 @@ impl NamespaceController {
         Ok(namespaces)
     }
 
+    /// Lists the direct children of `parent_path` sorted by path.
     pub fn list_children(&self, parent_path: &str) -> crate::Result<Vec<Namespace>> {
         let cache = self.cache.read().unwrap();
         let prefix = format!("{}.", parent_path);
@@ -538,6 +660,8 @@ impl NamespaceController {
         Ok(children)
     }
 
+    /// Resolves a namespace hint to a concrete, existing path, falling back to
+    /// the configured default namespace when the hint is empty or unknown.
     pub fn resolve(&self, namespace_hint: Option<&str>) -> crate::Result<String> {
         match namespace_hint {
             Some(path) if !path.is_empty() => {
@@ -552,6 +676,9 @@ impl NamespaceController {
         }
     }
 
+    /// Attaches a resource to a namespace, enforcing resource-count and
+    /// storage-type policies, and returns the resource with its computed
+    /// physical name.
     pub fn attach_resource(
         &self,
         namespace_path: &str,
@@ -593,6 +720,7 @@ impl NamespaceController {
         Ok(resource)
     }
 
+    /// Detaches a resource from a namespace.
     pub fn detach_resource(
         &self,
         namespace_path: &str,
@@ -609,6 +737,7 @@ impl NamespaceController {
         Ok(())
     }
 
+    /// Lists all resources attached to a namespace, sorted by name.
     pub fn list_resources(&self, namespace_id: &str) -> crate::Result<Vec<NamespaceResource>> {
         let tree = self.db.open_tree("resources")?;
         let prefix = format!("resource:{}:", namespace_id);
@@ -623,6 +752,8 @@ impl NamespaceController {
         Ok(resources)
     }
 
+    /// Resolves the physical name for an attached resource, or errors when the
+    /// resource is not attached.
     pub fn resolve_physical_name(
         &self,
         namespace_path: &str,
@@ -646,6 +777,7 @@ impl NamespaceController {
         }
     }
 
+    /// Binds a user to a role within a namespace.
     pub fn add_user_binding(
         &self,
         namespace_path: &str,
@@ -674,6 +806,7 @@ impl NamespaceController {
         Ok(binding)
     }
 
+    /// Removes a user binding from a namespace.
     pub fn remove_user_binding(&self, namespace_path: &str, user_id: &str) -> crate::Result<()> {
         let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
             crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
@@ -685,6 +818,7 @@ impl NamespaceController {
         Ok(())
     }
 
+    /// Lists all user bindings for a namespace.
     pub fn list_user_bindings(
         &self,
         namespace_id: &str,
@@ -701,6 +835,7 @@ impl NamespaceController {
         Ok(bindings)
     }
 
+    /// Creates a new role within a namespace.
     pub fn add_role(
         &self,
         namespace_path: &str,
@@ -729,6 +864,7 @@ impl NamespaceController {
         Ok(role)
     }
 
+    /// Deletes a role from a namespace.
     pub fn remove_role(&self, namespace_path: &str, role_id: &str) -> crate::Result<()> {
         let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
             crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
@@ -740,6 +876,7 @@ impl NamespaceController {
         Ok(())
     }
 
+    /// Lists all roles defined in a namespace.
     pub fn list_roles(&self, namespace_id: &str) -> crate::Result<Vec<NamespaceRole>> {
         let tree = self.db.open_tree("roles")?;
         let prefix = format!("role:{}:", namespace_id);
@@ -753,6 +890,8 @@ impl NamespaceController {
         Ok(roles)
     }
 
+    /// Computes the effective policy for a namespace by merging policies from
+    /// the namespace and its ancestors according to the inheritance mode.
     pub fn effective_policy(&self, namespace_path: &str) -> crate::Result<NamespacePolicies> {
         let ns = self.get_by_path(namespace_path)?.ok_or_else(|| {
             crate::Error::ValidationError(format!("Namespace '{}' not found", namespace_path))
@@ -800,6 +939,7 @@ impl NamespaceController {
         Ok(merged)
     }
 
+    /// Clears the in-memory namespace cache and path index.
     pub fn invalidate_cache(&self) {
         let mut cache = self.cache.write().unwrap();
         let mut path_index = self.path_index.write().unwrap();
@@ -807,16 +947,23 @@ impl NamespaceController {
         path_index.clear();
     }
 
+    /// Returns the nesting depth of a namespace path (number of components).
     pub fn depth(&self, path: &str) -> u32 {
         path.split('.').count() as u32
     }
 }
 
+/// Partial update applied to a namespace via [`NamespaceController::update`].
 #[derive(Debug, Default)]
 pub struct NamespaceUpdate {
+    /// New description.
     pub description: Option<String>,
+    /// New policy set.
     pub policies: Option<NamespacePolicies>,
+    /// New storage segment id.
     pub segment_id: Option<String>,
+    /// Whether the namespace should be active.
     pub is_active: Option<bool>,
+    /// Metadata upsert; `null` values remove keys.
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }

@@ -47,12 +47,13 @@ fi
 
 # ── 3. Check binary name references ───────────────
 echo "--- Checking binary name references ---"
-# Old names that should warn
-if rg -q "primusdb-server" docs/ --type md 2>/dev/null; then
-    warn "Some docs still reference 'primusdb-server' instead of 'primusdb'"
+# Old names used as commands outside the migration guide (which intentionally
+# documents legacy syntax in its "Old" columns)
+if rg -q "primusdb-server [a-z]" docs/ --type md -g '!cli/migration.md' 2>/dev/null; then
+    warn "Some docs still invoke the legacy 'primusdb-server' binary"
 fi
-if rg -q "primusdb-cli" docs/ --type md 2>/dev/null; then
-    warn "Some docs still reference 'primusdb-cli' instead of 'primusdb'"
+if rg -q "primusdb-cli [a-z]" docs/ --type md -g '!cli/migration.md' 2>/dev/null; then
+    warn "Some docs still invoke the legacy 'primusdb-cli' binary"
 fi
 if ! rg -q "primusdb server" docs/ --type md 2>/dev/null; then
     fail "No docs reference the 'primusdb server' command"

@@ -1,3 +1,36 @@
+//! Multi-cluster federation
+//!
+//! Links independent PrimusDB clusters into a federation so that data domains
+//! and namespaces can span multiple clusters. [`FederationManager`] announces
+//! the local cluster, tracks remote cluster liveness with heartbeats and
+//! suspect/offline transitions, brokers cross-cluster domain membership, and
+//! resolves federated namespaces. RPC helpers such as [`connect_and_send`]
+//! provide the wire transport used by the federation and federated-Raft layers.
+//!
+//! # Placement in the architecture
+//!
+//! `FederationManager` is the cross-cluster counterpart of the intra-cluster
+//! [`crate::cluster::membership::MembershipManager`]: it tracks remote clusters
+//! instead of remote nodes. It hands member addresses to the
+//! [`crate::cluster::domain::DataDomainManager`] (for replica fan-out) and to
+//! the [`crate::cluster::federated_raft::FederatedRaft`] group (for quorum
+//! exchanges) through [`connect_and_send`].
+//!
+//! ```text
+//!   ┌──────────────────────────────────── Federation ─────────────────────────────────────┐
+//!   │                                                                                     │
+//!   ┌─────────────┐ announce/heartbeat  ┌─────────────┐ announce/heartbeat  ┌─────────────┐│
+//!   │ Cluster A   │◄───────────────────►│ Cluster B   │◄───────────────────►│ Cluster C   ││
+//!   │ Federation  │ FedClusterAnnounce  │ Federation  │ FedClusterAnnounce  │ Federation  ││
+//!   │ Manager     │ FedHeartbeat        │ Manager     │ FedHeartbeat        │ Manager     ││
+//!   └─────────────┘                     └─────────────┘                     └─────────────┘│
+//!        │   ▲                          │        ▲                           │             │
+//!        │   │ domain join/leave        │        │ resolve federated namespaces            │
+//!        ▼   │ data replication         ▼        │                                             │
+//!   DataDomainManager ◄──connect_and_send──► FederatedRaft (cross-cluster consensus)      │
+//!   └───────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
+
 use crate::cluster::rpc::{
     FedClusterAck, FedClusterAnnounce, FedClusterInfo, FedDomainJoin, FedDomainJoinAck,
     FedDomainLeave, FedHeartbeatMessage, FedNamespaceResolveRequest, RpcClient, RpcMessage,
@@ -10,18 +43,41 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+/// Configuration for a PrimusDB federation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationConfig {
+    /// Identifier of the federation this cluster belongs to
     pub federation_id: String,
+    /// Identifier of the local cluster
     pub cluster_id: String,
+    /// How often to broadcast cluster announcements (ms)
     pub announce_interval_ms: u64,
+    /// How often to send federation heartbeats (ms)
     pub heartbeat_interval_ms: u64,
+    /// Timeout before a missed heartbeat is treated as a failure (ms)
     pub heartbeat_timeout_ms: u64,
+    /// Timeout before a silent member becomes suspect, then offline (ms)
     pub suspect_timeout_ms: u64,
+    /// Maximum number of clusters tracked in the federation
     pub max_clusters: u32,
+    /// Whether replicas may be stored on clusters outside the local region
     pub enable_cross_cluster_replication: bool,
+    /// Whether namespaces may resolve across cluster boundaries
     pub enable_federated_namespaces: bool,
+    /// Optional region identifier for this cluster
     pub region: Option<String>,
+    /// Path to the TLS certificate file for mTLS federation communication
+    #[serde(default)]
+    pub tls_cert_path: String,
+    /// Path to the TLS private key file for mTLS federation communication
+    #[serde(default)]
+    pub tls_key_path: String,
+    /// Path to the CA certificate file for verifying peer federation nodes
+    #[serde(default)]
+    pub tls_ca_path: String,
+    /// Whether to require mTLS for federation RPC communication
+    #[serde(default)]
+    pub mtls_enabled: bool,
 }
 
 impl Default for FederationConfig {
@@ -37,38 +93,62 @@ impl Default for FederationConfig {
             enable_cross_cluster_replication: true,
             enable_federated_namespaces: true,
             region: None,
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
+            tls_ca_path: String::new(),
+            mtls_enabled: false,
         }
     }
 }
 
+/// Liveness state of a remote cluster in the federation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClusterStatus {
+    /// Heartbeating normally
     Online,
+    /// Unresponsive, awaiting confirmation of failure
     Suspect,
+    /// Declared unreachable
     Offline,
+    /// Voluntarily left the federation
     Left,
 }
 
+/// View of a remote cluster tracked by the local [`FederationManager`].
 #[derive(Debug, Clone)]
 pub struct FederationMember {
+    /// Announcement information from the remote cluster
     pub info: FedClusterInfo,
+    /// Current liveness status
     pub status: ClusterStatus,
+    /// Timestamp (ms) of the last successful contact
     pub last_seen: u64,
+    /// Incarnation counter used to detect restarts
     pub incarnation: u64,
+    /// Consecutive failed heartbeats/announces
     pub consecutive_failures: u32,
+    /// Optional cached RPC client to the remote cluster
     pub rpc_client: Option<Arc<RpcClient>>,
 }
 
+/// Tracks remote clusters in a federation and brokers cross-cluster operations.
 pub struct FederationManager {
+    /// Federation configuration
     pub config: FederationConfig,
+    /// Known remote clusters keyed by cluster ID
     pub members: RwLock<HashMap<String, FederationMember>>,
+    /// Data domains hosted by the local cluster
     pub local_domains: RwLock<Vec<String>>,
+    /// Cache of resolved federated namespace paths
     pub namespace_cache: RwLock<HashMap<String, String>>,
+    /// Whether background announce/heartbeat tasks are running
     pub running: RwLock<bool>,
+    /// Local incarnation counter
     incarnation: RwLock<u64>,
 }
 
 impl FederationManager {
+    /// Create a federation manager for the given configuration.
     pub fn new(config: FederationConfig) -> Self {
         Self {
             config,
@@ -80,6 +160,8 @@ impl FederationManager {
         }
     }
 
+    /// Broadcast the local cluster's presence to all online federation members
+    /// and fold any newly discovered clusters into the membership table.
     pub async fn announce_cluster(
         &self,
         address: &str,
@@ -163,6 +245,8 @@ impl FederationManager {
         Ok(())
     }
 
+    /// Register a remote cluster received via an announce and acknowledge it
+    /// with the list of other clusters this node already knows.
     pub async fn register_remote_cluster(&self, info: FedClusterInfo) -> Result<FedClusterAck> {
         let mut members = self.members.write().await;
         let known: Vec<FedClusterInfo> = members
@@ -191,6 +275,8 @@ impl FederationManager {
         })
     }
 
+    /// Ask every online remote cluster to join the local cluster into the given
+    /// data domain, returning an acknowledgment with the resulting membership.
     pub async fn join_domain(
         &self,
         domain_name: &str,
@@ -255,6 +341,7 @@ impl FederationManager {
         Ok(ack)
     }
 
+    /// Remove the local cluster from a data domain and notify remote members.
     pub async fn leave_domain(&self, domain_name: &str) -> Result<()> {
         let leave = FedDomainLeave {
             cluster_id: self.config.cluster_id.clone(),
@@ -285,6 +372,7 @@ impl FederationManager {
         Ok(())
     }
 
+    /// Handle a remote cluster's request to join a data domain hosted locally.
     pub async fn handle_domain_join(&self, req: FedDomainJoin) -> FedDomainJoinAck {
         let mut domains = self.local_domains.write().await;
         if !domains.contains(&req.domain_name) {
@@ -309,11 +397,13 @@ impl FederationManager {
         }
     }
 
+    /// Handle a remote cluster's request to leave a data domain hosted locally.
     pub async fn handle_domain_leave(&self, req: crate::cluster::rpc::FedDomainLeave) {
         let mut domains = self.local_domains.write().await;
         domains.retain(|d| d != &req.domain_name);
     }
 
+    /// Update the tracked member for an incoming federation heartbeat.
     pub async fn handle_heartbeat(&self, hb: FedHeartbeatMessage) {
         let mut members = self.members.write().await;
         if let Some(member) = members.get_mut(&hb.cluster_id) {
@@ -326,6 +416,7 @@ impl FederationManager {
         }
     }
 
+    /// Send a heartbeat to every online federation member.
     pub async fn send_heartbeat(&self, node_id: &str) -> Result<()> {
         let members = self.members.read().await;
         let targets: Vec<(String, String, u16)> = members
@@ -374,11 +465,13 @@ impl FederationManager {
         Ok(())
     }
 
+    /// Transition silent members from `Online` to `Suspect`, and stale suspects
+    /// to `Offline`, based on the configured suspect timeout.
     pub async fn check_suspects(&self) {
         let now = now_ms();
         let timeout = self.config.suspect_timeout_ms;
         let mut members = self.members.write().await;
-        for (_, member) in members.iter_mut() {
+        for member in members.values_mut() {
             if member.status == ClusterStatus::Online && now - member.last_seen > timeout {
                 member.status = ClusterStatus::Suspect;
                 warn!(
@@ -397,6 +490,8 @@ impl FederationManager {
         }
     }
 
+    /// Resolve a federated namespace path against remote clusters, caching the
+    /// first positive result.
     pub async fn resolve_namespace_cross_cluster(
         &self,
         namespace_path: &str,
@@ -447,6 +542,7 @@ impl FederationManager {
         Ok(None)
     }
 
+    /// Return the announcements of all online federation members.
     pub async fn get_online_clusters(&self) -> Vec<FedClusterInfo> {
         self.members
             .read()
@@ -457,6 +553,7 @@ impl FederationManager {
             .collect()
     }
 
+    /// Number of online federation members.
     pub async fn get_cluster_count(&self) -> usize {
         self.members
             .read()
@@ -466,6 +563,7 @@ impl FederationManager {
             .count()
     }
 
+    /// Spawn the background announce and heartbeat loops for this federation.
     pub async fn start_background_tasks(
         self: Arc<Self>,
         address: String,
@@ -506,6 +604,11 @@ impl FederationManager {
     }
 }
 
+/// Open a short-lived TCP connection, send one bincode-serialized [`RpcMessage`],
+/// and wait for the reply.
+///
+/// Used by the federation and federated-Raft layers to talk to remote clusters.
+/// Returns `Ok(None)` when the peer is unreachable.
 pub async fn connect_and_send(
     host: &str,
     port: u16,
@@ -557,6 +660,7 @@ pub async fn connect_and_send(
     Ok(Some(resp))
 }
 
+/// Current wall-clock time in milliseconds.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

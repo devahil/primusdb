@@ -1,7 +1,14 @@
+//! Namespace subcommands (`namespace list`, `create`, `drop`, `describe`,
+//! `policy`).
+//!
+//! All operations run in client mode against the `/api/v1/namespaces/*`
+//! endpoints on `GlobalArgs.server_url`.
+
 use crate::cli::command::{GlobalArgs, NamespaceSubcommands};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch a `namespace` subcommand to its handler.
 pub async fn handle_namespace(
     cmd: NamespaceSubcommands,
     global: &GlobalArgs,

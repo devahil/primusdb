@@ -26,10 +26,15 @@ use std::str::FromStr;
 /// Output format selection
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
+    /// Human-readable aligned columns
     Table,
+    /// Machine-readable JSON
     Json,
+    /// Comma-separated values
     Csv,
+    /// YAML (currently falls back to JSON rendering)
     Yaml,
+    /// Simple plain text
     Plain,
 }
 
@@ -245,6 +250,7 @@ fn format_plain(data: &OutputData) -> String {
     }
 }
 
+/// Quote a CSV field when it contains commas, quotes or newlines.
 fn escape_csv(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -256,18 +262,28 @@ fn escape_csv(s: &str) -> String {
 /// Exit codes for CLI commands
 #[derive(Debug, Clone, Copy)]
 pub enum ExitCode {
+    /// Command completed successfully
     Success = 0,
+    /// Generic failure
     Error = 1,
+    /// Invalid command-line arguments
     InvalidArgs = 2,
+    /// Could not reach the server
     ConnectionFailure = 3,
+    /// Authentication failed
     AuthFailure = 4,
+    /// Query execution failed
     QueryError = 5,
+    /// Requested resource was not found
     NotFound = 6,
+    /// Operation not supported
     Unsupported = 7,
+    /// Operation timed out
     Timeout = 8,
 }
 
 impl ExitCode {
+    /// The numeric process exit status for this code.
     pub fn code(&self) -> i32 {
         *self as i32
     }

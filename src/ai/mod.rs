@@ -1,56 +1,38 @@
 /*!
 # PrimusDB AI/ML Engine
 
-The AI/ML engine provides integrated machine learning capabilities within PrimusDB,
-enabling real-time analytics, predictions, clustering, and anomaly detection without
-external dependencies.
+The AI/ML engine provides in-process machine learning for PrimusDB: linear and
+logistic regression, time-series models, anomaly detection and K-means-style
+clustering, all implemented with the standard library plus `rand` (no external
+ML framework).
+
+> **Important caveat**: `train_model`, `analyze_patterns` and `forecast` run on
+> **synthetic random data** — they do **not** read the table's stored rows.
+> Training draws 100 random samples (`y = Σ 0.5·xᵢ + noise`) and only uses the
+> *count* of `feature_columns` to size the model; time-series weights
+> (`[⅓, ⅓, ⅓]`) and the anomaly/clustering accuracy (0.90) are hardcoded. Models
+> are kept in an in-memory registry and are **not persisted**; there is no
+> model versioning or rollback (the `model_version` field is a plain string).
 
 ## Architecture Overview
 
 ```text
-AI/ML Engine Architecture
-═══════════════════════════════════════════════════════════════
-
-┌─────────────────────────────────────────────────────────┐
-│                AI/ML Processing Pipeline                │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Data Ingestion & Preprocessing                 │    │
-│  │  • Feature extraction                           │    │
-│  │  • Data normalization                           │    │
-│  │  • Missing value handling                       │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Model Training & Management                    │    │
-│  │  • Linear/logistic regression                   │    │
-│  │  • Time series forecasting                      │    │
-│  │  • Clustering algorithms                        │    │
-│  │  • Model versioning & persistence               │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Real-time Inference                            │    │
-│  │  • Prediction serving                           │    │
-│  │  • Anomaly detection                            │    │
-│  │  • Pattern analysis                             │    │
-│  │  • Confidence scoring                           │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+AIEngine (in-memory model registry)
+  ├─ train_model       -> Model (Linear / Logistic Regression,
+  │                       Time Series, Anomaly Detection, Clustering)
+  ├─ predict           -> Vec<Record> (features from conditions, sigmoid
+  │                       for logistic regression, mean fallback 42.5/0.5)
+  ├─ detect_anomalies  -> z-score outlier scoring (threshold 2.5)
+  ├─ analyze_patterns  -> trend/seasonality over synthetic series
+  ├─ forecast          -> future-value projection over a horizon
+  └─ cluster_data      -> K-means grouping
 
 Supported Model Types:
-• Linear Regression    - Continuous value prediction
-• Logistic Regression  - Binary classification
-• Time Series          - Temporal forecasting with configurable windows
-• Anomaly Detection    - Statistical outlier detection
-• Clustering           - Unsupervised grouping with K-means
-
-Key Features:
-• Zero external dependencies - all ML runs within PrimusDB
-• Real-time model training and inference
-• Automatic model versioning and rollback
-• Confidence scoring for all predictions
-• Integration with all storage engines
-• REST API and driver support for ML operations
+• Linear Regression    - continuous value prediction (OLS fit)
+• Logistic Regression  - binary classification (sigmoid output)
+• Time Series          - moving-average weights (hardcoded)
+• Anomaly Detection    - statistical z-score outlier detection
+• Clustering           - unsupervised grouping with K-means
 ```
 
 ## Usage Examples
@@ -59,7 +41,7 @@ Key Features:
 ```ignore
 use primusdb::ai::{AIEngine, TrainingRequest, ModelType};
 
-let ai_engine = AIEngine::new(&config).await?;
+let ai_engine = AIEngine::new(&config)?;
 let request = TrainingRequest {
     table: "sales_data".to_string(),
     model_type: ModelType::LinearRegression,
@@ -75,31 +57,18 @@ println!("Trained model: {} with accuracy: {:.2}%", model.id, model.accuracy * 1
 
 ### Making Predictions
 ```ignore
-let prediction_request = PredictionRequest {
-    model_id: model.id.clone(),
-    input_data: serde_json::json!({
-        "marketing_spend": 50000,
-        "season": "Q1"
-    }),
-    include_confidence: true,
-};
-
-let result = ai_engine.predict(&prediction_request).await?;
-println!("Predicted revenue: ${:.2} (confidence: {:.2}%)",
-    result.prediction["revenue"], result.confidence * 100.0);
+// predict takes a table name plus optional feature conditions
+let records = ai_engine.predict("sales_data", Some(&serde_json::json!({
+    "marketing_spend": 50000.0, "season": 1.0
+}))).await?;
+println!("Predicted revenue: {:?}", records[0].data["predicted_value"]);
 ```
 
-### Real-time Analytics
+### Anomaly Detection
 ```ignore
-// Analyze patterns in data
-let patterns = ai_engine.analyze_patterns("user_behavior").await?;
-for pattern in patterns.patterns {
-    println!("Found pattern: {} (confidence: {:.2}%)",
-        pattern.description, pattern.confidence * 100.0);
-}
-
-// Detect anomalies
-let anomalies = ai_engine.detect_anomalies("transactions", &transaction_data).await?;
+let anomalies = ai_engine
+    .detect_anomalies("transactions", &[serde_json::json!({"amount": 9999.0})])
+    .await?;
 for anomaly in anomalies {
     if anomaly.is_anomaly {
         println!("Anomaly detected: score = {:.3}", anomaly.anomaly_score);
@@ -164,11 +133,7 @@ pub fn inc_ai_anomaly_detected() {
 /// └── Model Metrics     - Performance monitoring and optimization
 /// ```
 pub struct AIEngine {
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
     models: HashMap<String, Model>,
-    #[allow(dead_code)]
-    predictors: HashMap<String, Predictor>,
 }
 
 /// Trained machine learning model with metadata
@@ -301,28 +266,37 @@ pub struct PredictionRequest {
     pub include_confidence: bool,
 }
 
+/// Result of a prediction containing the predicted value and confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictionResult {
+    /// Predicted output value
     pub prediction: serde_json::Value,
+    /// Confidence score between 0.0 and 1.0
     pub confidence: f64,
+    /// Optional human-readable explanation of the prediction
     pub explanation: Option<String>,
+    /// Version of the model that produced the prediction
     pub model_version: String,
 }
 
+/// Result of anomaly detection for a single record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnomalyDetectionResult {
+    /// Whether the record was flagged as an anomaly
     pub is_anomaly: bool,
+    /// Normalized anomaly score between 0.0 and 1.0
     pub anomaly_score: f64,
+    /// Fields that contributed to the anomaly flag
     pub features: Vec<String>,
+    /// Z-score threshold used for detection
     pub threshold: f64,
 }
 
 impl AIEngine {
-    pub fn new(config: &PrimusDBConfig) -> Result<Self> {
+    /// Create a new AI engine with an empty model registry.
+    pub fn new(_config: &PrimusDBConfig) -> Result<Self> {
         Ok(AIEngine {
-            config: config.clone(),
             models: HashMap::new(),
-            predictors: HashMap::new(),
         })
     }
 
@@ -332,6 +306,7 @@ impl AIEngine {
         model_type = ?training_request.model_type,
         duration_ms = tracing::field::Empty
     ))]
+    /// Train a model of the requested type on the named table and register it.
     pub async fn train_model(&mut self, training_request: &TrainingRequest) -> Result<Model> {
         let start = Instant::now();
         println!("Training model for table: {}", training_request.table);
@@ -519,6 +494,7 @@ impl AIEngine {
         table = %table,
         duration_ms = tracing::field::Empty
     ))]
+    /// Make a prediction for a table using its most recently trained model.
     pub async fn predict(
         &self,
         table: &str,
@@ -620,6 +596,7 @@ impl AIEngine {
         record_count = data.len(),
         duration_ms = tracing::field::Empty
     ))]
+    /// Detect statistical anomalies in a batch of records using z-scores.
     pub async fn detect_anomalies(
         &self,
         table: &str,
@@ -630,7 +607,7 @@ impl AIEngine {
 
         // Collect numeric values from all records
         let mut numeric_fields: HashMap<String, Vec<f64>> = HashMap::new();
-        for record in data.iter() {
+        for record in data {
             if let Some(obj) = record.as_object() {
                 for (key, val) in obj {
                     if let Some(n) = val.as_f64() {
@@ -658,7 +635,7 @@ impl AIEngine {
         let threshold = 2.5; // z-score threshold for anomaly
         let mut results = Vec::new();
 
-        for record in data.iter() {
+        for record in data {
             let mut max_z_score = 0.0_f64;
             let mut anomalous_features: Vec<String> = Vec::new();
 
@@ -706,6 +683,7 @@ impl AIEngine {
         table = %table,
         duration_ms = tracing::field::Empty
     ))]
+    /// Analyze a table for trends and seasonal patterns.
     pub async fn analyze_patterns(&self, table: &str) -> Result<PatternAnalysis> {
         let start = Instant::now();
         println!("Analyzing patterns in table: {}", table);
@@ -795,10 +773,12 @@ impl AIEngine {
         Ok(result)
     }
 
+    /// Return the number of models currently registered.
     pub fn model_count(&self) -> usize {
         self.models.len()
     }
 
+    /// Forecast a time series for the given horizon using the table's model.
     pub async fn forecast(&self, table: &str, horizon: usize) -> Result<ForecastResult> {
         println!("Forecasting for table: {} with horizon: {}", table, horizon);
 
@@ -842,6 +822,7 @@ impl AIEngine {
         })
     }
 
+    /// Cluster rows of a table into `num_clusters` groups using K-means.
     pub async fn cluster_data(&self, table: &str, num_clusters: usize) -> Result<ClusteringResult> {
         println!(
             "Clustering data in table: {} into {} clusters",
@@ -1059,6 +1040,7 @@ impl AIEngine {
         }
     }
 
+    /// Describe the datasets (trained models) available in the engine.
     pub async fn describe_datasets(&self) -> Vec<DatasetInfo> {
         let mut datasets = Vec::new();
         for (id_counter, (model_id, model)) in self.models.iter().enumerate() {
@@ -1094,79 +1076,130 @@ impl AIEngine {
     }
 }
 
+/// Request describing how to train a model on a table.
 pub struct TrainingRequest {
+    /// Table name to train on
     pub table: String,
+    /// Type of model to train
     pub model_type: ModelType,
+    /// Column used as the prediction target
     pub target_column: String,
+    /// Columns used as model features
     pub feature_columns: Vec<String>,
+    /// Hyperparameters for the training run
     pub hyperparameters: HashMap<String, f32>,
+    /// Fraction of data held out for validation
     pub validation_split: f32,
 }
 
+/// Result of a pattern analysis over a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternAnalysis {
+    /// Table that was analyzed
     pub table: String,
+    /// Detected patterns
     pub patterns: Vec<Pattern>,
+    /// Suggested follow-up actions
     pub recommendations: Vec<String>,
 }
 
+/// A single detected pattern with its confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pattern {
+    /// Kind of pattern detected
     pub pattern_type: PatternType,
+    /// Human-readable description of the pattern
     pub description: String,
+    /// Confidence score between 0.0 and 1.0
     pub confidence: f64,
+    /// Fields the pattern applies to
     pub affected_fields: Vec<String>,
 }
 
+/// The kinds of patterns the analysis engine can detect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PatternType {
+    /// Upward or downward movement over time
     Trend,
+    /// Repeating fluctuation over a fixed period
     Seasonal,
+    /// Deviations from expected behaviour
     Anomaly,
+    /// Relationships between fields
     Correlation,
 }
 
+/// Result of a time series forecast.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastResult {
+    /// Table that was forecast
     pub table: String,
+    /// Number of time steps forecast
     pub horizon: usize,
+    /// Forecast points with confidence intervals
     pub forecast_values: Vec<ForecastValue>,
+    /// Model used for the forecast
     pub model_used: String,
+    /// Accuracy of the underlying model
     pub accuracy: f64,
 }
 
+/// A single forecast point with a confidence interval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastValue {
+    /// Timestamp of the forecast point
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Predicted value
     pub value: f64,
+    /// Lower bound of the confidence interval
     pub confidence_lower: f64,
+    /// Upper bound of the confidence interval
     pub confidence_upper: f64,
 }
 
+/// Result of a K-means clustering run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusteringResult {
+    /// Table that was clustered
     pub table: String,
+    /// Number of clusters produced
     pub num_clusters: usize,
+    /// Individual clusters with centroids and members
     pub clusters: Vec<Cluster>,
+    /// Silhouette score measuring cluster quality (-1.0 to 1.0)
     pub silhouette_score: f64,
 }
 
+/// A single cluster with its centroid and members.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cluster {
+    /// Cluster index
     pub id: usize,
+    /// Centroid coordinates
     pub center: Vec<f32>,
+    /// Number of members in the cluster
     pub size: usize,
+    /// Sample member identifiers
     pub members: Vec<String>,
 }
 
+/// Metadata describing a dataset (trained model) in the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetInfo {
+    /// Sequential dataset id
     pub id: usize,
+    /// Name of the source table
     pub name: String,
+    /// Id of the underlying model
     pub model_id: String,
+    /// Type of the underlying model
     pub model_type: ModelType,
+    /// Description of the dataset
     pub description: String,
+    /// Accuracy of the underlying model
     pub accuracy: f64,
+    /// When the model was trained
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Number of features (weights) in the model
     pub size: u64,
 }

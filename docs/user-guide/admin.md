@@ -23,7 +23,7 @@ This manual covers system administration tasks for PrimusDB v1.3.1+ deployments.
 # Download latest release
 wget https://github.com/devahil/primusdb/releases/latest/download/primusdb-linux-x64.tar.gz
 tar -xzf primusdb-linux-x64.tar.gz
-sudo mv primusdb-server primusdb-cli /usr/local/bin/
+sudo mv primusdb /usr/local/bin/
 ```
 
 ### Source Installation
@@ -52,9 +52,9 @@ PrimusDB uses TOML configuration files. Default search paths:
 Configuration changes require restart. Use signals for graceful shutdown:
 ```bash
 # Graceful restart
-kill -TERM $(pidof primusdb-server)
+primusdb server stop
 # Force restart
-kill -KILL $(pidof primusdb-server)
+primusdb server stop --force
 ```
 
 ## Service Management
@@ -69,7 +69,7 @@ After=network.target
 Type=simple
 User=primusdb
 Group=primusdb
-ExecStart=/usr/local/bin/primusdb-server --config /etc/primusdb/config.toml
+ExecStart=/usr/local/bin/primusdb server start --config /etc/primusdb/config.toml
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -136,7 +136,7 @@ df -h /var/lib/primusdb
 systemctl stop primusdb
 
 # Create backup
-primusdb-cli backup --destination /backup/primusdb_$(date +%Y%m%d_%H%M%S)
+primusdb backup create --destination /backup/primusdb_$(date +%Y%m%d_%H%M%S)
 
 # Start the server
 systemctl start primusdb
@@ -164,7 +164,7 @@ curl -X POST http://localhost:8080/api/v1/backup \
 systemctl stop primusdb
 
 # Restore from backup
-primusdb-cli restore --source /backup/primusdb_20231201_120000
+primusdb backup restore --source /backup/primusdb_20231201_120000
 
 # Start the server
 systemctl start primusdb
@@ -233,12 +233,24 @@ key_size = 32
 ```
 
 ### TLS Configuration
+
+PrimusDB supports native TLS/HTTPS and mutual TLS (mTLS) for inter-node
+federation communication. Use the `primusdb certs` command to generate
+certificates.
+
+```bash
+# Quick start: self-signed cert
+primusdb certs create-selfsigned --out-dir ./tls --hosts localhost
+primusdb server start --tls-enabled --tls-cert ./tls/selfsigned.pem --tls-key ./tls/selfsigned.key
+```
+
 ```toml
-[network.tls]
-enabled = true
-certificate_path = "/etc/ssl/primusdb.crt"
-key_path = "/etc/ssl/private/primusdb.key"
-min_tls_version = "1.2"
+[network]
+tls_enabled = true
+tls_cert_path = "/etc/ssl/primusdb.crt"
+tls_key_path = "/etc/ssl/private/primusdb.key"
+tls_ca_path = "/etc/ssl/ca.crt"       # Required for mTLS
+mtls_enabled = false                   # Require client certificates
 ```
 
 ### Access Control
@@ -353,7 +365,9 @@ election_timeout_max = 300
 ### Adding Nodes
 ```bash
 # Configure new node
-primusdb-server --cluster --node-id node2 --discovery coordinator:8080
+primusdb server start --bind 127.0.0.1:8080 \
+  --federation-id my-fed --cluster-id my-cluster --region us-east \
+  --federation-discovery coordinator:8080
 
 # Check cluster status
 curl http://localhost:8080/api/v1/cluster/status
@@ -362,7 +376,7 @@ curl http://localhost:8080/api/v1/cluster/status
 ### Node Maintenance
 ```bash
 # Graceful shutdown
-kill -TERM $(pidof primusdb-server)
+primusdb server stop
 
 # Force removal (if needed)
 curl -X DELETE http://coordinator:8080/api/v1/cluster/nodes/node2
@@ -409,7 +423,7 @@ discovery = ["fed-peer1:8080", "fed-peer2:8080"]
 
 ### Starting a Federated Server
 ```bash
-primusdb-server --host 0.0.0.0 --port 8080 \
+primusdb server start --bind 0.0.0.0:8080 \
   --federation-id my-fed --cluster-id cluster-us --region us-east \
   --federation-discovery fed-peer1:8081,fed-peer2:8081
 ```
@@ -527,7 +541,7 @@ BACKUP_DIR="/backup/daily"
 DATE=$(date +%Y%m%d)
 
 # Create backup
-primusdb-cli backup --destination "$BACKUP_DIR/$DATE"
+primusdb backup create --destination "$BACKUP_DIR/$DATE"
 
 # Clean old backups (keep 30 days)
 find "$BACKUP_DIR" -type d -mtime +30 -exec rm -rf {} \;

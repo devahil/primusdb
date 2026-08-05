@@ -7,8 +7,10 @@ PrimusDB is configured through TOML files, environment variables, and command-li
 When no `--config` flag is given, PrimusDB searches for `primusdb.toml` in the following order and uses the **first** file found:
 
 1. `./primusdb.toml` — current working directory
-2. `~/.config/primusdb/primusdb.toml` — user-level config
-3. `/etc/primusdb/primusdb.toml` — system-level config
+2. `./config.toml` — fallback in CWD
+3. `./config/primusdb.toml` — config subdirectory
+4. `~/.config/primusdb/config.toml` — user-level config
+5. `/etc/primusdb/config.toml` — system-level config
 
 If none of these files exist, PrimusDB uses its built-in defaults.
 

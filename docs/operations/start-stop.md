@@ -48,32 +48,32 @@ primusdb server start --bind 0.0.0.0:9090
 
 Precedence (highest first): command-line flags > environment variables > config file > built-in defaults.
 
-## Starting with `primusdb-server` (Legacy)
+## Starting with `primusdb server`
 
-The standalone binary `primusdb-server` is the legacy server entry point. It is still supported but emits a deprecation warning.
+`primusdb server start` is the recommended way to start the server.
 
 ```bash
 # Start with defaults
-primusdb-server
+primusdb server start
 
 # Start with custom host and port
-primusdb-server --host 0.0.0.0 --port 8080
+primusdb server start --host 0.0.0.0 --port 8080
 
 # Use configuration file
-primusdb-server --config /etc/primusdb/primusdb.toml
+primusdb server start --config /etc/primusdb/primusdb.toml
 
 # Enable cluster mode
-primusdb-server --cluster --node-id server-1
+primusdb server start --cluster --node-id server-1
 
 # Production-style start
-primusdb-server \
+primusdb server start \
   --host 0.0.0.0 \
   --port 8080 \
   --data-dir /data/primusdb \
   --log-level warn
 ```
 
-> **Note:** `primusdb-server` is being phased out in favor of `primusdb server start`. New deployments should use the unified CLI.
+> **Note:** The legacy `primusdb-server` binary was removed in v1.3.2-alpha. All deployments use `primusdb server start`.
 
 ## Development Scripts
 
@@ -220,7 +220,7 @@ WantedBy=multi-user.target
 
 ## Alpha Limitations
 
-As of v1.3.1-alpha, the following limitations apply to server lifecycle management:
+As of v1.3.2-alpha, the following limitations apply to server lifecycle management:
 
 - **Daemon mode** (`--daemon`) flag is accepted but the server does not fully detach from the terminal. Use `systemd` or a process manager like `supervisord` for production daemonization.
 - **`primusdb server stop`** sends a stop signal but does not track PIDs across sessions. It is best used with the process manager or the `dev-stop.sh` script.

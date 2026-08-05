@@ -1,3 +1,8 @@
+//! Prometheus metrics helpers for the consensus ledger.
+//!
+//! Exposes chain height, append count and tamper-detection counters that the
+//! consensus engine updates as blocks are committed and validated.
+
 use lazy_static::lazy_static;
 use prometheus::{register_counter, register_gauge, Counter, Gauge};
 

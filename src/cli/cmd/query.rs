@@ -1,7 +1,13 @@
+//! Query subcommands (`query`, `sql`, `explain`).
+//!
+//! All three post the given text to the server's `/api/v1/uql` endpoint in
+//! client mode and render the JSON response through `fmt`.
+
 use crate::cli::command::GlobalArgs;
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// POST a SQL statement to the server's UQL endpoint.
 async fn post_query(sql: &str, global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/uql", global.server_url);
@@ -28,6 +34,7 @@ async fn post_query(sql: &str, global: &GlobalArgs, fmt: &OutputFormat) -> Resul
     Ok(())
 }
 
+/// Execute a raw query against the connected server.
 pub async fn handle_query(
     query: Vec<String>,
     _database: Option<String>,
@@ -38,6 +45,7 @@ pub async fn handle_query(
     post_query(&sql, global, fmt).await
 }
 
+/// Execute a SQL query against the connected server.
 pub async fn handle_sql_file(
     sql: Vec<String>,
     _database: Option<String>,
@@ -48,6 +56,7 @@ pub async fn handle_sql_file(
     post_query(&sql_text, global, fmt).await
 }
 
+/// Request an `EXPLAIN` plan for a query without executing it.
 pub async fn handle_explain(
     query: Vec<String>,
     global: &GlobalArgs,

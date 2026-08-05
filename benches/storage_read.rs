@@ -18,11 +18,17 @@ fn make_config(tmpdir: &tempfile::TempDir) -> PrimusDBConfig {
             bind_address: "127.0.0.1".to_string(),
             port: 0,
             max_connections: 100,
+            tls_enabled: false,
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
+            tls_ca_path: String::new(),
+            mtls_enabled: false,
         },
         security: SecurityConfig {
             encryption_enabled: false,
             key_rotation_interval: 86400,
             auth_required: false,
+            mfa_enabled: false,
         },
         cluster: primusdb::ClusterConfig {
             enabled: false,
@@ -31,6 +37,10 @@ fn make_config(tmpdir: &tempfile::TempDir) -> PrimusDBConfig {
         },
         namespaces: Default::default(),
         federation: None,
+        integrity: primusdb::integrity::IntegrityConfig::default(),
+        hyperledger: None,
+        graphql: primusdb::graphql::GraphQLConfig::default(),
+        search: primusdb::search::SearchConfig::default(),
     }
 }
 

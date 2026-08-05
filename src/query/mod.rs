@@ -5,6 +5,49 @@
  * Version: 2.0.0 - Added: query cache with TTL, LRU eviction, stats
  */
 
+//! # PrimusDB Unified Query Language (UQL) Engine
+//!
+//! The top-level entry point of the query pipeline. [`UqlEngine`] accepts a
+//! language-agnostic [`UqlQuery`] (SQL, UQL, MongoDB, Mango, or auto-detected),
+//! orchestrates the parse -> plan -> execute stages, and wraps the whole flow in a
+//! TTL / LRU query-plan cache for read queries.
+//!
+//! ## Query Pipeline
+//!
+//! ```text
+//!             UqlQuery { query, query_type, parameters }
+//!                               |
+//!                               v
+//!             +------------------------------------------------+
+//!             |             UqlEngine::execute_query           |
+//!             +------------------------------------------------+
+//!                               |  (read) cache lookup -> early hit
+//!                               v
+//!             +------------------------------------------------+
+//!             |  parser::QueryParser::parse -> ParsedQuery     |
+//!             +------------------------------------------------+
+//!                               |
+//!                               v
+//!             +------------------------------------------------+
+//!             |  planner::QueryPlanner::create_plan -> QueryPlan |
+//!             +------------------------------------------------+
+//!                               |  (read) plan cached (TTL / LRU)
+//!                               v
+//!             +------------------------------------------------+
+//!             |  executor::QueryExecutor::execute -> UqlResult  |
+//!             +------------------------------------------------+
+//!                               |  (write) cache invalidated per table
+//!                               v
+//!                                       UqlResult
+//! ```
+//!
+//! ## Main Types
+//!
+//! - [`UqlEngine`] — engine façade: caching, parsing, planning, execution.
+//! - [`UqlQuery`] / [`QueryLanguage`] — the language-agnostic query input.
+//! - [`UqlResult`] — the unified output, including affected rows for DML/DDL.
+//! - [`QueryCacheConfig`] / [`CachedQuery`] / [`CacheStats`] — query-plan caching.
+
 use crate::{PrimusDBConfig, Record, Result, StorageType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,6 +67,11 @@ const DEFAULT_CACHE_TTL_SECS: u64 = 60;
 const DEFAULT_CACHE_MAX_SIZE: usize = 1000;
 
 /// Unified Query Language engine with query caching
+///
+/// This is the entry point for executing [`UqlQuery`] values. It owns the
+/// registered [`StorageType`] -> storage engine map, parses each query, plans
+/// it into a [`QueryPlan`], caches the plan for read queries, and runs it via
+/// [`QueryExecutor`].
 pub struct UqlEngine {
     config: PrimusDBConfig,
     storage_engines:
@@ -52,16 +100,26 @@ impl Default for QueryCacheConfig {
     }
 }
 
+/// A single cached query-plan entry
+///
+/// Stores the original query text, the compiled [`QueryPlan`], a creation
+/// timestamp, the per-entry TTL and the number of times it has been served.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedQuery {
+    /// The original query text
     pub query: String,
+    /// The compiled execution plan
     pub plan: QueryPlan,
+    /// When the entry was created
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Time-to-live for this entry, in seconds
     pub ttl_secs: u64,
+    /// Number of times this entry has been served from the cache
     pub hit_count: u64,
 }
 
 impl CachedQuery {
+    /// Create a new cache entry for `query` with the given `ttl_secs`
     pub fn new(query: String, plan: QueryPlan, ttl_secs: u64) -> Self {
         CachedQuery {
             query,
@@ -72,6 +130,7 @@ impl CachedQuery {
         }
     }
 
+    /// Returns `true` when the entry is older than its `ttl_secs`
     pub fn is_expired(&self) -> bool {
         let elapsed = chrono::Utc::now() - self.created_at;
         elapsed.num_seconds() >= self.ttl_secs as i64
@@ -88,6 +147,7 @@ struct QueryCache {
 }
 
 impl QueryCache {
+    /// Create a new cache with the given configuration
     fn new(config: QueryCacheConfig) -> Self {
         QueryCache {
             entries: HashMap::new(),
@@ -98,6 +158,7 @@ impl QueryCache {
         }
     }
 
+    /// Look up `key`, evicting it if expired and tracking LRU order
     fn get(&mut self, key: &str) -> Option<&CachedQuery> {
         if !self.config.enabled {
             return None;
@@ -124,6 +185,7 @@ impl QueryCache {
         }
     }
 
+    /// Insert an entry, evicting the LRU entry when at capacity
     fn insert(&mut self, key: String, value: CachedQuery) {
         if !self.config.enabled {
             return;
@@ -137,6 +199,7 @@ impl QueryCache {
         self.entries.insert(key, value);
     }
 
+    /// Evict the least-recently-used entry
     fn evict_lru(&mut self) {
         if let Some(lru_key) = self.access_order.first().cloned() {
             self.access_order.remove(0);
@@ -144,11 +207,13 @@ impl QueryCache {
         }
     }
 
+    /// Drop every cached entry
     fn invalidate(&mut self) {
         self.entries.clear();
         self.access_order.clear();
     }
 
+    /// Drop every cached entry whose plan touches `table`
     fn invalidate_for_table(&mut self, table: &str) {
         let keys_to_remove: Vec<String> = self
             .entries
@@ -172,6 +237,7 @@ impl QueryCache {
         }
     }
 
+    /// Whether `stage` reads or writes `table`
     fn stage_references_table(&self, stage: &ExecutionStage, table: &str) -> bool {
         match &stage.operation {
             StageOperation::Scan { table: t, .. }
@@ -191,6 +257,7 @@ impl QueryCache {
         }
     }
 
+    /// Snapshot the cache statistics for monitoring
     fn stats(&self) -> CacheStats {
         CacheStats {
             size: self.entries.len(),
@@ -206,15 +273,22 @@ impl QueryCache {
 /// Cache statistics for monitoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheStats {
+    /// Current number of cached query plans
     pub size: usize,
+    /// Maximum number of cached query plans
     pub max_size: usize,
+    /// Total cache hits
     pub hit_count: u64,
+    /// Total cache misses
     pub miss_count: u64,
+    /// Whether caching is enabled
     pub enabled: bool,
+    /// TTL applied to cached entries, in seconds
     pub ttl_secs: u64,
 }
 
 impl UqlEngine {
+    /// Create a new engine from a [`PrimusDBConfig`] with an empty engine map
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         Ok(UqlEngine {
             config: config.clone(),
@@ -223,6 +297,7 @@ impl UqlEngine {
         })
     }
 
+    /// Create an engine sharing an existing set of registered storage engines
     pub fn with_storage_engines(
         config: &PrimusDBConfig,
         engines: Arc<
@@ -236,6 +311,7 @@ impl UqlEngine {
         }
     }
 
+    /// Create an engine with a custom query-cache configuration
     pub fn with_cache_config(config: &PrimusDBConfig, cache_config: QueryCacheConfig) -> Self {
         UqlEngine {
             config: config.clone(),
@@ -244,6 +320,7 @@ impl UqlEngine {
         }
     }
 
+    /// Register a storage engine instance under a [`StorageType`]
     pub fn register_storage_engine(
         &self,
         storage_type: StorageType,
@@ -254,6 +331,10 @@ impl UqlEngine {
         }
     }
 
+    /// Execute a query end-to-end: parse, plan, cache, execute
+    ///
+    /// Read queries check the plan cache first and cache fresh plans; write
+    /// queries invalidate cache entries touching the target table afterwards.
     pub fn execute_query(&self, query: &UqlQuery) -> Result<UqlResult> {
         let cache_key = self.cache_key(query);
 
@@ -300,6 +381,7 @@ impl UqlEngine {
         Ok(result)
     }
 
+    /// Build the cache key from query type, query text and parameters
     fn cache_key(&self, query: &UqlQuery) -> String {
         format!(
             "{:?}:{}:{}",
@@ -313,6 +395,7 @@ impl UqlEngine {
         )
     }
 
+    /// Heuristic: does the SQL text start with a mutation keyword?
     fn is_write_query(&self, query: &str) -> bool {
         let upper = query.trim().to_uppercase();
         upper.starts_with("INSERT")
@@ -324,11 +407,13 @@ impl UqlEngine {
             || upper.starts_with("TRUNCATE")
     }
 
+    /// Parse a query into a [`ParsedQuery`] via [`QueryParser`]
     fn parse_query(&self, query: &UqlQuery) -> Result<ParsedQuery> {
         let parser = QueryParser::new();
         parser.parse(query)
     }
 
+    /// Compile a [`ParsedQuery`] into a [`QueryPlan`] using the registered engines
     fn create_execution_plan(&self, parsed: &ParsedQuery) -> Result<QueryPlan> {
         let planner = QueryPlanner::new(&self.config);
         let engines_map: HashMap<String, crate::storage::StorageEngineType> = {
@@ -344,6 +429,7 @@ impl UqlEngine {
                         StorageType::Document => "document",
                         StorageType::Relational => "relational",
                         StorageType::KeyValue => "keyvalue",
+                        StorageType::TimeSeries => "timeseries",
                     };
                     (
                         name.to_string(),
@@ -356,6 +442,7 @@ impl UqlEngine {
         planner.create_plan(parsed, &engines_map)
     }
 
+    /// Run a [`QueryPlan`] via a fresh [`QueryExecutor`]
     fn execute_plan(&self, plan: &QueryPlan) -> Result<UqlResult> {
         let executor =
             QueryExecutor::with_storage_engines(&self.config, self.storage_engines.clone());
@@ -402,36 +489,63 @@ impl UqlEngine {
     }
 }
 
+/// A language-agnostic query request
+///
+/// The `query_type` selects the dialect parser used, or [`QueryLanguage::Auto`]
+/// to auto-detect the dialect from the query text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UqlQuery {
+    /// The query text in the dialect given by [`UqlQuery::query_type`]
     pub query: String,
+    /// Dialect selector: SQL, UQL, MongoDB, Mango, or Auto
     pub query_type: QueryLanguage,
+    /// Optional parameter bindings passed alongside the query
     pub parameters: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Dialect selector for [`UqlQuery`]
+///
+/// Determines which parser front-end is used. `Auto` inspects the query text
+/// and picks the best match.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub enum QueryLanguage {
+    /// Standard SQL
     #[serde(rename = "sql")]
     Sql,
+    /// MongoDB JSON query documents
     #[serde(rename = "mongodb")]
     MongoDb,
+    /// CouchDB Mango (JSON selector) queries
     #[serde(rename = "mango")]
     Mango,
+    /// PrimusDB's JSON UQL dialect
     #[serde(rename = "uql")]
     Uql,
+    /// Auto-detect the dialect from the query text
     #[serde(rename = "auto")]
     #[default]
     Auto,
 }
 
+/// Unified result returned for every query
+///
+/// Carries the resulting records plus execution metadata and warnings.
+/// For DML/DDL operations `affected_rows` reports how many rows were touched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UqlResult {
+    /// Whether the query completed successfully
     pub success: bool,
+    /// Records produced by the query (empty for DDL)
     pub records: Vec<Record>,
+    /// Number of records returned
     pub total: usize,
+    /// Wall-clock execution time of the plan, in milliseconds
     pub execution_time_ms: u64,
+    /// Name of the primary storage engine that served the query
     pub engine_used: String,
+    /// Non-fatal messages collected during execution
     pub warnings: Vec<String>,
+    /// Whether the result was served from the query cache
     pub cached: bool,
     /// Number of rows affected by DML/DDL operations (0 for SELECT)
     #[serde(default)]
@@ -439,6 +553,7 @@ pub struct UqlResult {
 }
 
 impl UqlResult {
+    /// Build a successful read result from `records`
     pub fn success(records: Vec<Record>, execution_time_ms: u64) -> Self {
         let total = records.len();
         UqlResult {
@@ -453,6 +568,7 @@ impl UqlResult {
         }
     }
 
+    /// Build a successful mutation result carrying the number of affected rows
     pub fn mutation_success(
         records: Vec<Record>,
         affected_rows: u64,
@@ -471,6 +587,7 @@ impl UqlResult {
         }
     }
 
+    /// Build a failed result carrying a single error message in `warnings`
     pub fn error(message: String) -> Self {
         UqlResult {
             success: false,
@@ -484,6 +601,7 @@ impl UqlResult {
         }
     }
 
+    /// Mark this result as served from the query cache
     pub fn with_cache_hit(mut self) -> Self {
         self.cached = true;
         self
@@ -516,11 +634,17 @@ mod tests {
                 bind_address: "127.0.0.1".to_string(),
                 port: 8080,
                 max_connections: 100,
+                tls_enabled: false,
+                tls_cert_path: String::new(),
+                tls_key_path: String::new(),
+                tls_ca_path: String::new(),
+                mtls_enabled: false,
             },
             security: crate::SecurityConfig {
                 encryption_enabled: false,
                 key_rotation_interval: 86400,
                 auth_required: false,
+                mfa_enabled: false,
             },
             cluster: crate::ClusterConfig {
                 enabled: false,
@@ -529,6 +653,10 @@ mod tests {
             },
             namespaces: Default::default(),
             federation: None,
+            integrity: crate::integrity::IntegrityConfig::default(),
+            hyperledger: None,
+            graphql: crate::graphql::GraphQLConfig::default(),
+            search: crate::search::SearchConfig::default(),
         }
     }
 

@@ -17,13 +17,11 @@ primusdb server start
 # Execute a query
 primusdb query "SELECT * FROM users"
 
-# Launch interactive TUI
-primusdb tui
 ```
 
 ## Command Tree
 
-The CLI has 26+ top-level commands organized into subcommand groups:
+The CLI has 30+ top-level commands organized into subcommand groups:
 
 ```
 primusdb
@@ -36,8 +34,8 @@ primusdb
 │   └── config      View or modify configuration
 ├── health          Alias for server health
 ├── status          Alias for server status
-├── connect         Connect to a running instance interactively
-├── tui             Launch the terminal user interface
+├── connect         Connect to a running instance interactively (REPL)
+├── shell           Launch the interactive REPL shell
 ├── query           Execute a raw SQL query
 ├── sql             Execute a SQL query (string or file)
 ├── explain         Explain a query plan without executing
@@ -115,14 +113,10 @@ primusdb
 │   └── anomalies   Detect anomalies in a dataset
 ├── vector          Vector search and index management
 │   ├── search      Perform vector similarity search
-│   ├── index       Create or rebuild a vector index
-│   ├── stats       Show vector index statistics
-│   ├── compact     Compact and optimize vector indexes
-├── graph           Graph traversal and management
-│   ├── nodes       Query graph nodes
-│   ├── edges       Query graph edges
-│   ├── query       Execute a graph query
-│   └── traverse    Traverse the graph from a starting node
+│   ├── index       Create or rebuild a vector index (not yet wired)
+│   ├── stats       Show vector index statistics (not yet wired)
+│   └── compact     Compact and optimize vector indexes (not yet wired)
+├── graph           Graph traversal and management (not yet available via CLI)
 ├── cdc             Change Data Capture (CDC)
 │   ├── status      Show CDC status
 │   ├── stream      Manage a CDC stream
@@ -134,6 +128,29 @@ primusdb
 │   └── report      Generate a benchmark report
 ├── doctor          Run diagnostic checks
 ├── discover        Discover PrimusDB nodes on the network
+├── ts              Time series operations
+│   ├── list         List time series metrics
+│   ├── describe     Describe a time series metric
+│   ├── query        Query time series data points
+│   ├── aggregate    Aggregate time series data
+│   ├── downsample   Downsample a metric to a lower resolution
+│   ├── retain       Apply a retention policy to a metric
+│   ├── resolution   Add or update a resolution for a metric
+│   └── stats        Show engine statistics
+├── migrate         Migrate data from external databases
+│   ├── inspect-source  Inspect the source database
+│   ├── plan        Plan a migration
+│   ├── import      Execute a migration import
+│   ├── validate    Validate a migration configuration
+│   └── report      Generate a migration report
+├── governor        Resource Governor (execution governance)
+│   ├── status      Show governor status
+│   ├── policies    List governance policies
+│   ├── inspect     Inspect a specific execution
+│   ├── metrics     Show governor metrics snapshot
+│   ├── violations  List policy violations
+│   └── set         Set or update a governance policy
+├── certs           Certificate management (create CA, sign certs, self-signed)
 ├── completion      Generate shell completion scripts
 └── version         Display version information
 ```
@@ -242,7 +259,7 @@ primusdb server config --file primusdb.toml
 ```bash
 primusdb health       # Same as: primusdb server health
 primusdb status       # Same as: primusdb server status
-primusdb connect      # Same as: primusdb instance connect
+primusdb connect      # Same as: primusdb shell (opens the interactive REPL)
 ```
 
 ---
@@ -263,7 +280,7 @@ primusdb db create embeddings --engine vector
 primusdb db create mydb --namespace tenant1/project2
 ```
 
-**Engine types:** `columnar`, `vector`, `document`, `relational`, `graph`
+**Engine types:** `relational`, `document`, `keyvalue`, `columnar`, `vector`, `timeseries`
 
 ### `primusdb db drop`
 ```bash

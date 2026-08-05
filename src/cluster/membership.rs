@@ -1,3 +1,36 @@
+//! Cluster membership discovery and liveness
+//!
+//! Implements a SWIM-inspired gossip protocol so every node maintains a
+//! consistent view of the cluster. [`MembershipManager`] registers the local
+//! node, joins through seed servers, probes peers with ping / ping-req, gossips
+//! membership state, and transitions members through `Alive` / `Suspect` /
+//! `Dead` based on timeouts. Raft and shard managers rely on this member view
+//! to pick peers and place replicas.
+//!
+//! # Placement in the architecture
+//!
+//! `MembershipManager` is the discovery layer of the intra-cluster control
+//! plane. Its member table seeds the peer set of the
+//! [`crate::cluster::raft::RaftNode`] and the node set of the
+//! [`crate::cluster::shard::ShardManager`].
+//!
+//! ```text
+//!   ┌──────────────────────────────── Cluster ────────────────────────────────┐
+//!   │                                                                          │
+//!   │   node A ──gossip──► node B ──gossip──► node C                            │
+//!   │     ▲                  ▲     ▲           │                               │
+//!   │     └─────gossip───────┘     │           │                               │
+//!   │              └────gossip─────┘           ▼                               │
+//!   │                                                                          │
+//!   │   SWIM protocol:                                                        │
+//!   │     ping        direct liveness probe          ──► ack / ping-req       │
+//!   │     ping-req    indirect probe via alt nodes   ──► alive / dead         │
+//!   │     states: Alive ──► Suspect ──► Dead / Left                            │
+//!   │                                                                          │
+//!   │   member table feeds ──► RaftNode peers, ShardManager nodes             │
+//!   └──────────────────────────────────────────────────────────────────────────┘
+//! ```
+
 use crate::cluster::rpc::{
     ClusterNodeInfo, JoinRequest, JoinResponse, PingMessage, PingReqMessage, RpcClient, RpcMessage,
 };
@@ -11,35 +44,58 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Liveness state of a cluster member.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MemberStatus {
+    /// Responsive and participating in the cluster
     Alive,
+    /// Unresponsive, awaiting confirmation of failure
     Suspect,
+    /// Declared unreachable and removed from service
     Dead,
+    /// Voluntarily left the cluster
     Left,
 }
 
+/// View of a single node in the cluster membership table.
 #[derive(Debug, Clone)]
 pub struct ClusterMember {
+    /// Unique node identifier
     pub node_id: String,
+    /// Hostname/IP of the node
     pub address: String,
+    /// Cluster RPC port of the node
     pub port: u16,
+    /// Current liveness status
     pub status: MemberStatus,
+    /// Incarnation counter used to detect restarts
     pub incarnation: u64,
+    /// Timestamp (ms) of the last confirmed contact
     pub last_seen: u64,
+    /// Roles this node performs (`Coordinator`, `Worker`, `Storage`, ...)
     pub roles: Vec<String>,
+    /// Latest reported CPU usage (0.0-1.0)
     pub cpu_usage: f64,
+    /// Latest reported memory usage (0.0-1.0)
     pub memory_usage: f64,
+    /// Latest reported storage usage (0.0-1.0)
     pub storage_usage: f64,
 }
 
+/// Tuning parameters for the gossip membership protocol.
 #[derive(Debug, Clone)]
 pub struct MembershipConfig {
+    /// How often membership is gossiped to peers (ms)
     pub gossip_interval_ms: u64,
+    /// How often a random member is probed (ms)
     pub probe_interval_ms: u64,
+    /// Timeout before a suspect member is declared dead (ms)
     pub suspect_timeout_ms: u64,
+    /// Number of members to spread gossip to per round
     pub gossip_fanout: usize,
+    /// Number of alternate nodes asked to probe a suspect (ping-req)
     pub ping_req_count: usize,
+    /// Minimum interval between dead-member cleanups (ms)
     pub cleanup_interval_ms: u64,
 }
 
@@ -56,19 +112,32 @@ impl Default for MembershipConfig {
     }
 }
 
+/// SWIM-style gossip membership manager for one cluster node.
+///
+/// Maintains the local view of [`ClusterMember`] entries, the RPC clients used
+/// to reach them, and runs the periodic probe / gossip / cleanup loops.
 #[derive(Debug)]
 pub struct MembershipManager {
+    /// ID of the local node
     pub node_id: String,
+    /// Address the local node binds for cluster RPC
     pub bind_addr: SocketAddr,
+    /// Gossip tuning parameters
     pub config: MembershipConfig,
+    /// Membership table keyed by node ID
     pub members: RwLock<HashMap<String, ClusterMember>>,
+    /// Connected RPC clients keyed by node ID
     pub clients: RwLock<HashMap<String, Arc<RpcClient>>>,
+    /// Local sequence counter for ping messages
     pub local_seq: RwLock<u64>,
+    /// Whether the gossip loop should keep running
     pub running: RwLock<bool>,
+    /// Seed servers used to bootstrap into the cluster
     pub seed_servers: Vec<String>,
 }
 
 impl MembershipManager {
+    /// Create a membership manager for the local node with the given seed servers.
     pub fn new(node_id: String, bind_addr: SocketAddr, seed_servers: Vec<String>) -> Self {
         Self {
             node_id,
@@ -82,6 +151,7 @@ impl MembershipManager {
         }
     }
 
+    /// Current wall-clock time in milliseconds.
     fn now() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -89,6 +159,8 @@ impl MembershipManager {
             .as_millis() as u64
     }
 
+    /// Insert or refresh a member. Newer incarnations and resurrected members
+    /// overwrite existing entries.
     pub async fn add_member(&self, member: ClusterMember) {
         let mut members = self.members.write().await;
         let entry = members
@@ -99,10 +171,12 @@ impl MembershipManager {
         }
     }
 
+    /// Look up a member by node ID.
     pub async fn get_member(&self, node_id: &str) -> Option<ClusterMember> {
         self.members.read().await.get(node_id).cloned()
     }
 
+    /// All members currently marked `Alive`.
     pub async fn alive_members(&self) -> Vec<ClusterMember> {
         self.members
             .read()
@@ -113,6 +187,7 @@ impl MembershipManager {
             .collect()
     }
 
+    /// All members currently marked `Suspect`.
     pub async fn suspect_members(&self) -> Vec<ClusterMember> {
         self.members
             .read()
@@ -123,6 +198,7 @@ impl MembershipManager {
             .collect()
     }
 
+    /// Mark a member `Suspect` if its incarnation is not stale.
     pub async fn mark_suspect(&self, node_id: &str, incarnation: u64) {
         let mut members = self.members.write().await;
         if let Some(member) = members.get_mut(node_id) {
@@ -133,6 +209,7 @@ impl MembershipManager {
         }
     }
 
+    /// Mark a member `Alive` and refresh its `last_seen` if incarnation is fresh.
     pub async fn mark_alive(&self, node_id: &str, incarnation: u64) {
         let mut members = self.members.write().await;
         if let Some(member) = members.get_mut(node_id) {
@@ -144,6 +221,7 @@ impl MembershipManager {
         }
     }
 
+    /// Mark a member `Dead`.
     pub async fn mark_dead(&self, node_id: &str) {
         let mut members = self.members.write().await;
         if let Some(member) = members.get_mut(node_id) {
@@ -151,6 +229,7 @@ impl MembershipManager {
         }
     }
 
+    /// Insert the local node into the membership table.
     pub async fn register_self(&self) {
         let mut members = self.members.write().await;
         members.insert(
@@ -170,6 +249,8 @@ impl MembershipManager {
         );
     }
 
+    /// Send a join request to each seed server and fold the returned member
+    /// list into the local table.
     pub async fn connect_to_seeds(&self) -> Result<()> {
         for seed in &self.seed_servers {
             let addr: SocketAddr = match seed.parse() {
@@ -232,6 +313,8 @@ impl MembershipManager {
         Ok(())
     }
 
+    /// Run the gossip loop forever: probe a member, check suspects, gossip
+    /// membership, and clean up dead members until `running` is cleared.
     pub async fn start_gossip_loop(&self) {
         let probe_interval = self.config.probe_interval_ms;
         let gossip_interval = self.config.gossip_interval_ms;
@@ -259,6 +342,8 @@ impl MembershipManager {
         }
     }
 
+    /// Pick the least-recently-seen alive member and send a direct ping,
+    /// falling back to an indirect ping-req when the direct probe fails.
     async fn probe_random_member(&self) {
         let alive: Vec<ClusterMember> = self.alive_members().await;
         let target = alive
@@ -296,6 +381,9 @@ impl MembershipManager {
         }
     }
 
+    /// Ask up to `ping_req_count` alternate members to probe `target_id`
+    /// directly. The target is confirmed alive if any alternate succeeds, and
+    /// marked dead if all of them fail.
     async fn ping_req(&self, target_id: &str, seq: u64) {
         let alive: Vec<ClusterMember> = self.alive_members().await;
         let alt_nodes: Vec<&ClusterMember> = alive
@@ -326,6 +414,8 @@ impl MembershipManager {
         info!("Node {} marked dead after failed ping-req", target_id);
     }
 
+    /// Promote any member that has been suspect for longer than `timeout_ms`
+    /// to `Dead`.
     async fn check_suspects(&self, timeout_ms: u64) {
         let now = Self::now();
         let suspects: Vec<ClusterMember> = self.suspect_members().await;
@@ -337,6 +427,8 @@ impl MembershipManager {
         }
     }
 
+    /// Spread a snapshot of alive/suspect members to every connected peer,
+    /// carrying each entry's status and incarnation in a `MetadataSync` message.
     async fn gossip_membership(&self) {
         let members_snapshot: Vec<ClusterMember> = {
             self.members
@@ -383,6 +475,8 @@ impl MembershipManager {
         }
     }
 
+    /// Periodically drop `Dead` / `Left` members (and their RPC clients) from
+    /// the membership table, throttled to at most once per `cleanup_interval_ms`.
     async fn cleanup_dead_members(&self, cleanup_interval_ms: u64) {
         static mut LAST_CLEANUP: u64 = 0;
         let now = Self::now();
@@ -405,6 +499,8 @@ impl MembershipManager {
         }
     }
 
+    /// Handle an incoming join request: register the joining node and reply with
+    /// the current accepted node list.
     pub async fn handle_join(
         &self,
         req: &JoinRequest,

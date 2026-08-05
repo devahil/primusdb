@@ -10,7 +10,7 @@ PrimusDB follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 - **MINOR**: Backwards-compatible feature additions
 - **PATCH**: Backwards-compatible bug fixes
 
-Pre-release versions use the `-alpha` suffix (e.g., `1.3.1-alpha`).
+Pre-release versions use the `-alpha` suffix (e.g., `1.3.2-alpha`).
 
 ## Release Checklist
 
@@ -21,7 +21,7 @@ Update the version in all `Cargo.toml` files across the workspace:
 ```bash
 # Root Cargo.toml (src/)
 # The version field at line 3:
-# version = "1.3.1-alpha" → version = "1.3.2-alpha"
+# version = "1.3.2-alpha" → version = "1.3.2-alpha"
 
 # Also update in:
 # - crates/primusdb-core/Cargo.toml
@@ -40,14 +40,14 @@ Update the version in all `Cargo.toml` files across the workspace:
 Update the version string in legacy binaries:
 
 ```rust
-// src/bin/server.rs — #[command(version = "1.3.1-alpha")]
+// src/bin/server.rs — #[command(version = "1.3.2-alpha")]
 // src/bin/cli.rs — version reference
 ```
 
 Also update the version in `src/lib.rs` doc header:
 
 ```rust
-// Version: 1.3.1-alpha
+// Version: 1.3.2-alpha
 ```
 
 **Tip**: Use a script or `sed` to ensure consistency:
@@ -57,7 +57,7 @@ Also update the version in `src/lib.rs` doc header:
 grep '^version' crates/*/Cargo.toml Cargo.toml drivers/rust/Cargo.toml
 
 # Update (example: 1.3.1 → 1.4.0)
-sed -i 's/^version = "1.3.1-alpha"/version = "1.4.0-alpha"/' \
+sed -i 's/^version = "1.3.2-alpha"/version = "1.4.0-alpha"/' \
   Cargo.toml \
   crates/*/Cargo.toml \
   drivers/rust/Cargo.toml
@@ -134,14 +134,14 @@ git checkout main
 git pull origin main
 
 # Create an annotated tag
-git tag -a v1.3.1-alpha -m "Release v1.3.1-alpha"
+git tag -a v1.3.2-alpha -m "Release v1.3.2-alpha"
 
 # Push the tag to GitHub
-git push origin v1.3.1-alpha
+git push origin v1.3.2-alpha
 ```
 
 Tag format: `v{MAJOR}.{MINOR}.{PATCH}{SUFFIX}`
-Examples: `v1.3.1-alpha`, `v1.2.0`, `v1.1.0`
+Examples: `v1.3.2-alpha`, `v1.2.0`, `v1.1.0`
 
 ### 6. Package Distribution
 
@@ -152,16 +152,16 @@ Create the Linux distribution tarball:
 ./scripts/package-linux.sh
 
 # With explicit version
-./scripts/package-linux.sh --version 1.3.1-alpha
+./scripts/package-linux.sh --version 1.3.2-alpha
 
 # To a custom output directory
-./scripts/package-linux.sh --output ./dist --version 1.3.1-alpha
+./scripts/package-linux.sh --output ./dist --version 1.3.2-alpha
 ```
 
 The packaging script:
 1. Verifies release binaries exist (builds if missing)
 2. Creates a directory: `dist/primusdb-{version}-linux-{arch}/`
-3. Copies binaries: `primusdb`, `primusdb-server`, `primusdb-cli`
+3. Copies binaries: `primusdb`
 4. Copies documentation and license files
 5. Copies example configurations
 6. Creates a compressed tarball: `dist/primusdb-{version}-linux-{arch}.tar.gz`
@@ -202,16 +202,16 @@ Create a release on GitHub:
 
 ```bash
 # Using gh CLI (requires authentication)
-gh release create v1.3.1-alpha \
-  --title "PrimusDB v1.3.1-alpha" \
+gh release create v1.3.2-alpha \
+  --title "PrimusDB v1.3.2-alpha" \
   --notes "Release notes here" \
-  "dist/primusdb-1.3.1-alpha-linux-x86_64.tar.gz"
+  "dist/primusdb-1.3.2-alpha-linux-x86_64.tar.gz"
 ```
 
 Or create the release manually:
 1. Go to https://github.com/devahil/primusdb/releases
 2. Click "Draft a new release"
-3. Select the tag (`v1.3.1-alpha`)
+3. Select the tag (`v1.3.2-alpha`)
 4. Write release notes (summarize changes from CHANGELOG.md)
 5. Attach the distribution tarball
 6. Publish release
@@ -247,7 +247,7 @@ For critical bug fixes or security patches:
 
 1. Create a fix branch from the release tag:
    ```bash
-   git checkout -b fix/v1.3.1 v1.3.1-alpha
+   git checkout -b fix/v1.3.1 v1.3.2-alpha
    ```
 2. Apply the fix
 3. Bump the patch version: `1.3.2-alpha`

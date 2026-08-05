@@ -8,7 +8,35 @@
 //! Data Reconciliation Engine
 //!
 //! This module handles cross-node data reconciliation, conflict detection,
-//! and resolution for distributed PrimusDB operations.
+//! and resolution for distributed PrimusDB operations. It contains the pure,
+//! dependency-free logic used by [`crate::cluster::sync::SyncCoordinator`]:
+//! vector-clock comparison ([`compare_vector_clocks`]), plan construction
+//! ([`build_cross_cluster_reconciliation_plan`]) and conflict resolution
+//! ([`resolve_cross_cluster_conflict`]), together with the [`DataConflict`],
+//! [`RecordVersion`], [`ReconciliationPlan`] and [`MerkleNode`] value types.
+//!
+//! # Placement in the architecture
+//!
+//! `SyncCoordinator` feeds local and remote record versions into this module,
+//! then executes the resulting plan over cluster RPCs.
+//!
+//! ```text
+//!   SyncCoordinator::reconcile_node / cross_cluster_reconcile
+//!                        │
+//!                        ▼
+//!   compare_vector_clocks(local, remote) ──► VClockOrder
+//!                        │   (Equal / Before / After / Concurrent)
+//!                        ▼
+//!   build_cross_cluster_reconciliation_plan ──► ReconciliationPlan
+//!        │                    │                      │
+//!        ▼                    ▼                      ▼
+//!   pull_records        push_records           conflicts (DataConflict)
+//!                                                    │
+//!                                                    ▼
+//!                                    resolve_cross_cluster_conflict
+//!                                        ──► winning RecordVersion
+//!   MerkleNode trees let peers compare large tables cheaply.
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,6 +251,8 @@ pub fn build_cross_cluster_reconciliation_plan(
 }
 
 impl RecordVersion {
+    /// Create a version 1 record stamped with the given vector clock and the
+    /// current wall-clock time.
     pub fn new(key: &str, modified_by: &str, clock: HashMap<String, u64>) -> Self {
         Self {
             key: key.to_string(),
@@ -237,6 +267,8 @@ impl RecordVersion {
         }
     }
 
+    /// Record a new modification by `node_id`: tick its vector clock, bump the
+    /// version, refresh the timestamp, and update `modified_by`.
     pub fn advance(&mut self, node_id: &str) {
         let counter = self.vector_clock.entry(node_id.to_string()).or_insert(0);
         *counter += 1;

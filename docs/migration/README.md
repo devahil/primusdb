@@ -161,12 +161,12 @@ without touching the target database.
 
 Real-world migration walkthroughs for each supported source are available under `examples/migration/`:
 
-- [MySQL → PrimusDB](../../examples/migration/mysql-to-primusdb.md)
-- [PostgreSQL → PrimusDB](../../examples/migration/postgresql-to-primusdb.md)
-- [MongoDB → PrimusDB](../../examples/migration/mongodb-to-primusdb.md)
-- [CouchDB → PrimusDB](../../examples/migration/couchdb-to-primusdb.md)
+- [MySQL → PrimusDB](./mysql.md)
+- [PostgreSQL → PrimusDB](./postgresql.md)
+- [MongoDB → PrimusDB](./mongodb.md)
+- [CouchDB → PrimusDB](./couchdb.md)
 
-A [sample mapping configuration](../../examples/migration/mapping.example.toml) is also available.
+A [sample mapping configuration](./mapping.md) is also available.
 
 ## Known Limitations
 

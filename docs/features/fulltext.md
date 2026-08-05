@@ -1,5 +1,9 @@
 # Full-Text Search
 
+> **NOT AVAILABLE**: The full-text engine described here lives in `src/fulltext.rs`,
+> which is not declared in `src/lib.rs` and is **not compiled** in the current
+> build. This page is kept as reference for the intended design.
+
 PrimusDB includes a built-in full-text search engine that provides
 term-based search with TF-IDF relevance scoring. The engine is
 implemented as a self-contained inverted index (`src/fulltext.rs`)

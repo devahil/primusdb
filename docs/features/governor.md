@@ -23,7 +23,6 @@ or **block** the execution depending on the policy action.
 | **Violations**          | Capped ring buffer (10k entries, auto-drain to 5k)       |
 | **Metrics**             | Prometheus 7-metric suite + runtime snapshot              |
 | **API**                 | 9 REST endpoints (5 GET + 4 POST) + 6 CLI subcommands    |
-| **TUI**                 | Dedicated Governor panel with live status + violations    |
 
 ### Workload types
 
@@ -246,20 +245,6 @@ curl -X POST http://localhost:8080/api/v1/governor/executions/start \
 
 ---
 
-## TUI
-
-The Governor panel in the TUI (activated via the `Navigation` sidebar or the
-keybindings below) shows four sections:
-
-| Key | Section          |
-|-----|------------------|
-| `s` | Status (enabled, active count) |
-| `v` | Recent violations (up to 8)    |
-| `m` | Metrics snapshot              |
-| `r` | Refresh all                  |
-
----
-
 ## Logging
 
 All violations are logged via `tracing::warn!(target: "GovernorViolation")`
@@ -279,9 +264,8 @@ enabled.
 | `src/governor/policy.rs`         | 510   | PolicyManager + scope resolution |
 | `src/governor/engine.rs`         | 1198  | GovernorEngine + execution lifecycle |
 | `src/cli/cmd/governor.rs`        | 367   | CLI subcommands              |
-| `src/api/mod.rs`                 | ~300  | REST endpoints               |
-| `src/cli/tui/sections/governor.rs`| ~110 | TUI render function          |
-| `src/metrics.rs`                 | ~30   | Prometheus registration      |
+| `src/api/mod.rs`                 | ~300  | REST endpoints              |
+| `src/protocol/messaging.rs`      | ~30   | Prometheus registration     |
 
 ### Key design decisions
 

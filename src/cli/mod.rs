@@ -1,11 +1,58 @@
+//! CLI module for PrimusDB.
+//!
+//! Provides command-line argument parsing via clap, subcommand dispatch
+//! for server/client modes, output formatting (table, JSON, plain), and
+//! instance discovery over the network.
+//!
+//! # Command dispatch flow
+//!
+//! Every invocation — whether from `argv` or from a line typed inside the
+//! interactive shell — funnels through the same pipeline:
+//!
+//! 1. `clap` parses the raw arguments into a [`Cli`], flattening the global
+//!    flags (`--server-url`, `--format`, `--timeout`, `--output`) into a
+//!    [`GlobalArgs`].
+//! 2. [`run_cli`] matches the parsed [`Commands`] variant and routes it to
+//!    the corresponding `cmd::*` handler.
+//! 3. The handler produces an [`OutputData`] value that `format_output`
+//!    renders in the requested [`OutputFormat`] (table, json, csv, yaml,
+//!    plain) to stdout.
+//!
+//! ```text
+//! argv ──► Cli::parse ──► GlobalArgs + Commands
+//!                                │
+//!                                ▼
+//!                           run_cli (dispatch)
+//!                                │
+//!        ┌───────────────────────┼───────────────────────┐
+//!        │ Server                │ Shell / Connect       │ Client
+//!        ▼                       ▼                       ▼
+//!   cmd::server::         repl::run (REPL loop)     cmd::db, cmd::query,
+//!   handle_server               │                    cmd::cluster, ...
+//!        │              per line:                        │
+//!        │           Cli::try_parse_from                │
+//!        │                   │                           │
+//!        └───────────────────┼───────────────────────────┘
+//!                            ▼
+//!                       OutputData
+//!                            ▼
+//!                 format_output ──► stdout
+//!          (table | json | csv | yaml | plain)
+//! ```
+//!
+//! # Server vs. client mode
+//!
+//! The `server` subcommand runs a full PrimusDB server in-process (see
+//! `cmd::server::handle_server`); every other subcommand is **client mode**
+//! and talks to a running server over HTTP at `GlobalArgs.server_url`.
+//! `shell` and `connect` enter the interactive REPL, which wraps client
+//! mode in a console and re-enters the parse loop above once per line.
+
 pub mod cmd;
 pub mod command;
 pub mod discovery;
 pub mod output;
-pub mod tui;
-
-#[allow(dead_code)]
-mod legacy;
+pub mod repl;
 
 use std::path::PathBuf;
 
@@ -15,7 +62,9 @@ pub use command::{Cli, Commands};
 pub use output::{ExitCode, OutputData, OutputFormat};
 
 use crate::Result;
-use command::{BenchSubcommands, GlobalArgs, GovernorSubcommands, MigrateSubcommands};
+use command::{
+    BenchSubcommands, GlobalArgs, GovernorSubcommands, MigrateSubcommands, TimeSeriesSubcommands,
+};
 use output::format_output;
 
 /// Main entry point for the PrimusDB CLI.
@@ -32,10 +81,10 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Server(cmd) => handle_server(cmd, &fmt).await,
         Commands::Connect { server, timeout } => handle_connect(server, timeout, &fmt).await,
+        Commands::Shell { server, timeout } => handle_shell(server, timeout).await,
         Commands::Health => handle_health(&cli.global, &fmt).await,
         Commands::Status => handle_status(&cli.global, &fmt).await,
         Commands::Instance(cmd) => handle_instance(cmd, &cli.global, &fmt).await,
-        Commands::Tui { server, no_color } => handle_tui(server, no_color).await,
         Commands::Query { query, database } => {
             handle_query(query, database, &cli.global, &fmt).await
         }
@@ -67,14 +116,35 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Explain { query } => handle_explain(query, &cli.global, &fmt).await,
         Commands::Bench(cmd) => handle_bench(cmd, &cli.global, &fmt).await,
         Commands::Migrate(cmd) => handle_migrate(cmd, &cli.global, &fmt).await,
-        Commands::Doctor { aggressive, report } => {
-            handle_doctor(aggressive, report, &cli.global, &fmt).await
+        Commands::Doctor {
+            aggressive,
+            report,
+            config,
+            system_db,
+            notebooks,
+            rag,
+        } => {
+            handle_doctor(
+                aggressive,
+                report,
+                config,
+                system_db,
+                notebooks,
+                rag,
+                &cli.global,
+                &fmt,
+            )
+            .await
         }
         Commands::Discover {
             broadcast,
             port,
             timeout,
         } => handle_discover(broadcast, port, timeout, &fmt).await,
+        Commands::Ts(cmd) => handle_timeseries(cmd, &cli.global, &fmt).await,
+        Commands::Integrity(cmd) => cmd::integrity::handle_integrity(cmd, &cli.global, &fmt).await,
+        Commands::Search(cmd) => cmd::search::handle_search(cmd, &cli.global, &fmt).await,
+        Commands::Certs(cmd) => handle_certs(cmd).await,
         Commands::Governor(cmd) => handle_governor(cmd, &cli.global, &fmt).await,
         Commands::Completion { shell } => handle_completion(shell),
         Commands::Version { verbose } => handle_version(verbose),
@@ -89,28 +159,12 @@ async fn handle_server(cmd: command::ServerSubcommands, fmt: &OutputFormat) -> R
     cmd::server::handle_server(cmd, fmt).await
 }
 
-async fn handle_connect(server: Option<String>, timeout: u64, fmt: &OutputFormat) -> Result<()> {
-    let url = server.unwrap_or_else(|| "http://localhost:8080".to_string());
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| crate::Error::NetworkError(e.to_string()))?;
+async fn handle_connect(server: Option<String>, _timeout: u64, _fmt: &OutputFormat) -> Result<()> {
+    repl::run(repl::ReplState::new(server))
+}
 
-    match client.get(format!("{}/health", url)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data = OutputData::Message(format!("Connected to {}", url));
-            println!("{}", format_output(&data, *fmt));
-        }
-        Ok(resp) => {
-            let data = OutputData::Error(format!("Connection failed: HTTP {}", resp.status()));
-            println!("{}", format_output(&data, *fmt));
-        }
-        Err(e) => {
-            let data = OutputData::Error(format!("Connection failed: {}", e));
-            println!("{}", format_output(&data, *fmt));
-        }
-    }
-    Ok(())
+async fn handle_shell(server: Option<String>, _timeout: u64) -> Result<()> {
+    repl::run(repl::ReplState::new(server))
 }
 
 async fn handle_health(global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
@@ -175,13 +229,6 @@ async fn handle_instance(
     fmt: &OutputFormat,
 ) -> Result<()> {
     cmd::instance::handle_instance(cmd, global, fmt).await
-}
-
-async fn handle_tui(server: Option<String>, _no_color: bool) -> Result<()> {
-    match server {
-        Some(url) => tui::run_tui_connect(&url).await,
-        None => tui::run_tui().await,
-    }
 }
 
 async fn handle_query(
@@ -511,13 +558,18 @@ async fn handle_config(
     cmd::config::handle_config(cmd, global, fmt).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_doctor(
     aggressive: bool,
     report: Option<PathBuf>,
+    config: bool,
+    system_db: bool,
+    notebooks: bool,
+    rag: bool,
     _global: &GlobalArgs,
     fmt: &OutputFormat,
 ) -> Result<()> {
-    cmd::doctor::handle_doctor(aggressive, report, fmt).await
+    cmd::doctor::handle_doctor(aggressive, report, config, system_db, notebooks, rag, fmt).await
 }
 
 async fn handle_discover(
@@ -527,6 +579,20 @@ async fn handle_discover(
     fmt: &OutputFormat,
 ) -> Result<()> {
     cmd::discover::handle_discover(broadcast, port, timeout, fmt).await
+}
+
+async fn handle_certs(cmd: crate::certs::CertsCommands) -> Result<()> {
+    crate::certs::handle_certs_command(cmd)
+        .await
+        .map_err(crate::Error::NetworkError)
+}
+
+async fn handle_timeseries(
+    cmd: TimeSeriesSubcommands,
+    global: &GlobalArgs,
+    fmt: &OutputFormat,
+) -> Result<()> {
+    cmd::timeseries::handle_timeseries(cmd, global, fmt).await
 }
 
 async fn handle_governor(

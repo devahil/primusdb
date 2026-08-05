@@ -124,6 +124,43 @@ module PrimusDB
     end
   end
 
+  # Server info snapshot
+  class ServerInfo
+    attr_accessor :version, :node_id, :instance_id, :uptime_seconds
+
+    def initialize(info = {})
+      info ||= {}
+      @version = info['version']
+      @node_id = info['node_id']
+      @instance_id = info['instance_id']
+      @uptime_seconds = info['uptime_seconds']
+    end
+  end
+
+  # Storage engine capabilities snapshot
+  class EngineCapabilities
+    attr_accessor :storage_type, :tables
+
+    def initialize(engine = {})
+      engine ||= {}
+      @storage_type = engine['storage_type']
+      @tables = engine['tables']
+    end
+  end
+
+  # Server capabilities snapshot
+  class ServerCapabilities
+    attr_accessor :protocol_version, :server, :engines, :features
+
+    def initialize(caps = {})
+      caps ||= {}
+      @protocol_version = caps['protocol_version']
+      @server = ServerInfo.new(caps['server'])
+      @engines = (caps['engines'] || []).map { |e| EngineCapabilities.new(e) }
+      @features = caps['features']
+    end
+  end
+
   class Client
     include KeyValue
     # Storage engine types
@@ -184,6 +221,37 @@ module PrimusDB
     # @return [Boolean]
     def connected?
       @connected
+    end
+
+    # ==================== Capability Negotiation ====================
+
+    # Fetch the server capabilities snapshot
+    #
+    # @return [ServerCapabilities] Capabilities snapshot
+    def capabilities
+      check_connection
+      ServerCapabilities.new(handle_response(@http_client.get('capabilities')))
+    end
+
+    # Negotiate with the server: fetch capabilities and validate that the node
+    # supports all required features and storage engines
+    #
+    # @param required_features [Array<String>, nil] Feature flags the server must advertise
+    # @param required_engines [Array<String>, nil] Storage engines the server must advertise
+    # @return [ServerCapabilities] Capabilities snapshot
+    # @raise [RuntimeError] If a required feature or engine is missing
+    def negotiate(required_features: nil, required_engines: nil)
+      caps = capabilities
+      if required_features
+        missing = required_features - caps.features
+        raise "Missing required features: #{missing.join(', ')}" unless missing.empty?
+      end
+      if required_engines
+        available = caps.engines.map(&:storage_type)
+        missing = required_engines - available
+        raise "Missing required engines: #{missing.join(', ')}" unless missing.empty?
+      end
+      caps
     end
 
     # Create table/collection

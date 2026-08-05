@@ -21,33 +21,55 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Outcome of post-import data validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReport {
+    /// Number of target objects checked.
     pub objects_checked: u64,
+    /// Total rows found matching expectations.
     pub rows_matched: u64,
+    /// Objects whose row count matched.
     pub checksums_matched: u64,
+    /// Human-readable descriptions of any mismatches found.
     pub mismatches: Vec<String>,
 }
 
+/// Aggregated summary of a migration operation, rendered to Markdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationReport {
+    /// Source database type, e.g. `mysql`.
     pub source_type: String,
+    /// Source connection URL with credentials masked.
     pub source_url_masked: String,
+    /// Target PrimusDB server URL.
     pub target_url: String,
+    /// Namespace data was imported into.
     pub namespace: String,
+    /// Migration mode used (copy, schema-only, data-only, dry-run).
     pub mode: String,
+    /// RFC 3339 timestamp when the migration started.
     pub started_at: String,
+    /// Total runtime of the migration in milliseconds.
     pub duration_ms: u64,
+    /// Number of objects targeted by the plan.
     pub objects_total: u64,
+    /// Number of objects successfully created.
     pub objects_imported: u64,
+    /// Number of rows expected across all objects.
     pub rows_total: u64,
+    /// Number of rows successfully written.
     pub rows_imported: u64,
+    /// Fatal error messages encountered during migration.
     pub errors: Vec<String>,
+    /// Non-fatal warnings collected during migration.
     pub warnings: Vec<String>,
+    /// Optional validation results when validation ran.
     pub validation: Option<ValidationReport>,
 }
 
 impl MigrationReport {
+    /// Masks the userinfo portion of a connection URL, e.g.
+    /// `mysql://user:pass@host` becomes `mysql://*****@host`.
     pub fn mask_url(url: &str) -> String {
         let parts: Vec<&str> = url.splitn(3, "://").collect();
         if parts.len() != 2 {
@@ -62,6 +84,7 @@ impl MigrationReport {
         }
     }
 
+    /// Renders the report as a Markdown document.
     pub fn render_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str("# Migration Report\n\n");

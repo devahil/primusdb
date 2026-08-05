@@ -189,18 +189,6 @@ primusdb_governor_ffi_calls_total 128
 
 ---
 
-## TUI
-
-Access the Governor panel from the Navigation sidebar. Keybindings within
-the panel:
-
-| Key | Action                   |
-|-----|--------------------------|
-| `s` | Show status              |
-| `v` | Show recent violations   |
-| `m` | Show metrics snapshot    |
-| `r` | Refresh all data         |
-
 ---
 
 ## Logging

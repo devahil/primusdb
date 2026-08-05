@@ -1,5 +1,7 @@
 # TUI Keybindings Reference
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 All keyboard shortcuts available in the PrimusDB multipanel TUI.
 
 ## Global Navigation

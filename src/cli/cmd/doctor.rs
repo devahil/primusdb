@@ -1,3 +1,10 @@
+//! Diagnostic subcommand (`doctor`).
+//!
+//! Runs local checks (Rust/binary version, config file, data directory,
+//! port availability, server health) and, when requested, server-side and
+//! filesystem checks, then renders them as a table and optionally writes a
+//! text report.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -5,17 +12,17 @@ use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
 /// Diagnostic check result
-#[allow(dead_code)]
 struct Check {
     name: String,
     status: CheckStatus,
     detail: String,
 }
 
-#[allow(dead_code)]
 enum CheckStatus {
     Pass,
     Warn,
+    /// Reserved for future checks; mapped to "FAIL" in report output.
+    #[allow(dead_code)]
     Fail,
     Info,
 }
@@ -35,14 +42,6 @@ impl Check {
             detail: detail.into(),
         }
     }
-    #[allow(dead_code)]
-    fn fail(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Check {
-            name: name.into(),
-            status: CheckStatus::Fail,
-            detail: detail.into(),
-        }
-    }
     fn info(name: impl Into<String>, detail: impl Into<String>) -> Self {
         Check {
             name: name.into(),
@@ -52,9 +51,15 @@ impl Check {
     }
 }
 
+/// Run the diagnostic checks and render the results.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_doctor(
     aggressive: bool,
     report: Option<PathBuf>,
+    config_flag: bool,
+    system_db: bool,
+    notebooks: bool,
+    rag: bool,
     fmt: &OutputFormat,
 ) -> Result<()> {
     let mut checks: Vec<Check> = Vec::new();
@@ -249,6 +254,96 @@ pub async fn handle_doctor(
     // ── OS info ───────────────────────────────────────
     checks.push(Check::info("OS", std::env::consts::OS));
     checks.push(Check::info("Architecture", std::env::consts::ARCH));
+
+    // ── Config validation ────────────────────────────
+    if config_flag {
+        let config_paths = [
+            PathBuf::from("primusdb.toml"),
+            PathBuf::from("config.toml"),
+            PathBuf::from("config/primusdb.toml"),
+        ];
+        let mut found = false;
+        for p in &config_paths {
+            if p.exists() {
+                match std::fs::read_to_string(p) {
+                    Ok(content) => {
+                        let lines = content.lines().count();
+                        checks.push(Check::pass(
+                            format!("Config: {}", p.display()),
+                            format!("{} lines", lines),
+                        ));
+                        found = true;
+                    }
+                    Err(e) => {
+                        checks.push(Check::warn(
+                            format!("Config: {}", p.display()),
+                            format!("Unreadable: {}", e),
+                        ));
+                    }
+                }
+            }
+        }
+        if !found {
+            checks.push(Check::info(
+                "Config file",
+                "No config file found (using defaults)",
+            ));
+        }
+    }
+
+    // ── System DB ────────────────────────────────────
+    if system_db {
+        let data_dirs = [PathBuf::from("data"), PathBuf::from("/tmp/primusdb_data")];
+        let mut sys_found = false;
+        for dir in &data_dirs {
+            let sys_path = dir.join("system");
+            if sys_path.exists() {
+                checks.push(Check::pass("System DB", sys_path.display().to_string()));
+                sys_found = true;
+                break;
+            }
+        }
+        if !sys_found {
+            checks.push(Check::info(
+                "System DB",
+                "Not initialized (will create on first start)",
+            ));
+        }
+    }
+
+    // ── Notebooks ────────────────────────────────────
+    if notebooks {
+        let data_dirs = [PathBuf::from("data"), PathBuf::from("/tmp/primusdb_data")];
+        let mut nb_found = false;
+        for dir in &data_dirs {
+            let nb_path = dir.join("notebooks");
+            if nb_path.exists() {
+                checks.push(Check::pass("Notebooks", nb_path.display().to_string()));
+                nb_found = true;
+                break;
+            }
+        }
+        if !nb_found {
+            checks.push(Check::info("Notebooks", "Not initialized"));
+        }
+    }
+
+    // ── RAG ──────────────────────────────────────────
+    if rag {
+        let data_dirs = [PathBuf::from("data"), PathBuf::from("/tmp/primusdb_data")];
+        let mut rag_found = false;
+        for dir in &data_dirs {
+            let rag_path = dir.join("rag");
+            if rag_path.exists() {
+                checks.push(Check::pass("RAG workspace", rag_path.display().to_string()));
+                rag_found = true;
+                break;
+            }
+        }
+        if !rag_found {
+            checks.push(Check::info("RAG workspace", "Not initialized"));
+        }
+    }
 
     // ── Output ────────────────────────────────────────
     let rows: Vec<Vec<String>> = checks

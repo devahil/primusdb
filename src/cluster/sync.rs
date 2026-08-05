@@ -1,3 +1,40 @@
+//! Distributed data synchronization and reconciliation
+//!
+//! Keeps replicas convergent when the same records are modified on different
+//! nodes. [`SyncCoordinator`] orders operations with quorum-based consensus
+//! (`consensus_write` / `consensus_read`), runs leader election, and exchanges
+//! records with peers (`sync_table`, Merkle roots, conflict resolution). Vector
+//! clocks ([`VectorClock`]) capture causality, while the [`consensus`] and
+//! [`reconciliation`] submodules provide the Raft-style state types and the
+//! conflict-detection / merge-plan logic.
+//!
+//! # Placement in the architecture
+//!
+//! `SyncCoordinator` is the convergence layer: it adds quorum-based durability
+//! on top of the [`crate::cluster::raft::RaftNode`] ordering and pushes
+//! divergent replicas back together using vector clocks and Merkle-tree
+//! comparison.
+//!
+//! ```text
+//!   ┌─────────────────────────── Cluster node ───────────────────────────┐
+//!   │                                                                    │
+//!   │  write ─► consensus_write ─► validator votes (quorum) ─► op log    │
+//!   │  read  ─► consensus_read  ─► version agreement check               │
+//!   │               │                                                    │
+//!   │               ▼                                                    │
+//!   │        VectorClock + SyncMetadata per record key                   │
+//!   │               │                                                    │
+//!   │               ▼                                                    │
+//!   │   sync_table / request_merkle_root / reconcile_node  (RPC peers)   │
+//!   │               │                                                    │
+//!   │               ▼                                                    │
+//!   │   ConflictResolve ──► peers converge on the same value             │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   consensus.rs  -> Raft-style state types (ConsensusState, LogEntry, ...)
+//!   reconciliation.rs -> conflict detection + merge plans
+//! ```
+
 use crate::cluster::rpc::{
     ConflictResolveMessage, MerkleRequest, MerkleResponse, ReplicaWriteRequest, RpcClient,
     RpcMessage, SyncRequest, SyncResponse,
@@ -25,16 +62,26 @@ pub mod reconciliation;
 pub use consensus::*;
 pub use reconciliation::*;
 
+/// Tuning parameters for sync and quorum operations.
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
+    /// Number of replicas each record should have
     pub replication_factor: usize,
+    /// How often background sync runs (ms)
     pub sync_interval_ms: u64,
+    /// Conflict resolution strategy
     pub conflict_resolution: ConflictResolution,
+    /// Whether referential integrity checks are enabled
     pub enable_referential_integrity: bool,
+    /// Minimum nodes consulted for a consistent read
     pub read_quorum: usize,
+    /// Minimum confirmations required for a write
     pub write_quorum: usize,
+    /// Heartbeat interval for sync peers (ms)
     pub heartbeat_interval_ms: u64,
+    /// Maximum tolerated clock drift (ms)
     pub max_clock_drift_ms: u64,
+    /// Whether Merkle-tree based sync is enabled
     pub merkle_sync: bool,
 }
 
@@ -54,21 +101,30 @@ impl Default for SyncConfig {
     }
 }
 
+/// Strategy for resolving conflicting record versions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ConflictResolution {
+    /// Keep the version with the latest timestamp
     LastWriteWins,
+    /// Compare vector clocks to detect concurrent writes
     VectorClock,
+    /// Merge conflicting versions (CRDT-style)
     CRDT,
+    /// Delegate resolution to a custom callback
     Custom,
 }
 
+/// A vector clock tracking per-node causality of a record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorClock {
+    /// Per-node counters
     pub clocks: HashMap<String, u64>,
+    /// Timestamp (ms) of the last update
     pub timestamp: u64,
 }
 
 impl VectorClock {
+    /// Create a clock initialized with one tick for `node_id`.
     pub fn new(node_id: &str) -> Self {
         let mut clocks = HashMap::new();
         clocks.insert(node_id.to_string(), 1);
@@ -78,12 +134,14 @@ impl VectorClock {
         }
     }
 
+    /// Advance this node's counter and refresh the timestamp.
     pub fn increment(&mut self, node_id: &str) {
         let counter = self.clocks.entry(node_id.to_string()).or_insert(0);
         *counter += 1;
         self.timestamp = now_ms();
     }
 
+    /// Merge another clock into this one (per-node maximums).
     pub fn merge(&mut self, other: &VectorClock) {
         for (node, clock) in &other.clocks {
             let entry = self.clocks.entry(node.clone()).or_insert(0);
@@ -92,6 +150,7 @@ impl VectorClock {
         self.timestamp = self.timestamp.max(other.timestamp);
     }
 
+    /// Whether this clock happens-before `other` (i.e. it is causally older).
     pub fn happens_before(&self, other: &VectorClock) -> bool {
         let mut at_least_one_less = false;
         for (node, clock) in &self.clocks {
@@ -111,92 +170,151 @@ impl VectorClock {
         at_least_one_less
     }
 
+    /// Whether this clock and `other` describe concurrent (conflicting) writes.
     pub fn is_concurrent(&self, other: &VectorClock) -> bool {
         !self.happens_before(other) && !other.happens_before(self)
     }
 }
 
+/// Kind of distributed operation in the operation log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperationType {
+    /// Insert a record
     Insert,
+    /// Update a record
     Update,
+    /// Delete a record
     Delete,
+    /// Change a table schema
     SchemaChange,
+    /// Create an index
     IndexCreate,
+    /// Drop an index
     IndexDrop,
 }
 
+/// A single operation ordered through sync consensus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedOperation {
+    /// Unique operation ID
     pub id: String,
+    /// Type of operation
     pub op_type: OperationType,
+    /// Storage engine type the operation targets
     pub storage_type: String,
+    /// Target table/collection
     pub table: String,
+    /// Record key
     pub key: String,
+    /// Optional record data
     pub data: Option<serde_json::Value>,
+    /// Vector clock at operation time
     pub vector_clock: VectorClock,
+    /// Creation timestamp (ms)
     pub timestamp: u64,
+    /// Node that originated the operation
     pub origin_node: String,
+    /// Content hash of the operation
     pub hash: String,
+    /// Consensus term at operation time
     pub term: u64,
+    /// Operation log index
     pub index: u64,
+    /// Whether the operation has been committed
     pub committed: bool,
 }
 
+/// Sync metadata tracked per record key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncMetadata {
+    /// Record key
     pub key: String,
+    /// Vector clock of the record
     pub vector_clock: VectorClock,
+    /// Version number
     pub version: u64,
+    /// Timestamp (ms) of the last sync
     pub last_sync: u64,
+    /// Nodes holding replicas of the record
     pub replicas: Vec<String>,
+    /// Whether the record is out of sync
     pub dirty: bool,
+    /// Content checksum
     pub checksum: String,
 }
 
+/// A validator's vote during quorum consensus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuorumVote {
+    /// Voting node
     pub node_id: String,
+    /// Whether the vote approved the operation
     pub vote: bool,
+    /// Term of the vote
     pub term: u64,
+    /// Hash of the vote
     pub hash: String,
 }
 
+/// Result of a quorum-based write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusWriteResult {
+    /// Whether the write reached quorum
     pub confirmed: bool,
+    /// Quorum size required
     pub quorum_size: usize,
+    /// Votes collected
     pub votes: Vec<QuorumVote>,
+    /// ID of the operation
     pub operation_id: String,
 }
 
+/// Result of a quorum-based read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusReadResult {
+    /// Record data, if a consistent value was found
     pub data: Option<serde_json::Value>,
+    /// Whether the read versions agreed (consistent)
     pub is_consistent: bool,
+    /// Vector clocks of the versions observed
     pub versions: Vec<VectorClock>,
+    /// Nodes that supplied versions
     pub source_nodes: Vec<String>,
 }
 
+/// Health of a sync peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncStatus {
+    /// Peer node ID
     pub node_id: String,
+    /// Whether the peer is connected
     pub connected: bool,
+    /// Timestamp (ms) of the last sync
     pub last_sync: u64,
+    /// Operations awaiting sync
     pub pending_operations: u64,
+    /// Replication lag in milliseconds
     pub lag_ms: u64,
+    /// Health score (0.0-1.0)
     pub health_score: f32,
 }
 
+/// Result of a referential integrity check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferentialIntegrityResult {
+    /// Whether all checked records are valid
     pub is_valid: bool,
+    /// Keys with insufficient replica coverage
     pub orphaned_references: Vec<String>,
+    /// Broken foreign keys found
     pub broken_foreign_keys: Vec<String>,
+    /// Records checked
     pub checked_count: u64,
+    /// Records with errors
     pub error_count: u64,
 }
 
+/// Coordinates quorum consensus, sync and reconciliation across nodes.
 pub struct SyncCoordinator {
     config: SyncConfig,
     node_id: String,
@@ -205,13 +323,12 @@ pub struct SyncCoordinator {
     operation_log: RwLock<Vec<DistributedOperation>>,
     sync_metadata: RwLock<HashMap<String, SyncMetadata>>,
     node_status: RwLock<HashMap<String, SyncStatus>>,
-    #[allow(dead_code)]
-    pending_writes: RwLock<HashMap<String, Vec<QuorumVote>>>,
     clients: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
     db: Option<sled::Db>,
 }
 
 impl SyncCoordinator {
+    /// Create a coordinator, restoring any persisted term from `db`.
     pub fn new(
         config: SyncConfig,
         node_id: String,
@@ -226,7 +343,6 @@ impl SyncCoordinator {
             operation_log: RwLock::new(Vec::new()),
             sync_metadata: RwLock::new(HashMap::new()),
             node_status: RwLock::new(HashMap::new()),
-            pending_writes: RwLock::new(HashMap::new()),
             clients,
             db,
         };
@@ -259,6 +375,8 @@ impl SyncCoordinator {
         Ok(())
     }
 
+    /// Run quorum consensus for a write and record it in the operation log if
+    /// confirmed.
     pub async fn consensus_write(
         &self,
         storage_type: &str,
@@ -308,6 +426,7 @@ impl SyncCoordinator {
         })
     }
 
+    /// Perform a quorum-based read of a record, verifying version agreement.
     pub async fn consensus_read(
         &self,
         table: &str,
@@ -360,6 +479,9 @@ impl SyncCoordinator {
         })
     }
 
+    /// Reconcile this node with `target_node`: resolve any detected conflicts
+    /// and merge outstanding record metadata, returning a summary of the work
+    /// performed.
     pub async fn reconcile_node(&self, target_node: &str) -> Result<ReconciliationResult> {
         let status = self.node_status.read().unwrap().get(target_node).cloned();
         let mut conflicts_resolved = 0u64;
@@ -380,6 +502,9 @@ impl SyncCoordinator {
         })
     }
 
+    /// Verify that every record in `table` has enough replica coverage,
+    /// returning orphaned references when the replication factor is not met.
+    /// Short-circuits to `is_valid = true` when integrity checks are disabled.
     pub async fn check_referential_integrity(
         &self,
         table: &str,
@@ -417,6 +542,8 @@ impl SyncCoordinator {
         })
     }
 
+    /// Run a Raft-style leader election among `candidates`: bump the term,
+    /// request votes over RPC, and promote this node when a majority responds.
     pub async fn elect_leader(&self, candidates: Vec<String>) -> Result<String> {
         let term = {
             let mut guard = self.term.write().unwrap();
@@ -460,6 +587,8 @@ impl SyncCoordinator {
         }
     }
 
+    /// Record a local modification for `key`: bump the vector clock, increment
+    /// the version, and mark the entry dirty with a fresh content checksum.
     pub fn update_metadata(&self, key: &str, data: &serde_json::Value) -> Result<()> {
         let mut metadata = self.sync_metadata.write().unwrap();
         let meta = metadata
@@ -482,6 +611,9 @@ impl SyncCoordinator {
         Ok(())
     }
 
+    /// Collect quorum votes for `operation` by asking each validator to ack a
+    /// replica write. Voting stops early once `quorum` confirmations are seen;
+    /// every validator consulted receives a signed [`QuorumVote`] entry.
     async fn request_votes(
         &self,
         operation: &DistributedOperation,
@@ -538,6 +670,8 @@ impl SyncCoordinator {
         votes
     }
 
+    /// Pull a page of records changed on `peer_node` for `table` since the
+    /// start of time, returning the peer's first `SyncResponse` batch.
     pub async fn sync_table(
         &self,
         table: &str,
@@ -569,6 +703,9 @@ impl SyncCoordinator {
         }
     }
 
+    /// Ask `peer_node` for the Merkle root of `table`, which is compared
+    /// against the local root to find divergent key ranges without transferring
+    /// whole tables.
     pub async fn request_merkle_root(
         &self,
         table: &str,
@@ -599,6 +736,8 @@ impl SyncCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Send a `ConflictResolve` instruction to `peer_node` so it applies the
+    /// same resolved value for `key` that this node chose.
     pub async fn resolve_conflict(
         &self,
         key: &str,
@@ -627,6 +766,9 @@ impl SyncCoordinator {
         Ok(())
     }
 
+    /// Detect vector-clock-concurrent metadata entries and resolve each one
+    /// last-writer-wins, notifying `target_node` of the resolution. Returns the
+    /// number of conflicts resolved.
     async fn resolve_conflicts(&self, target_node: &str) -> Result<u64> {
         let metadata_pairs = {
             let meta = self.sync_metadata.read().unwrap();
@@ -680,6 +822,8 @@ impl SyncCoordinator {
         Ok(resolved_count)
     }
 
+    /// Push metadata entries this node holds to `target_node` via replica
+    /// writes so both nodes converge. Returns the number of entries merged.
     async fn merge_records(&self, target_node: &str) -> Result<u64> {
         let metadata = {
             let meta = self.sync_metadata.read().unwrap();
@@ -725,6 +869,8 @@ impl SyncCoordinator {
         Ok(merged_count)
     }
 
+    /// Whether every vector clock in `versions` is causally compatible (no two
+    /// describe concurrent writes), i.e. the observed replicas agree.
     fn verify_version_agreement(&self, versions: &[VectorClock]) -> bool {
         if versions.is_empty() {
             return true;
@@ -866,6 +1012,8 @@ impl SyncCoordinator {
         }
     }
 
+    /// Seed the sync-metadata table from a relational table's version entries,
+    /// merging each row's vector clock with the local node's counter.
     pub fn register_table_sync_metadata(&self, table_name: &str, rows: &[RecordVersionEntry]) {
         let mut metadata = self.sync_metadata.write().unwrap();
         for (id, vc, version, checksum) in rows {
@@ -919,11 +1067,16 @@ impl SyncCoordinator {
     }
 }
 
+/// Summary of a single reconciliation pass against one peer node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconciliationResult {
+    /// Node that was reconciled against
     pub node_id: String,
+    /// Number of concurrent conflicts resolved during the pass
     pub conflicts_resolved: u64,
+    /// Number of records merged into the peer
     pub records_merged: u64,
+    /// Timestamp (ms) of the reconciliation pass
     pub timestamp: u64,
 }
 

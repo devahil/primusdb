@@ -1,3 +1,38 @@
+//! Cross-domain request gateway
+//!
+//! Routes client requests to the healthiest node in the cluster (or across a
+//! federated data domain). [`ClusterGateway`] tracks per-node health, EWMA
+//! latency and circuit-breaker state, then picks a node with the configured
+//! [`NodeSelectorStrategy`] (round-robin, least-loaded, lowest-latency,
+//! shard-aware, random or domain-aware). Requests are dispatched over HTTP and
+//! each success/failure updates the routing metrics.
+//!
+//! # Placement in the architecture
+//!
+//! `ClusterGateway` is the entry point of the data plane: it maps client
+//! requests onto the cluster nodes discovered by the
+//! [`crate::cluster::membership::MembershipManager`]. Domain-aware routing
+//! consults the [`crate::cluster::domain::DataDomainManager`] so federated
+//! writes land on a member cluster.
+//!
+//! ```text
+//!        client request
+//!             │
+//!             ▼
+//!   ┌─────────────────────┐
+//!   │    ClusterGateway   │  strategy: round-robin / least-loaded /
+//!   └─────────────────────┘  lowest-latency / shard-aware / domain-aware
+//!             │
+//!             ▼  select_best_node among healthy, non-circuit-open nodes
+//!   ┌──────────┼────────────┬──────────────┬─────────────┐
+//!   ▼          ▼            ▼              ▼             ▼
+//! node A    node B       node C        node D        node N
+//!   (health, EWMA latency, active_connections, shards, circuit state)
+//!             │
+//!             ▼
+//!   record_success / record_failure ──► metrics + circuit breaker
+//! ```
+
 use crate::cluster::domain::DataDomainManager;
 use crate::Result;
 use serde::{Deserialize, Serialize};
@@ -7,52 +42,88 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+/// Strategy used to pick a node for an incoming request.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum NodeSelectorStrategy {
+    /// Distribute requests evenly across nodes
     RoundRobin,
+    /// Pick the node with the fewest active connections (default)
     #[default]
     LeastLoaded,
+    /// Pick the node with the lowest EWMA latency
     LowestLatency,
+    /// Prefer nodes hosting the target shard
     ShardAware,
+    /// Pick a random healthy node
     Random,
+    /// Route within the data domain the request belongs to
     DomainAware,
 }
 
+/// Health classification of a gateway node.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum NodeHealth {
+    /// Fully healthy
     Healthy,
+    /// Experiencing intermittent failures
     Degraded,
+    /// Unreachable or circuit-open
     Unhealthy,
+    /// No health data yet
     Unknown,
 }
 
+/// Runtime view of a node tracked by the gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayNode {
+    /// Unique node identifier
     pub node_id: String,
+    /// Hostname/IP of the node
     pub host: String,
+    /// HTTP port of the node
     pub port: u16,
+    /// Current health classification
     pub health: NodeHealth,
+    /// Number of active client connections
     pub active_connections: u32,
+    /// Exponentially weighted moving average latency (ms)
     pub ewma_latency_ms: f64,
+    /// Latest reported CPU usage (0.0-1.0)
     pub cpu_usage: f64,
+    /// Latest reported memory usage (0.0-1.0)
     pub memory_usage: f64,
+    /// Timestamp (ms) of the last successful contact
     pub last_seen: u64,
+    /// Consecutive failures, used by the circuit breaker
     pub consecutive_failures: u32,
+    /// Whether the circuit breaker is currently open
     pub circuit_open: bool,
+    /// Timestamp (ms) when an open circuit may retry
     pub circuit_open_until: u64,
+    /// Shards hosted by this node
     pub shards: Vec<String>,
 }
 
+/// Tuning parameters for the gateway.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
+    /// Node selection strategy
     pub strategy: NodeSelectorStrategy,
+    /// How often background health checks run (ms)
     pub health_check_interval_ms: u64,
+    /// Per-node health check timeout (ms)
     pub health_check_timeout_ms: u64,
+    /// Consecutive failures before the circuit breaker opens
     pub circuit_breaker_threshold: u32,
+    /// How long an open circuit stays open (ms)
     pub circuit_breaker_reset_ms: u64,
+    /// Smoothing factor for the EWMA latency (0.0-1.0)
     pub ewma_alpha: f64,
+    /// Maximum pooled connections per node
     pub max_connections_per_node: u32,
+    /// Outbound request timeout (ms)
     pub connection_timeout_ms: u64,
+    /// DNS cache TTL (ms)
     pub dns_cache_ttl_ms: u64,
 }
 
@@ -72,42 +143,70 @@ impl Default for GatewayConfig {
     }
 }
 
+/// Result of a routing decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteDecision {
+    /// Chosen node ID
     pub node_id: String,
+    /// Chosen node host
     pub host: String,
+    /// Chosen node port
     pub port: u16,
+    /// Strategy that produced the decision
     pub strategy_used: NodeSelectorStrategy,
+    /// Estimated latency of the chosen node (ms)
     pub estimated_latency_ms: f64,
+    /// Health of the chosen node
     pub node_health: NodeHealth,
 }
 
+/// Aggregate gateway statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayMetrics {
+    /// Requests seen in total
     pub total_requests: u64,
+    /// Requests successfully routed
     pub routed_requests: u64,
+    /// Requests that failed after routing
     pub failed_requests: u64,
+    /// Times the circuit breaker tripped
     pub circuit_breaks_triggered: u64,
+    /// Observed average latency (ms)
     pub avg_latency_ms: f64,
+    /// Observed p99 latency (ms)
     pub p99_latency_ms: f64,
+    /// Number of tracked nodes
     pub active_nodes: usize,
+    /// Number of healthy nodes
     pub healthy_nodes: usize,
+    /// Active node selection strategy
     pub strategy: NodeSelectorStrategy,
 }
 
+/// Routes requests to the best node in the cluster or data domain.
 pub struct ClusterGateway {
+    /// ID of the local node
     pub node_id: String,
+    /// Gateway tuning parameters
     pub config: GatewayConfig,
+    /// Tracked nodes
     pub nodes: RwLock<Vec<GatewayNode>>,
+    /// Round-robin cursor
     pub round_robin_index: RwLock<usize>,
+    /// Aggregate metrics
     pub metrics: RwLock<GatewayMetrics>,
+    /// Recent per-request latencies for percentile calculation
     pub latencies: RwLock<Vec<u64>>,
+    /// Shared HTTP client for node health checks and request forwarding
     pub http_client: reqwest::Client,
+    /// Optional data-domain manager for domain-aware routing
     pub domain_manager: Option<Arc<DataDomainManager>>,
+    /// Per-cluster HTTP clients for cross-cluster forwarding
     pub cross_cluster_clients: RwLock<HashMap<String, reqwest::Client>>,
 }
 
 impl ClusterGateway {
+    /// Create a gateway for the local node with the given configuration.
     pub fn new(node_id: String, config: GatewayConfig) -> Self {
         let strategy = config.strategy;
         let connection_timeout = config.connection_timeout_ms;
@@ -139,11 +238,13 @@ impl ClusterGateway {
         }
     }
 
+    /// Attach a data-domain manager for domain-aware routing.
     pub fn with_domain_manager(mut self, dm: Arc<DataDomainManager>) -> Self {
         self.domain_manager = Some(dm);
         self
     }
 
+    /// Register or refresh a node the gateway may route to.
     pub async fn register_node(&self, node_id: &str, host: &str, port: u16, shards: Vec<String>) {
         let mut nodes = self.nodes.write().await;
         if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
@@ -171,11 +272,14 @@ impl ClusterGateway {
         }
     }
 
+    /// Stop routing to a node.
     pub async fn remove_node(&self, node_id: &str) {
         let mut nodes = self.nodes.write().await;
         nodes.retain(|n| n.node_id != node_id);
     }
 
+    /// Record a successful request to a node: reset failures, update EWMA
+    /// latency and refresh aggregate metrics.
     pub async fn record_success(&self, node_id: &str, latency_ms: f64) {
         let mut nodes = self.nodes.write().await;
         if let Some(node) = nodes.iter_mut().find(|n| n.node_id == node_id) {
@@ -205,6 +309,8 @@ impl ClusterGateway {
         }
     }
 
+    /// Record a failed request to a node, opening the circuit breaker once the
+    /// configured failure threshold is reached.
     pub async fn record_failure(&self, node_id: &str) {
         let mut nodes = self.nodes.write().await;
         if let Some(node) = nodes.iter_mut().find(|n| n.node_id == node_id) {
@@ -231,6 +337,8 @@ impl ClusterGateway {
 
     // === Federation-aware routing ===
 
+    /// Pick a node for a data-domain operation, preferring local or remote
+    /// clusters that are members of the domain.
     pub async fn get_domain_route(
         &self,
         domain_name: &str,
@@ -304,6 +412,8 @@ impl ClusterGateway {
         self.get_route(Some(collection), None).await
     }
 
+    /// Choose a node for a request using the configured strategy, honoring
+    /// preferred nodes and shard affinity.
     pub async fn get_route(
         &self,
         shard_key: Option<&str>,
@@ -394,6 +504,7 @@ impl ClusterGateway {
         Ok(node)
     }
 
+    /// Run the periodic health-check loop over all tracked nodes.
     pub async fn run_health_checks(&self) {
         loop {
             tokio::time::sleep(Duration::from_millis(self.config.health_check_interval_ms)).await;
@@ -437,14 +548,17 @@ impl ClusterGateway {
         }
     }
 
+    /// Snapshot of the current aggregate metrics.
     pub async fn get_metrics(&self) -> GatewayMetrics {
         self.metrics.read().await.clone()
     }
 
+    /// Snapshot of all tracked nodes.
     pub async fn get_nodes(&self) -> Vec<GatewayNode> {
         self.nodes.read().await.clone()
     }
 
+    /// Snapshot of nodes that are healthy and not circuit-open.
     pub async fn get_healthy_nodes(&self) -> Vec<GatewayNode> {
         self.nodes
             .read()
@@ -455,6 +569,8 @@ impl ClusterGateway {
             .collect()
     }
 
+    /// Route and forward an HTTP request to a node, updating success/failure
+    /// metrics along the way.
     pub async fn send_request(
         &self,
         method: reqwest::Method,
@@ -516,6 +632,11 @@ impl ClusterGateway {
     }
 }
 
+/// Pick the best candidate node for the configured strategy: round-robin
+/// advances a shared cursor, least-loaded minimizes `active_connections`,
+/// lowest-latency minimizes the EWMA, and shard/random/domain-aware fall back
+/// to a pseudo-random pick. Returns a sentinel decision when `candidates` is
+/// empty.
 async fn select_best_node(
     candidates: &[&GatewayNode],
     config: &GatewayConfig,
@@ -568,6 +689,7 @@ async fn select_best_node(
     }
 }
 
+/// Current wall-clock time in milliseconds.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -575,6 +697,8 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Cheap pseudo-random `usize` derived from the current instant, used to pick
+/// a random node when the strategy has no deterministic ordering.
 fn fast_random_usize() -> usize {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

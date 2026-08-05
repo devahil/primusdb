@@ -5,20 +5,76 @@
  * Version: 2.0.0 - Full stage execution, real engine calls, filter/project/limit/offset
  */
 
+//! # PrimusDB Query Executor
+//!
+//! The third and final stage of the query pipeline. [`QueryExecutor`] runs a
+//! [`QueryPlan`] against the registered storage engines and produces a
+//! [`UqlResult`].
+//!
+//! SELECT plans are executed stage-by-stage in dependency order: each stage
+//! gathers the outputs of its dependencies and applies its operation. Scan and
+//! the DML / DDL operations call the storage engine (async, bridged via
+//! `block_on_sync`); Filter, Project, Sort, Aggregate, Join, Limit and Offset
+//! are evaluated in-memory. WHERE conditions are translated from SQL strings to
+//! JSON filter objects by `sql_str_to_json_condition` so they can be pushed
+//! down into engine `select` calls.
+//!
+//! ## Execution Flow
+//!
+//! ```text
+//! QueryPlan
+//!    |
+//!    v
+//! QueryExecutor::execute
+//!    |  (dispatch on QueryOperation)
+//!    v
+//! Select? -> stage loop in dependency order
+//! DML  ? -> Insert/Update/Delete stage -> engine call
+//! DDL  ? -> Create/Drop/Alter/Truncate -> engine call
+//!    |
+//!    v
+//! execute_stage (operators)
+//!    |  Scan      -> engine.select(filter, limit, offset)
+//!    |  Filter    -> in-memory WHERE evaluation
+//!    |  Project   -> column projection
+//!    |  Sort      -> ORDER BY sort
+//!    |  Aggregate -> GROUP BY / aggregations
+//!    |  Join      -> join across engine scans
+//!    |  Limit/Offset -> row slicing
+//!    |
+//!    v
+//! sql_str_to_json_condition (WHERE -> JSON filter)
+//!    |
+//!    v
+//! UqlResult { records, total, affected_rows, ... }
+//! ```
+//!
+//! ## Main Types
+//!
+//! - [`QueryExecutor`] — executor entry point: [`QueryExecutor::execute`].
+//! - [`ExecutionStage`] / [`StageOperation`] — the operators it dispatches on.
+
 use crate::query::parser::{
     AggregationClause, AggregationType, JoinType, OrderByClause, QueryOperation,
 };
-use crate::query::planner::{CrossEngineJoin, ExecutionStage, QueryPlan, StageOperation};
+use crate::query::planner::{ExecutionStage, QueryPlan, StageOperation};
 use crate::query::UqlResult;
 use crate::{PrimusDBConfig, Record, Result, StorageType};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+/// Bridge a future to the current async runtime, blocking the calling thread
 fn block_on_sync<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
+/// Translate an SQL condition string (e.g. `age > 25 AND status = 'x'`) into a
+/// JSON filter object understood by the storage engines
+///
+/// Supports `=`, `!=`, `>`, `>=`, `<`, `<=`, `IS [NOT] NULL`, `IN (...)`,
+/// `BETWEEN ... AND ...`, `LIKE`, and AND / OR composition. Returns `None` when
+/// the string cannot be parsed.
 fn sql_str_to_json_condition(sql: &str) -> Option<serde_json::Value> {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(sql) {
         return Some(v);
@@ -216,33 +272,33 @@ fn sql_str_to_json_condition(sql: &str) -> Option<serde_json::Value> {
     None
 }
 
+/// Executes [`QueryPlan`]s against registered storage engines
 pub struct QueryExecutor {
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
     storage_engines:
         Arc<RwLock<HashMap<StorageType, Arc<dyn crate::storage::StorageEngine + Send + Sync>>>>,
 }
 
 impl QueryExecutor {
-    pub fn new(config: &PrimusDBConfig) -> Self {
+    /// Create an executor with no storage engines registered
+    pub fn new(_config: &PrimusDBConfig) -> Self {
         QueryExecutor {
-            config: config.clone(),
             storage_engines: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Create an executor sharing an existing set of storage engines
     pub fn with_storage_engines(
-        config: &PrimusDBConfig,
+        _config: &PrimusDBConfig,
         engines: Arc<
             RwLock<HashMap<StorageType, Arc<dyn crate::storage::StorageEngine + Send + Sync>>>,
         >,
     ) -> Self {
         QueryExecutor {
-            config: config.clone(),
             storage_engines: engines,
         }
     }
 
+    /// Register a storage engine instance under a [`StorageType`]
     pub fn register_engine(
         &self,
         storage_type: StorageType,
@@ -253,6 +309,10 @@ impl QueryExecutor {
         }
     }
 
+    /// Run a plan and return a [`UqlResult`]
+    ///
+    /// Dispatches on [`QueryPlan::operation`], times execution, and computes
+    /// the `affected_rows` counter for DML operations.
     pub fn execute(&self, plan: &QueryPlan) -> Result<UqlResult> {
         let start = Instant::now();
 
@@ -292,6 +352,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Map a storage engine name to its [`StorageType`]
     fn engine_to_storage_type(engine: &str) -> Result<StorageType> {
         match engine.to_lowercase().as_str() {
             "columnar" => Ok(StorageType::Columnar),
@@ -306,6 +367,8 @@ impl QueryExecutor {
         }
     }
 
+    /// Execute the stages of a SELECT plan in dependency order, returning the
+    /// output of the last stage
     fn execute_select(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
         // Execute stages respecting dependencies (simple topological order)
         let stage_count = plan.stages.len();
@@ -333,6 +396,7 @@ impl QueryExecutor {
         Ok(stage_results.into_iter().last().unwrap_or_default())
     }
 
+    /// Run one stage against `input` (the concatenated dependency outputs)
     fn execute_stage(
         &self,
         stage: &ExecutionStage,
@@ -385,6 +449,8 @@ impl QueryExecutor {
         }
     }
 
+    /// Scan `table` on `engine`, pushing conditions / limit / offset into the
+    /// engine's `select` call
     fn execute_scan(
         &self,
         table: &str,
@@ -439,6 +505,7 @@ impl QueryExecutor {
         }
     }
 
+    /// In-memory WHERE filtering of `records`
     fn execute_filter(
         &self,
         records: &[Record],
@@ -536,6 +603,7 @@ impl QueryExecutor {
         Ok(result)
     }
 
+    /// Evaluate a single comparison predicate against one record
     fn evaluate_simple_condition(&self, record: &Record, condition: &str) -> Result<bool> {
         let condition = condition.trim();
 
@@ -637,6 +705,7 @@ impl QueryExecutor {
         Ok(false)
     }
 
+    /// Type-aware equality comparison against a literal string
     fn values_equal(actual: &serde_json::Value, expected: &str) -> bool {
         match actual {
             serde_json::Value::String(s) => s == expected,
@@ -646,6 +715,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Type-aware `>` comparison against a literal string
     fn value_greater(actual: &serde_json::Value, expected: &str) -> bool {
         match actual {
             serde_json::Value::Number(n) => n
@@ -657,6 +727,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Type-aware `<` comparison against a literal string
     fn value_less(actual: &serde_json::Value, expected: &str) -> bool {
         match actual {
             serde_json::Value::Number(n) => n
@@ -668,14 +739,17 @@ impl QueryExecutor {
         }
     }
 
+    /// Type-aware `>=` comparison against a literal string
     fn value_greater_or_equal(actual: &serde_json::Value, expected: &str) -> bool {
         Self::value_greater(actual, expected) || Self::values_equal(actual, expected)
     }
 
+    /// Type-aware `<=` comparison against a literal string
     fn value_less_or_equal(actual: &serde_json::Value, expected: &str) -> bool {
         Self::value_less(actual, expected) || Self::values_equal(actual, expected)
     }
 
+    /// Column projection of `records`
     fn execute_project(&self, records: &[Record], columns: &[String]) -> Result<Vec<Record>> {
         if columns.is_empty() || (columns.len() == 1 && columns[0] == "*") {
             return Ok(records.to_vec());
@@ -708,6 +782,8 @@ impl QueryExecutor {
         Ok(projected)
     }
 
+    /// Join the left input records with a scan of the right table, honoring
+    /// LEFT / RIGHT / FULL join semantics
     fn execute_join(
         &self,
         left_records: &[Record],
@@ -735,7 +811,7 @@ impl QueryExecutor {
                 timeout_ms: 5000,
             };
             let handle = tokio::runtime::Handle::current();
-            for (_st, engine) in engines.iter() {
+            for engine in engines.values() {
                 if let Ok(mut recs) = handle.block_on(engine.select(right_table, None, 0, 0, &txn))
                 {
                     records.append(&mut recs);
@@ -829,6 +905,7 @@ impl QueryExecutor {
         Ok(results)
     }
 
+    /// Extract `(left_col, right_col)` from an ON condition string
     fn parse_join_condition(
         &self,
         condition: &str,
@@ -857,89 +934,7 @@ impl QueryExecutor {
         }
     }
 
-    #[allow(dead_code)]
-    fn execute_cross_engine_joins(
-        &self,
-        records: &[Record],
-        cross_joins: &[CrossEngineJoin],
-    ) -> Result<Vec<Record>> {
-        let mut results = records.to_vec();
-        for join in cross_joins {
-            // Fetch right-side data from the appropriate engine
-            if let Ok(storage_type) = Self::engine_to_storage_type(&join.right_engine) {
-                if let Ok(engines) = self.storage_engines.read() {
-                    if let Some(engine) = engines.get(&storage_type) {
-                        let transaction = crate::transaction::Transaction {
-                            id: format!("cross_join_{}", join.join_id),
-                            operations: vec![],
-                            status: crate::transaction::TransactionStatus::Prepared,
-                            created_at: chrono::Utc::now(),
-                            updated_at: chrono::Utc::now(),
-                            isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
-                            timeout_ms: 0,
-                        };
-                        if let Ok(right_records) = block_on_sync(async {
-                            engine
-                                .select(&join.right_table, None, 1000, 0, &transaction)
-                                .await
-                        }) {
-                            // Build lookup from right table
-                            let right_col = join
-                                .condition
-                                .split('=')
-                                .nth(1)
-                                .unwrap_or("")
-                                .trim()
-                                .split('.')
-                                .nth(1)
-                                .unwrap_or("id");
-                            let right_map: HashMap<String, &Record> = right_records
-                                .iter()
-                                .filter_map(|r| {
-                                    r.data
-                                        .get(right_col)
-                                        .and_then(|v| v.as_str())
-                                        .map(|k| (k.to_string(), r))
-                                })
-                                .collect();
-
-                            for record in &mut results {
-                                if let serde_json::Value::Object(ref mut obj) = record.data {
-                                    let left_col = join
-                                        .condition
-                                        .split('=')
-                                        .nth(0)
-                                        .unwrap_or("")
-                                        .trim()
-                                        .split('.')
-                                        .nth(1)
-                                        .unwrap_or("id");
-                                    if let Some(join_key) =
-                                        obj.get(left_col).and_then(|v| v.as_str())
-                                    {
-                                        if let Some(right_rec) = right_map.get(join_key) {
-                                            if let serde_json::Value::Object(right_obj) =
-                                                &right_rec.data
-                                            {
-                                                for (k, v) in right_obj {
-                                                    obj.insert(
-                                                        format!("{}_{}", join.right_table, k),
-                                                        v.clone(),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(results)
-    }
-
+    /// GROUP BY / aggregation over `records`
     fn execute_aggregate(
         &self,
         records: &[Record],
@@ -991,7 +986,7 @@ impl QueryExecutor {
             .map(|(group_key, group_records)| {
                 let mut data = serde_json::Map::new();
                 // Add group by columns
-                for col in group_by.iter() {
+                for col in group_by {
                     if let Some(first) = group_records.first() {
                         if let Some(val) = first.data.get(col) {
                             data.insert(col.clone(), val.clone());
@@ -1024,6 +1019,7 @@ impl QueryExecutor {
         Ok(results)
     }
 
+    /// Compute a single aggregate value over `records`
     fn compute_aggregation(
         &self,
         records: &[Record],
@@ -1084,6 +1080,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Sort `records` by the ORDER BY clauses
     fn execute_sort(&self, records: &[Record], order_by: &[OrderByClause]) -> Result<Vec<Record>> {
         if order_by.is_empty() {
             return Ok(records.to_vec());
@@ -1123,6 +1120,8 @@ impl QueryExecutor {
         Ok(sorted)
     }
 
+    /// Insert rows into `table` on `engine` (values come from `conditions`,
+    /// columns from `columns`)
     fn execute_insert_op(
         &self,
         table: &str,
@@ -1193,6 +1192,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Update matching rows in `table` on `engine` with the SET clauses
     fn execute_update_op(
         &self,
         table: &str,
@@ -1264,6 +1264,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Delete matching rows from `table` on `engine`
     fn execute_delete_op(
         &self,
         table: &str,
@@ -1315,6 +1316,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Create `table` on `engine` with an empty schema
     fn execute_create_table(&self, table: &str, engine: &str) -> Result<Vec<Record>> {
         let storage_type = Self::engine_to_storage_type(engine)?;
         let engines = self.storage_engines.read().map_err(|_| {
@@ -1348,6 +1350,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Drop `table` on `engine`
     fn execute_drop_table(&self, table: &str, engine: &str) -> Result<Vec<Record>> {
         let storage_type = Self::engine_to_storage_type(engine)?;
         let engines = self.storage_engines.read().map_err(|_| {
@@ -1375,6 +1378,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Alter `table` on `engine` (RENAME, ADD / DROP COLUMN, constraints)
     fn execute_alter_table(
         &self,
         table: &str,
@@ -1442,6 +1446,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Truncate `table` on `engine`
     fn execute_truncate(&self, table: &str, engine: &str) -> Result<Vec<Record>> {
         let storage_type = match engine {
             "columnar" => StorageType::Columnar,
@@ -1481,6 +1486,7 @@ impl QueryExecutor {
         }
     }
 
+    /// Locate and run the Insert stage of an INSERT plan
     fn execute_insert(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
         for stage in &plan.stages {
             if let StageOperation::Insert { table, engine } = &stage.operation {
@@ -1495,6 +1501,7 @@ impl QueryExecutor {
         Ok(vec![])
     }
 
+    /// Locate and run the Update stage of an UPDATE plan
     fn execute_update(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
         for stage in &plan.stages {
             if let StageOperation::Update { table, engine } = &stage.operation {
@@ -1509,6 +1516,7 @@ impl QueryExecutor {
         Ok(vec![])
     }
 
+    /// Locate and run the Delete stage of a DELETE plan
     fn execute_delete(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
         for stage in &plan.stages {
             if let StageOperation::Delete { table, engine } = &stage.operation {
@@ -1518,6 +1526,7 @@ impl QueryExecutor {
         Ok(vec![])
     }
 
+    /// Run the first (Create / Drop / Alter / Truncate) stage of a DDL plan
     fn execute_ddl(&self, plan: &QueryPlan) -> Result<Vec<Record>> {
         if let Some(stage) = plan.stages.first() {
             return match &stage.operation {

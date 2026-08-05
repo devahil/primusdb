@@ -7,9 +7,11 @@ PrimusDB can be configured via configuration files, command-line flags, and envi
 PrimusDB looks for configuration files in the following order (first found wins):
 
 1. Path specified by `--config` / `-c` flag
-2. `./config.toml` in the current working directory
-3. `~/.config/primusdb/config.toml`
-4. `/etc/primusdb/config.toml`
+2. `./primusdb.toml` in the current working directory
+3. `./config.toml` — fallback in CWD
+4. `./config/primusdb.toml` — config subdirectory
+5. `~/.config/primusdb/config.toml` — user-level config
+6. `/etc/primusdb/config.toml` — system-level config
 
 ## Configuration Format
 
@@ -27,11 +29,11 @@ bind_address = "127.0.0.1"
 port = 8080
 max_connections = 1000
 
-[network.tls]
-enabled = false
-certificate_path = "/etc/ssl/certs/primusdb.crt"
-key_path = "/etc/ssl/private/primusdb.key"
-min_tls_version = "1.2"
+tls_enabled = false
+tls_cert_path = "/etc/ssl/certs/primusdb.crt"
+tls_key_path = "/etc/ssl/private/primusdb.key"
+tls_ca_path = "/etc/ssl/ca.crt"
+mtls_enabled = false
 
 [network.pool]
 max_connections = 1000
@@ -90,17 +92,13 @@ Network and server settings:
 | `bind_address` | string | `"127.0.0.1"` | Address to bind the server to |
 | `port` | integer | `8080` | Port to listen on |
 | `max_connections` | integer | `1000` | Maximum concurrent connections |
+| `tls_enabled` | boolean | `false` | Enable TLS encryption |
+| `tls_cert_path` | string | `""` | Path to TLS certificate file (PEM) |
+| `tls_key_path` | string | `""` | Path to TLS private key file (PEM) |
+| `tls_ca_path` | string | `""` | Path to CA certificate file for mTLS (PEM) |
+| `mtls_enabled` | boolean | `false` | Require mutual TLS (client certificates) |
 
-#### `[network.tls]`
-
-TLS configuration:
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable TLS encryption |
-| `certificate_path` | string | — | Path to TLS certificate file |
-| `key_path` | string | — | Path to TLS private key file |
-| `min_tls_version` | string | `"1.2"` | Minimum TLS version |
+Generate certificates with `primusdb certs` — see [CLI Commands](./commands.md#primusdb-certs).
 
 #### `[network.pool]`
 

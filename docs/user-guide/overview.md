@@ -24,16 +24,15 @@ cd primusdb
 # Compile in release mode
 cargo build --release
 
-# Binaries are at:
-# target/release/primusdb-server
-# target/release/primusdb-cli
+# Binary is at:
+# target/release/primusdb
 ```
 
 ### Start the Server
 
 ```bash
 # Start server
-./target/release/primusdb-server --port 8080
+./target/release/primusdb server start --bind 127.0.0.1:8080
 ```
 
 ### Verify It Works
@@ -103,25 +102,25 @@ gem install ./primusdb-0.1.0.gem
 
 This documentation suite is organized to help you at every stage:
 
-**[README.md](README.md)** - General information and key features.
+**[README.md](../README.md)** - General information and key features.
 
-**[ONBOARDING.md](ONBOARDING.md)** - Structured guide for new users.
+**[ONBOARDING.md](../getting-started/quickstart.md)** - Structured guide for new users.
 
-**[USER.md](USER.md)** - Practical guide for daily operations.
+**[USER.md](./operations.md)** - Practical guide for daily operations.
 
-**[API_REFERENCE.md](API_REFERENCE.md)** - Complete REST API documentation.
+**[API_REFERENCE.md](../reference/api.md)** - Complete REST API documentation.
 
-**[ARCHITECTURE.md](ARCHITECTURE.md)** - Deep technical documentation.
+**[ARCHITECTURE.md](../architecture/overview.md)** - Deep technical documentation.
 
-**[BUILD.md](BUILD.md)** - Compilation instructions.
+**[BUILD.md](../getting-started/build-from-source.md)** - Compilation instructions.
 
-**[ADMIN.md](ADMIN.md)** - Administration tasks.
+**[ADMIN.md](../user-guide/admin.md)** - Administration tasks.
 
-**[DEPLOYMENT.md](DEPLOYMENT.md)** - Production deployment guide.
+**[DEPLOYMENT.md](../operations/deployment.md)** - Production deployment guide.
 
-**[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common problem solutions.
+**[TROUBLESHOOTING.md](../operations/troubleshooting.md)** - Common problem solutions.
 
-**[EXPLANATION.md](EXPLANATION.md)** - Detailed feature explanations.
+**[EXPLANATION.md](../architecture/explanation.md)** - Detailed feature explanations.
 
 ## Next Steps
 

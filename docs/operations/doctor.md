@@ -56,7 +56,7 @@ Checks the installed Rust toolchain version by running `rustc --version` or insp
 Displays the running binary's version from `CARGO_PKG_VERSION`.
 
 ```
-● PrimusDB version  1.3.1-alpha
+● PrimusDB version  1.3.2-alpha
 ```
 
 ### 3. Build Profile
@@ -183,7 +183,7 @@ Reports the operating system and CPU architecture.
   Check                Result
   ────────────────────────────────────────────────────────
 ● Rust toolchain       rustc 1.75.0 (9dcdc4a5c 2023-12-17)
-● PrimusDB version     1.3.1-alpha
+● PrimusDB version     1.3.2-alpha
 ● Build profile        debug
 ● License              GPL-3.0
 ✓ Config file          primusdb.toml
@@ -200,7 +200,7 @@ Reports the operating system and CPU architecture.
 {
   "checks": [
     {"check": "Rust toolchain", "status": "INFO", "detail": "rustc 1.75.0"},
-    {"check": "PrimusDB version", "status": "INFO", "detail": "1.3.1-alpha"},
+    {"check": "PrimusDB version", "status": "INFO", "detail": "1.3.2-alpha"},
     {"check": "Config file", "status": "PASS", "detail": "primusdb.toml"},
     {"check": "Port 8080", "status": "PASS", "detail": "Available"}
   ]
@@ -228,7 +228,7 @@ Example report content:
 
 ```
 Rust toolchain: INFO — rustc 1.75.0 (9dcdc4a5c 2023-12-17)
-PrimusDB version: INFO — 1.3.1-alpha
+PrimusDB version: INFO — 1.3.2-alpha
 Build profile: INFO — debug
 License: INFO — GPL-3.0
 Config file: PASS — primusdb.toml
@@ -291,7 +291,7 @@ mkdir -p ./data
   Check                Result
   ────────────────────────────────────────────────────────
 ● Rust toolchain       rustc 1.75.0 (9dcdc4a5c 2023-12-17)
-● PrimusDB version     1.3.1-alpha
+● PrimusDB version     1.3.2-alpha
 ● Build profile        debug
 ● License              GPL-3.0
 ~ Config file          Not found in default locations
@@ -310,7 +310,7 @@ mkdir -p ./data
   Check                Result
   ────────────────────────────────────────────────────────
 ● Rust toolchain       rustc 1.75.0 (9dcdc4a5c 2023-12-17)
-● PrimusDB version     1.3.1-alpha
+● PrimusDB version     1.3.2-alpha
 ● Build profile        debug
 ● License              GPL-3.0
 ✓ Config file          primusdb.toml

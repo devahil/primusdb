@@ -1,6 +1,6 @@
 # Storage Engines
 
-PrimusDB provides five storage engines, each optimised for a distinct data model
+PrimusDB provides six storage engines, each optimised for a distinct data model
 and workload.  All engines share a common `StorageEngine` trait (CRUD +
 analytics) but differ in internal layout, index structures, compression, and
 transaction semantics.
@@ -168,6 +168,40 @@ keys.
 
 ---
 
+## 6. Time-Series Engine
+
+**Purpose:** Append-heavy, time-ordered numeric data.  
+**Data layout:** Nanosecond-precision points grouped into metrics, chunked by
+wall-clock time and indexed by tag.
+
+### Features
+
+- **Points & metrics** — each point carries a timestamp, string tags, and
+  numeric fields; metrics hold chunking, resolution, and retention metadata.
+- **Multi-resolution rollups** — `raw` plus configurable rollup resolutions
+  with downsampling and aggregation.
+- **15 aggregation functions** — `avg`, `sum`, `min`, `max`, `count`, `p99`,
+  etc., with gap-fill policies.
+- **Tag index** (`_ts_tags`) for efficient filtering by tag key/value.
+- **Retention policies** — automatic pruning of expired chunks
+  (`_ts_chunk_*` trees), configurable per resolution in days.
+- **Chunked storage** — points grouped into daily chunks for fast range scans.
+
+### Ideal use-cases
+
+- Application telemetry and metrics.
+- IoT sensor data collection.
+- Monitoring and observability pipelines.
+
+### Limitations
+
+- Numerical fields only (no string/JSON field values).
+- No SQL-level joins with other engines.
+- Retention enforcement is triggered manually (`ts retain`) or on lifecycle
+  operations, not continuously in the background.
+
+---
+
 ## Creating a Database with a Specific Engine
 
 Use the `primusdb db create` command with the `--engine` flag:
@@ -187,6 +221,9 @@ primusdb db create appdb --engine relational
 
 # Key-Value (CouchDB-compatible)
 primusdb db create kvstore --engine keyvalue
+
+# Time-Series
+primusdb db create metrics --engine timeseries
 
 # Under a namespace
 primusdb db create analytics --engine columnar --namespace tenant1/project2
@@ -216,6 +253,7 @@ primusdb engine inspect vector --component index
 | Document    | Beta     | None         | On disk       | Full        |
 | Relational  | Beta     | ACID         | On disk       | Full        |
 | Key-Value   | Alpha    | MVCC         | On disk       | Full        |
+| Time-Series | Alpha    | None         | On disk       | Full (`primusdb ts`) |
 
 - **Alpha:** Core functionality works but may have rough edges, incomplete
   error handling, or missing optimisations.  Not recommended for production.

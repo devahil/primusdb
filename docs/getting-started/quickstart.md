@@ -46,14 +46,13 @@ cd primusdb
 
 ## 3. Compilation
 
-### Compile Server and CLI
+### Compile the Unified Binary
 
 ```bash
 cargo build --release
 
 # Verify
-./target/release/primusdb-server --version
-./target/release/primusdb-cli --version
+./target/release/primusdb --version
 ```
 
 ## 4. Your First Instance
@@ -61,7 +60,7 @@ cargo build --release
 ### Start Server
 
 ```bash
-./target/release/primusdb-server --port 8080
+./target/release/primusdb server start --bind 127.0.0.1:8080
 ```
 
 ### Verify Operation

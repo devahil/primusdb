@@ -1,14 +1,19 @@
 /*!
-# Compressed Search Engine - Pattern Matching in Compressed Data
+# Compressed Search Engine - Pattern Matching over Cached Values
 
-This module provides high-performance search capabilities within compressed data without requiring full decompression. It uses advanced algorithms to search patterns directly in LZ4 compressed streams.
+Indexes cached (LZ4-compressed) values and answers pattern searches against
+those indexes, using bloom filters for fast rejection of non-matching keys.
+
+> **Note**: indexing requires decompressing each cached value once (the
+> payload is decoded with an LZ4 frame decoder, minus its trailing CRC32
+> checksum). The resulting term index is then searched without repeated
+> decompression.
 
 ## Features
 
-- **Compressed Pattern Matching**: Search without decompression
-- **SIMD Acceleration**: Hardware-accelerated search where available
 - **Bloom Filters**: Fast rejection of non-matching data
-- **Index-Based Lookups**: Pre-computed indexes for common patterns
+- **Term Indexes**: Per-key term -> position maps for exact matching
+- **Regex Search**: `search_regex` over indexed terms
 - **Wildcard Support**: Basic wildcard pattern matching
 
 ## Usage
@@ -16,21 +21,14 @@ This module provides high-performance search capabilities within compressed data
 ```ignore
 use primusdb::cache::search::CompressedSearch;
 
-let mut search = CompressedSearch::new();
+let search = CompressedSearch::new();
 
-// Index compressed data
+// Index compressed data (decompresses once to build the term index)
 search.index_data("key1", &compressed_data)?;
 
 // Search for patterns
 let results = search.search_pattern("Alice", 100)?;
 ```
-
-## Performance
-
-- **Search Speed**: 50-200 MB/s depending on pattern complexity
-- **Memory Overhead**: ~10-20% for indexes and bloom filters
-- **False Positive Rate**: <1% with bloom filters
-- **Index Build Time**: O(n) where n is data size
 */
 
 use bloom::{BloomFilter, ASMS};
@@ -38,16 +36,22 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+/// Search engine over indexed cache data using bloom filters and term indexes.
+///
+/// Decompresses cached values to build a per-key term index and a bloom
+/// filter that rejects non-matching keys quickly during search.
 pub struct CompressedSearch {
     indexes: RwLock<HashMap<String, SearchIndex>>,
     bloom_filters: RwLock<HashMap<String, BloomFilter>>,
-    #[allow(dead_code)]
-    patterns: RwLock<HashMap<String, Regex>>,
 }
 
+/// Per-key term index used for pattern matching.
 struct SearchIndex {
+    /// Positions of every searchable term occurrence
     positions: Vec<usize>,
+    /// Mapping of term to its positions within the entry
     terms: HashMap<String, Vec<usize>>,
+    /// Bloom filter for fast rejection of non-matching keys
     bloom_filter: Option<BloomFilter>,
 }
 
@@ -63,7 +67,6 @@ impl CompressedSearch {
         Self {
             indexes: RwLock::new(HashMap::new()),
             bloom_filters: RwLock::new(HashMap::new()),
-            patterns: RwLock::new(HashMap::new()),
         }
     }
 
@@ -239,30 +242,45 @@ impl CompressedSearch {
     }
 }
 
+/// A single match produced by [`CompressedSearch`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
+    /// Key of the cached entry that matched
     pub key: String,
+    /// Offset of the match within the entry
     pub position: usize,
+    /// The text that matched the pattern
     pub matched_text: String,
+    /// Relevance score of the match (0.0 to 1.0)
     pub score: f64,
 }
 
+/// Aggregate statistics about the search index.
 #[derive(Debug, Clone)]
 pub struct SearchStatistics {
+    /// Number of keys with a search index
     pub indexed_keys: usize,
+    /// Number of bloom filters in use
     pub bloom_filters: usize,
+    /// Total number of indexed terms
     pub total_terms: usize,
+    /// Estimated memory footprint of the indexes in bytes
     pub memory_usage: usize,
 }
 
+/// Errors that can occur during search operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
+    /// Invalid regular expression
     #[error("Regex compilation error: {0}")]
     Regex(#[from] regex::Error),
+    /// An underlying I/O operation failed
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// Malformed compressed payload
     #[error("Invalid data format")]
     InvalidData,
+    /// Failed to decompress indexed data
     #[error("Decompression error: {0}")]
     DecompressionError(String),
 }

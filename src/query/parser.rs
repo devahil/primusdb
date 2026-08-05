@@ -5,12 +5,66 @@
  * Version: 2.0.0 - Rewritten with proper tokenizer + recursive descent parser
  */
 
+//! # PrimusDB Query Parser
+//!
+//! The first stage of the query pipeline. `QueryParser` turns a raw [`UqlQuery`]
+//! into a language-neutral [`ParsedQuery`] that the planner can consume.
+//!
+//! SQL is parsed with a two-pass strategy: the `sqlparser-rs` adapter is tried
+//! first for standard SQL, and a hand-written [`Tokenizer`] + recursive-descent
+//! [`Parser`] takes over for extended / edge-case syntax. The JSON dialects —
+//! PrimusDB UQL, MongoDB and CouchDB Mango — are parsed from JSON and translated
+//! into the same SQL-string representation used by the hand-written parser
+//! (conditions, projections, order by, etc.), so all dialects share one output.
+//!
+//! ## Internal Flow
+//!
+//! ```text
+//!         UqlQuery { query, query_type, parameters }
+//!                        |
+//!                        v
+//!         +--------------+--------------+
+//!         |     QueryParser::parse      |
+//!         +--------------+--------------+
+//!                        |
+//!         +--------------+--------------+
+//!         | Sql          | Json dialects|
+//!         +--------------+--------------+
+//!                        v
+//!         +-----------------------------+
+//!         | sqlparser-rs (standard SQL) |
+//!         |   convert_* -> ParsedQuery  |
+//!         +-----------------------------+
+//!         | Tokenizer + Parser (fallback)|
+//!         |   recursive descent:         |
+//!         |   expr, joins, CTEs, windows |
+//!         +-----------------------------+
+//!         | MongoDb / Mango / Uql        |
+//!         |   JSON -> SQL conditions     |
+//!         +-----------------------------+
+//!                        v
+//!                    ParsedQuery
+//! ```
+//!
+//! ## Main Types
+//!
+//! - [`QueryParser`] — dialect dispatch entry point.
+//! - [`Tokenizer`] / [`Parser`] — the hand-written SQL front-end.
+//! - [`ParsedQuery`] — the shared, planner-ready output.
+//! - Supporting clause types: [`JoinClause`], [`OrderByClause`],
+//!   [`AggregationClause`], [`CTEDefinition`], [`WindowFunctionColumn`],
+//!   [`SetOperation`].
+
 use crate::query::QueryLanguage;
 use crate::query::UqlQuery;
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Lexical token produced by [`Tokenizer`]
+///
+/// SQL keywords map to dedicated unit variants, while identifiers, numbers and
+/// string literals carry their source text as data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Select,
@@ -92,8 +146,11 @@ pub enum Token {
     Over,
     Partition,
     Recursive,
+    /// Unquoted or double-quoted identifier
     Identifier(String),
+    /// Numeric literal
     Number(String),
+    /// Single-quoted string literal
     String(String),
     Comma,
     Dot,
@@ -126,6 +183,11 @@ impl fmt::Display for Token {
     }
 }
 
+/// Hand-written SQL tokenizer
+///
+/// Splits an SQL string into [`Token`]s, recognizing keywords, identifiers
+/// (including double-quoted identifiers), numbers, single-quoted strings,
+/// punctuation and operators.
 #[derive(Debug)]
 pub struct Tokenizer {
     input: Vec<char>,
@@ -137,6 +199,7 @@ pub struct Tokenizer {
 }
 
 impl Tokenizer {
+    /// Create a tokenizer over `input`
     pub fn new(input: &str) -> Self {
         Tokenizer {
             input: input.chars().collect(),
@@ -323,6 +386,7 @@ impl Tokenizer {
         }
     }
 
+    /// Tokenize the whole input, ending with [`Token::Eof`]
     pub fn tokenize(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
 
@@ -442,6 +506,12 @@ impl Tokenizer {
     }
 }
 
+/// Hand-written recursive-descent SQL parser
+///
+/// Consumes a [`Token`] stream and produces a [`ParsedQuery`]. Handles SELECT,
+/// INSERT, UPDATE, DELETE, CREATE (table / index / sequence / view / trigger),
+/// DROP and ALTER statements, plus expressions, joins, CTEs, window functions
+/// and set operations.
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -451,6 +521,7 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// Create a parser over a token stream
     pub fn new(tokens: Vec<Token>) -> Self {
         Parser {
             tokens,
@@ -482,28 +553,9 @@ impl Parser {
         }
     }
 
-    #[allow(dead_code)]
-    fn expect_any(&mut self, expected: &[Token]) -> Result<Token> {
-        let tok = self.peek();
-        for exp in expected {
-            if std::mem::discriminant(&tok) == std::mem::discriminant(exp) || tok == *exp {
-                return Ok(self.advance());
-            }
-        }
-        Err(crate::Error::ValidationError(format!(
-            "Expected one of {:?}, found {:?}",
-            expected, tok
-        )))
-    }
-
     fn peek_is(&self, expected: &Token) -> bool {
         let tok = self.peek();
         tok == *expected
-    }
-
-    #[allow(dead_code)]
-    fn peek_is_identifier(&self) -> bool {
-        matches!(self.peek(), Token::Identifier(_))
     }
 
     fn peek_is_any(&self, expected: &[Token]) -> bool {
@@ -520,6 +572,10 @@ impl Parser {
         Ok(items)
     }
 
+    /// Parse a single statement into a [`ParsedQuery`]
+    ///
+    /// Supports an optional `WITH` prefix, any top-level statement type, and set
+    /// operations (UNION / INTERSECT / EXCEPT) chained after the first query.
     pub fn parse_query(&mut self) -> Result<ParsedQuery> {
         let tok = self.peek();
         let mut result = if tok == Token::With || tok == Token::Recursive {
@@ -1948,6 +2004,8 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
 
+/// Parse `sql` with the `sqlparser-rs` `GenericDialect` and convert the single
+/// resulting statement into a [`ParsedQuery`]
 fn parse_with_sqlparser(sql: &str) -> Result<ParsedQuery> {
     let dialect = GenericDialect {};
     let statements = SqlParser::parse_sql(&dialect, sql)
@@ -2619,6 +2677,10 @@ fn extract_aggregations_from_columns(columns: &[String]) -> Vec<AggregationClaus
 // ── Public API ──────────────────────────────────────────────────
 
 /// Query parser for multiple query languages
+///
+/// Dispatches to the SQL parser or one of the JSON dialect parsers based on
+/// [`UqlQuery::query_type`]. With [`QueryLanguage::Auto`] the dialect is
+/// detected from the query text.
 pub struct QueryParser;
 
 impl Default for QueryParser {
@@ -2628,10 +2690,12 @@ impl Default for QueryParser {
 }
 
 impl QueryParser {
+    /// Create a parser instance
     pub fn new() -> Self {
         QueryParser
     }
 
+    /// Parse a [`UqlQuery`] into a [`ParsedQuery`] using the selected dialect
     pub fn parse(&self, query: &UqlQuery) -> Result<ParsedQuery> {
         match query.query_type {
             QueryLanguage::Sql => self.parse_sql(&query.query),
@@ -2642,6 +2706,7 @@ impl QueryParser {
         }
     }
 
+    /// Detect the dialect from the query text and dispatch
     fn detect_and_parse(&self, query: &str) -> Result<ParsedQuery> {
         let trimmed = query.trim();
 
@@ -2681,6 +2746,8 @@ impl QueryParser {
         self.parse_uql(trimmed)
     }
 
+    /// Parse SQL, preferring the `sqlparser-rs` adapter with fallback to the
+    /// hand-written [`Tokenizer`] + [`Parser`] for extended syntax
     fn parse_sql(&self, query: &str) -> Result<ParsedQuery> {
         // Try sqlparser-rs first for standard SQL; fall back to the old parser.
         if let Ok(pq) = parse_with_sqlparser(query) {
@@ -2692,6 +2759,7 @@ impl QueryParser {
         parser.parse_query()
     }
 
+    /// Parse a MongoDB JSON query document into a [`ParsedQuery`]
     fn parse_mongodb(&self, query: &str) -> Result<ParsedQuery> {
         let value: serde_json::Value = serde_json::from_str(query)
             .map_err(|e| crate::Error::ValidationError(format!("Invalid JSON: {}", e)))?;
@@ -2747,6 +2815,7 @@ impl QueryParser {
         Ok(parsed)
     }
 
+    /// Parse a CouchDB Mango query (JSON selector) into a [`ParsedQuery`]
     fn parse_mango(&self, query: &str) -> Result<ParsedQuery> {
         let value: serde_json::Value = serde_json::from_str(query)
             .map_err(|e| crate::Error::ValidationError(format!("Invalid JSON: {}", e)))?;
@@ -3065,6 +3134,7 @@ impl QueryParser {
         }
     }
 
+    /// Parse a PrimusDB UQL JSON query into a [`ParsedQuery`]
     fn parse_uql(&self, query: &str) -> Result<ParsedQuery> {
         let value: serde_json::Value = serde_json::from_str(query)
             .map_err(|e| crate::Error::ValidationError(format!("Invalid UQL: {}", e)))?;
@@ -3188,135 +3258,226 @@ fn format_window_spec(window: &WindowSpec) -> String {
 
 // ── Data Types ──────────────────────────────────────────────────
 
+/// A parsed, language-neutral query
+///
+/// Produced by [`QueryParser`] from any supported dialect. All clause
+/// information is normalized into plain strings / small structs so the planner
+/// can build execution stages without knowing the original dialect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedQuery {
+    /// Kind of statement (SELECT / INSERT / UPDATE / DELETE / DDL)
     pub operation: QueryOperation,
+    /// Tables read by the statement (the FROM sources of a SELECT)
     pub source_tables: Vec<String>,
+    /// Table written by the statement (INSERT / UPDATE / DELETE / DDL target)
     pub target_table: Option<String>,
+    /// Projected columns; for DML carries column definitions or SET targets
     pub columns: Vec<String>,
+    /// WHERE / filter condition as an SQL string
     pub conditions: Option<String>,
+    /// JOIN clauses against the source tables
     pub joins: Vec<JoinClause>,
+    /// ORDER BY clauses
     pub order_by: Vec<OrderByClause>,
+    /// GROUP BY column names
     pub group_by: Vec<String>,
+    /// Aggregate functions found in the projection
     pub aggregations: Vec<AggregationClause>,
+    /// Row limit
     pub limit: Option<usize>,
+    /// Row offset
     pub offset: Option<usize>,
+    /// Set operations (UNION / INTERSECT / EXCEPT) chained after this query
     pub set_operations: Vec<SetOperation>,
+    /// Subqueries inlined while parsing expressions
     pub nested_queries: Vec<Box<ParsedQuery>>,
+    /// Whether DISTINCT was requested
     pub distinct: bool,
+    /// HAVING condition (post-aggregation filter)
     pub having: Option<String>,
+    /// Common-table-expression (WITH) definitions
     pub ctes: Vec<CTEDefinition>,
+    /// Window functions extracted from the projection
     pub window_functions: Vec<WindowFunctionColumn>,
 }
 
+/// The kind of statement a [`ParsedQuery`] represents
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryOperation {
+    /// SELECT / read query
     Select,
+    /// INSERT INTO ... VALUES
     Insert,
+    /// UPDATE ... SET
     Update,
+    /// DELETE FROM ...
     Delete,
+    /// CREATE TABLE / INDEX / SEQUENCE / VIEW / TRIGGER
     Create,
+    /// DROP TABLE / INDEX / SEQUENCE / VIEW / TRIGGER
     Drop,
+    /// ALTER TABLE
     Alter,
+    /// TRUNCATE TABLE
     Truncate,
 }
 
+/// A JOIN between a FROM source and another table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinClause {
+    /// Join kind: INNER, LEFT, RIGHT, FULL or CROSS
     pub join_type: JoinType,
+    /// The right-hand (joined) table name
     pub table: String,
+    /// ON condition as an SQL string
     pub condition: String,
+    /// Optional hint to route the join to a specific engine
     pub engine_hint: Option<String>,
 }
 
+/// Supported join semantics
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum JoinType {
+    /// INNER JOIN
     Inner,
+    /// LEFT [OUTER] JOIN
     Left,
+    /// RIGHT [OUTER] JOIN
     Right,
+    /// FULL [OUTER] JOIN
     Full,
+    /// CROSS JOIN
     Cross,
 }
 
+/// A single ORDER BY term
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderByClause {
+    /// Column (or expression) to sort by
     pub column: String,
+    /// Sort direction: "ASC" or "DESC"
     pub direction: String,
 }
 
+/// A single aggregate function reference
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregationClause {
+    /// Which aggregate function to apply
     pub agg_type: AggregationType,
+    /// The argument column (e.g. `*` for COUNT(*))
     pub column: String,
+    /// Optional result alias from `AS`
     pub alias: Option<String>,
 }
 
+/// Aggregate functions recognized by the parser
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AggregationType {
+    /// COUNT
     Count,
+    /// SUM
     Sum,
+    /// AVG
     Avg,
+    /// MIN
     Min,
+    /// MAX
     Max,
+    /// GROUP_CONCAT
     GroupConcat,
+    /// ARRAY_AGG
     ArrayAgg,
 }
 
+/// A common-table-expression (WITH) definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CTEDefinition {
+    /// CTE name
     pub name: String,
+    /// Optional explicit column list
     pub columns: Option<Vec<String>>,
+    /// The CTE body query
     pub query: Box<ParsedQuery>,
 }
 
+/// A window function (function plus OVER clause) extracted from the projection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowFunctionColumn {
+    /// Function name, e.g. ROW_NUMBER, RANK, SUM
     pub function: String,
+    /// Function arguments
     pub args: Vec<String>,
+    /// The OVER (...) window specification
     pub window: WindowSpec,
+    /// Optional result alias from `AS`
     pub alias: Option<String>,
 }
 
+/// An OVER (...) window specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowSpec {
+    /// PARTITION BY columns
     pub partition_by: Vec<String>,
+    /// ORDER BY terms inside the window
     pub order_by: Vec<OrderByClause>,
+    /// Optional frame (ROWS / RANGE / GROUPS)
     pub frame: Option<WindowFrame>,
 }
 
+/// A window frame: frame type plus start / end bounds
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowFrame {
+    /// Frame type: ROWS, RANGE or GROUPS
     pub frame_type: WindowFrameType,
+    /// Start bound
     pub start: FrameBound,
+    /// Optional end bound (BETWEEN ... AND ...)
     pub end: Option<FrameBound>,
 }
 
+/// Window frame types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowFrameType {
+    /// ROWS frame
     Rows,
+    /// RANGE frame
     Range,
+    /// GROUPS frame
     Groups,
 }
 
+/// A window frame boundary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FrameBound {
+    /// UNBOUNDED PRECEDING
     UnboundedPreceding,
+    /// N PRECEDING
     NPreceding(u64),
+    /// CURRENT ROW
     CurrentRow,
+    /// N FOLLOWING
     NFollowing(u64),
+    /// UNBOUNDED FOLLOWING
     UnboundedFollowing,
 }
 
+/// One right-hand side of a set operation chain
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetOperation {
+    /// The set operator: UNION, INTERSECT or EXCEPT
     pub operation_type: SetOperationType,
+    /// The right-hand query
     pub query: Box<ParsedQuery>,
 }
 
+/// Supported set operators
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SetOperationType {
+    /// UNION
     Union,
+    /// INTERSECT
     Intersect,
+    /// EXCEPT
     Except,
 }
 

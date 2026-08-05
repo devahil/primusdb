@@ -1380,6 +1380,158 @@ fn kv_find(host: &str, port: u16, database: &str, selector: &str, token: &str) -
         })?;
         Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
     }
+
+    // ==================== TimeSeries Methods ====================
+
+    fn ts_list_metrics(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/metrics", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_describe_metric(&self, metric: &str) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/metrics/{}", self.base_url, metric);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_insert_point(&self, metric: &str, timestamp: i64, fields: &str, tags: Option<&str>) -> PyResult<PyObject> {
+        let fields_value: serde_json::Value = serde_json::from_str(fields)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON fields: {}", e)))?;
+        let tags_value: Option<serde_json::Value> = tags.map(|t| serde_json::from_str(t)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON tags: {}", e)))).transpose()?;
+
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/insert", self.base_url);
+            let body = serde_json::json!({
+                "metric": metric,
+                "timestamp": timestamp,
+                "fields": fields_value,
+                "tags": tags_value,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_query(&self, metric: &str, start_time: Option<i64>, end_time: Option<i64>,
+                resolution: Option<&str>, tags: Option<&str>, fields: Option<&str>, limit: Option<u64>) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let mut url = format!("{}/api/v1/timeseries/{}/query", self.base_url, metric);
+            let mut params: Vec<String> = Vec::new();
+            if let Some(st) = start_time { params.push(format!("start_time={}", st)); }
+            if let Some(et) = end_time { params.push(format!("end_time={}", et)); }
+            if let Some(r) = resolution { params.push(format!("resolution={}", r)); }
+            if let Some(t) = tags { params.push(format!("tags={}", t)); }
+            if let Some(f) = fields { params.push(format!("fields={}", f)); }
+            if let Some(l) = limit { params.push(format!("limit={}", l)); }
+            if !params.is_empty() { url = format!("{}?{}", url, params.join("&")); }
+
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_aggregate(&self, metric: &str, fn_name: &str, resolution: Option<&str>,
+                    start_time: Option<i64>, end_time: Option<i64>,
+                    tags: Option<&str>, fill_policy: Option<&str>) -> PyResult<PyObject> {
+        let tags_value: Option<serde_json::Value> = tags.map(|t| serde_json::from_str(t)
+            .map_err(|e| PyRuntimeError::new_err(format!("Invalid JSON tags: {}", e)))).transpose()?;
+
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/{}/aggregate", self.base_url, metric);
+            let mut body = serde_json::json!({
+                "metric": metric,
+                "fn": fn_name,
+            });
+            if let Some(r) = resolution { body["resolution"] = serde_json::json!(r); }
+            if let Some(st) = start_time { body["start_time"] = serde_json::json!(st); }
+            if let Some(et) = end_time { body["end_time"] = serde_json::json!(et); }
+            if let Some(t) = tags_value { body["tags"] = t; }
+            if let Some(fp) = fill_policy { body["fill_policy"] = serde_json::json!(fp); }
+
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_downsample(&self, metric: &str, target_resolution: &str, source_resolution: &str) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/{}/downsample", self.base_url, metric);
+            let body = serde_json::json!({
+                "metric": metric,
+                "target_resolution": target_resolution,
+                "source_resolution": source_resolution,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_set_retention(&self, metric: &str, retention_days: u64) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/{}/retain", self.base_url, metric);
+            let body = serde_json::json!({
+                "metric": metric,
+                "retention_days": retention_days,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_add_resolution(&self, metric: &str, resolution: &str, retention_days: u64, aggregation_fn: &str) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/{}/resolution", self.base_url, metric);
+            let body = serde_json::json!({
+                "metric": metric,
+                "resolution": resolution,
+                "retention_days": retention_days,
+                "aggregation_fn": aggregation_fn,
+            });
+            let response = self.client.post(&url).json(&body).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
+
+    fn ts_stats(&self) -> PyResult<PyObject> {
+        let result: serde_json::Value = self.runtime.block_on(async {
+            let url = format!("{}/api/v1/timeseries/stats", self.base_url);
+            let response = self.client.get(&url).send().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Request failed: {}", e)))?;
+            Ok(response.json().await
+                .map_err(|e| PyRuntimeError::new_err(format!("Response parse failed: {}", e)))?)
+        })?;
+        Python::with_gil(|py| Ok(serde_value_to_py(py, &result)))
+    }
 }
 
 #[pyclass]
@@ -1400,6 +1552,9 @@ impl PyStorageType {
     #[classattr]
     const RELATIONAL: Self = Self("relational");
 
+    #[classattr]
+    const TIMESERIES: Self = Self("timeseries");
+
     #[new]
     fn new(storage_type: &str) -> PyResult<Self> {
         let lower = storage_type.to_lowercase();
@@ -1408,6 +1563,7 @@ impl PyStorageType {
             "vector" => Ok(Self("vector")),
             "document" => Ok(Self("document")),
             "relational" => Ok(Self("relational")),
+            "timeseries" | "ts" => Ok(Self("timeseries")),
             _ => Err(PyRuntimeError::new_err(format!(
                 "Unknown storage type: {}",
                 storage_type

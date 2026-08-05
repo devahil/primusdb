@@ -114,8 +114,8 @@ The API layer provides multiple interfaces for interacting with PrimusDB:
 
 - **CLI** (`src/cli/`): Built on Clap (4.4), provides a unified command-line interface
   with subcommands for server management, querying, database operations, cluster
-  management, AI/ML operations, and administration. Three binaries exist:
-  `primusdb` (unified, primary), `primusdb-server` (legacy), `primusdb-cli` (legacy).
+  management, AI/ML operations, and administration. A single binary exists:
+  `primusdb` (the legacy `primusdb-server` and `primusdb-cli` binaries were removed).
 
 - **Language Drivers** (`drivers/`): Native client libraries for:
   - **Rust** (`drivers/rust/`): Native crate with builder pattern
@@ -187,8 +187,9 @@ provides the embedded database persistence layer.
 - **CDC Engine** (`src/cdc.rs`): Change Data Capture for streaming changes to
   external systems with offset tracking and multiple format support.
 
-- **Observability** (`src/metrics.rs`): Prometheus metrics, structured tracing
-  via `tracing` crate, and health check endpoints.
+- **Observability** (`src/api/mod.rs`, `src/protocol/messaging.rs`): Prometheus
+  metrics exposed via the `/metrics` endpoint, structured tracing via the
+  `tracing` crate, and health check endpoints (`/health`, `/status`).
 
 ## Key Design Decisions
 

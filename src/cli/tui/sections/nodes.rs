@@ -89,14 +89,18 @@ pub fn render_nodes(frame: &mut Frame, area: Rect, app: &TuiApp) {
         }
     } else {
         lines.push(Line::from(Span::styled(
-            "  No node data. Press r to refresh.",
-            Style::new().fg(Color::Gray),
+            "  Cluster features not available.",
+            Style::new().fg(Color::Yellow),
         )));
         lines.push(Line::from(""));
         lines.push(spanned_line(&[
-            ("  Press ", Color::Gray, false),
-            ("r", Color::White, true),
-            (" to refresh", Color::Gray, false),
+            ("  Start server with ", Color::Gray, false),
+            ("--cluster", Color::Cyan, true),
+            (" to enable clustering.", Color::Gray, false),
+        ]));
+        lines.push(spanned_line(&[
+            ("  CLI: ", Color::Gray, false),
+            ("primusdb server start --cluster", Color::Cyan, false),
         ]));
     }
 

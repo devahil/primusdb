@@ -6,7 +6,9 @@
  */
 
 use primusdb::cluster::ClusterStatusInfo;
-use primusdb::governor::{EnforcementAction, GovernorMetricsSnapshot, GovernorStatus, WorkloadType};
+use primusdb::governor::{
+    EnforcementAction, GovernorMetricsSnapshot, GovernorStatus, WorkloadType,
+};
 use primusdb::query::{QueryLanguage, UqlQuery};
 use primusdb::{PrimusDB, PrimusDBConfig, Query, QueryOperation, Result, StorageType};
 use std::collections::HashMap;
@@ -29,6 +31,45 @@ impl NativeDriver {
     /// Get reference to underlying database
     pub fn db(&self) -> &Arc<PrimusDB> {
         &self.db
+    }
+
+    // ── Capability negotiation ──────────────────────────────────────────────
+
+    /// Fetch the node's capability snapshot (capability registry).
+    ///
+    /// Advertises the version, node id, every engine with its tables and the
+    /// additive feature flags. New engines appear automatically.
+    pub fn capabilities(&self) -> Result<primusdb::capabilities::ServerCapabilities> {
+        self.db.capabilities()
+    }
+
+    /// Negotiate: fetch capabilities and fail fast when a required feature or
+    /// engine is missing. Unknown features are ignored (additive contract).
+    pub fn negotiate(
+        &self,
+        required_features: &[&str],
+        required_engines: &[StorageType],
+    ) -> Result<primusdb::capabilities::ServerCapabilities> {
+        let caps = self.capabilities()?;
+        for feature in required_features {
+            if !caps.features.iter().any(|f| f == feature) {
+                return Err(primusdb::Error::ValidationError(format!(
+                    "server is missing required capability: {feature}"
+                )));
+            }
+        }
+        for engine in required_engines {
+            if !caps
+                .engines
+                .iter()
+                .any(|e| e.storage_type == engine.to_string())
+            {
+                return Err(primusdb::Error::ValidationError(format!(
+                    "server is missing required engine: {engine}"
+                )));
+            }
+        }
+        Ok(caps)
     }
 
     /// Execute a raw query
@@ -710,7 +751,7 @@ impl NativeDriver {
             .governor_engine()
             .check_limit(execution_id, field, current, limit)
             .await
-            .map_err(|e| primusdb::Error::GovernorError(e))
+            .map_err(primusdb::Error::GovernorError)
     }
 
     // ==================== UQL / SQL Execution ====================
@@ -855,6 +896,251 @@ impl NativeDriver {
         );
         let result = self.execute_sql(&sql, None)?;
         Ok(result.records.into_iter().map(|r| r.data).collect())
+    }
+
+    // ==================== TimeSeries Methods ====================
+
+    /// List all time-series metrics
+    pub async fn ts_list_metrics(&self) -> Result<Vec<serde_json::Value>> {
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Read,
+            table: "__ts_metrics__".to_string(),
+            conditions: None,
+            data: None,
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        match self.db.execute_query(q).await? {
+            primusdb::QueryResult::Select(records) => {
+                Ok(records.into_iter().map(|r| r.data).collect())
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    /// Insert a time-series data point
+    pub async fn ts_insert_point(
+        &self,
+        metric: &str,
+        timestamp: u64,
+        fields: serde_json::Value,
+        tags: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let payload = serde_json::json!({
+            "metric": metric,
+            "timestamp": timestamp,
+            "fields": fields,
+            "tags": tags,
+        });
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Create,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(payload),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        match self.db.execute_query(q).await? {
+            primusdb::QueryResult::Insert(_) => Ok(serde_json::json!({"success": true})),
+            _ => Ok(serde_json::json!({"success": false})),
+        }
+    }
+
+    /// Query time-series points
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ts_query(
+        &self,
+        metric: &str,
+        start_time: Option<u64>,
+        end_time: Option<u64>,
+        resolution: Option<&str>,
+        tags: Option<serde_json::Value>,
+        fields: Option<&[&str]>,
+        limit: Option<u64>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut params = serde_json::json!({
+            "metric": metric,
+        });
+        if let Some(ts) = start_time {
+            params["start_time"] = serde_json::json!(ts);
+        }
+        if let Some(te) = end_time {
+            params["end_time"] = serde_json::json!(te);
+        }
+        if let Some(r) = resolution {
+            params["resolution"] = serde_json::json!(r);
+        }
+        if let Some(t) = tags {
+            params["tags"] = t;
+        }
+        if let Some(f) = fields {
+            params["fields"] = serde_json::json!(f);
+        }
+        if let Some(l) = limit {
+            params["limit"] = serde_json::json!(l);
+        }
+
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Read,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(params),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        match self.db.execute_query(q).await? {
+            primusdb::QueryResult::Select(records) => {
+                Ok(records.into_iter().map(|r| r.data).collect())
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    /// Aggregate time-series data
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ts_aggregate(
+        &self,
+        metric: &str,
+        fn_name: &str,
+        resolution: Option<&str>,
+        start_time: Option<u64>,
+        end_time: Option<u64>,
+        tags: Option<serde_json::Value>,
+        fill_policy: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut payload = serde_json::json!({
+            "metric": metric,
+            "fn": fn_name,
+        });
+        if let Some(r) = resolution {
+            payload["resolution"] = serde_json::json!(r);
+        }
+        if let Some(ts) = start_time {
+            payload["start_time"] = serde_json::json!(ts);
+        }
+        if let Some(te) = end_time {
+            payload["end_time"] = serde_json::json!(te);
+        }
+        if let Some(t) = tags {
+            payload["tags"] = t;
+        }
+        if let Some(fp) = fill_policy {
+            payload["fill_policy"] = serde_json::json!(fp);
+        }
+
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Analyze,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(payload),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        match self.db.execute_query(q).await? {
+            primusdb::QueryResult::Explain(v) => {
+                // Parse as JSON array
+                Ok(serde_json::from_str(&v).unwrap_or_default())
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    /// Downsample time-series data
+    pub async fn ts_downsample(
+        &self,
+        metric: &str,
+        target_resolution: &str,
+        source_resolution: &str,
+    ) -> Result<serde_json::Value> {
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Update,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(serde_json::json!({
+                "operation": "downsample",
+                "target_resolution": target_resolution,
+                "source_resolution": source_resolution,
+            })),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(q).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Set retention policy for a metric
+    pub async fn ts_set_retention(
+        &self,
+        metric: &str,
+        retention_days: u64,
+    ) -> Result<serde_json::Value> {
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Update,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(serde_json::json!({
+                "operation": "retention",
+                "retention_days": retention_days,
+            })),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(q).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Add a rollup resolution to a metric
+    pub async fn ts_add_resolution(
+        &self,
+        metric: &str,
+        resolution: &str,
+        retention_days: u64,
+        aggregation_fn: &str,
+    ) -> Result<serde_json::Value> {
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::AlterTableAddColumn,
+            table: metric.to_string(),
+            conditions: None,
+            data: Some(serde_json::json!({
+                "resolution": resolution,
+                "retention_days": retention_days,
+                "aggregation_fn": aggregation_fn,
+            })),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(q).await?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Get time-series engine stats
+    pub async fn ts_stats(&self) -> Result<serde_json::Value> {
+        let q = Query {
+            storage_type: StorageType::TimeSeries,
+            operation: QueryOperation::Analyze,
+            table: String::new(),
+            conditions: None,
+            data: Some(serde_json::json!({"operation": "stats"})),
+            limit: None,
+            offset: None,
+            namespace: None,
+        };
+        let result = self.db.execute_query(q).await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     /// Select data with GROUP BY, HAVING, DISTINCT, ORDER BY support
@@ -1156,11 +1442,17 @@ impl NativeDriverBuilder {
                     bind_address: "127.0.0.1".to_string(),
                     port: 8080,
                     max_connections: 1000,
+                    tls_enabled: false,
+                    tls_cert_path: String::new(),
+                    tls_key_path: String::new(),
+                    tls_ca_path: String::new(),
+                    mtls_enabled: false,
                 },
                 security: primusdb::SecurityConfig {
                     encryption_enabled: false,
                     key_rotation_interval: 86400,
                     auth_required: false,
+                    mfa_enabled: false,
                 },
                 cluster: primusdb::ClusterConfig {
                     enabled: false,
@@ -1169,6 +1461,10 @@ impl NativeDriverBuilder {
                 },
                 namespaces: Default::default(),
                 federation: None,
+                integrity: primusdb::integrity::IntegrityConfig::default(),
+                hyperledger: None,
+                graphql: primusdb::graphql::GraphQLConfig::default(),
+                search: primusdb::search::SearchConfig::default(),
             },
         }
     }
@@ -1445,11 +1741,17 @@ mod tests {
                 bind_address: "127.0.0.1".to_string(),
                 port: 8080,
                 max_connections: 100,
+                tls_enabled: false,
+                tls_cert_path: String::new(),
+                tls_key_path: String::new(),
+                tls_ca_path: String::new(),
+                mtls_enabled: false,
             },
             security: primusdb::SecurityConfig {
                 encryption_enabled: false,
                 key_rotation_interval: 86400,
                 auth_required: false,
+                mfa_enabled: false,
             },
             cluster: primusdb::ClusterConfig {
                 enabled: false,
@@ -1458,6 +1760,10 @@ mod tests {
             },
             namespaces: Default::default(),
             federation: None,
+            integrity: primusdb::integrity::IntegrityConfig::default(),
+            hyperledger: None,
+            graphql: primusdb::graphql::GraphQLConfig::default(),
+            search: primusdb::search::SearchConfig::default(),
         };
 
         let driver = NativeDriver::new(config).unwrap();

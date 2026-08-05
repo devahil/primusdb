@@ -1,3 +1,9 @@
+//! Backup subcommands (`backup create`, `list`, `inspect`, `restore`,
+//! `verify`, `delete`, `export-manifest`).
+//!
+//! Backups are tar archives (optionally encrypted) managed through a
+//! `.index.json` sidecar in the backup directory, defaulting to `./backups`.
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +41,7 @@ struct BackupIndex {
 // Public handlers
 // ---------------------------------------------------------------------------
 
+/// Dispatch a `backup` subcommand to its handler.
 pub async fn handle_backup(
     cmd: BackupSubcommands,
     _global: &GlobalArgs,
@@ -84,6 +91,7 @@ pub async fn handle_backup(
     }
 }
 
+/// Restore a database from a backup archive (no point-in-time option).
 pub async fn handle_restore(
     source: PathBuf,
     database: Option<String>,

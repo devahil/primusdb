@@ -1,6 +1,6 @@
 # PrimusDB Build and Compilation Guide
 
-This guide covers building PrimusDB v1.3.1-alpha from source, including all dependencies, compilation options, and troubleshooting.
+This guide covers building PrimusDB v1.3.2-alpha from source, including all dependencies, compilation options, and troubleshooting.
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ cargo build --release
 
 # Verify build
 ls -la target/release/
-# primusdb-server, primusdb-cli, primusdb
+# primusdb
 ```
 
 ### Development Build
@@ -118,7 +118,7 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 
 # Verify static linking
-ldd target/x86_64-unknown-linux-musl/release/primusdb-server
+ldd target/x86_64-unknown-linux-musl/release/primusdb
 # Should show "not a dynamic executable"
 ```
 
@@ -143,9 +143,9 @@ cargo build --release --target aarch64-apple-darwin
 
 # Combine with lipo (requires Xcode)
 lipo -create \
-  target/x86_64-apple-darwin/release/primusdb-server \
-  target/aarch64-apple-darwin/release/primusdb-server \
-  -output primusdb-server-universal
+  target/x86_64-apple-darwin/release/primusdb \
+  target/aarch64-apple-darwin/release/primusdb \
+  -output primusdb-universal
 ```
 
 ## Dependency Management
@@ -312,9 +312,9 @@ RUN touch src/main.rs
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-COPY --from=builder /usr/src/primusdb/target/release/primusdb-server /usr/local/bin/
+COPY --from=builder /usr/src/primusdb/target/release/primusdb /usr/local/bin/
 EXPOSE 8080
-CMD ["primusdb-server"]
+CMD ["primusdb", "server", "start"]
 ```
 
 ### CI/CD Build
@@ -345,13 +345,13 @@ jobs:
 ### Size Optimization
 ```bash
 # Strip debug symbols
-strip target/release/primusdb-server
+strip target/release/primusdb
 
 # UPX compression
-upx --best target/release/primusdb-server
+upx --best target/release/primusdb
 
 # Check final size
-ls -lh target/release/primusdb-server
+ls -lh target/release/primusdb
 ```
 
 ### Performance Profiling
@@ -361,7 +361,7 @@ sudo apt-get install linux-tools-common linux-tools-generic
 
 # Profile build
 cargo build --release
-perf record target/release/primusdb-server --help
+perf record target/release/primusdb --help
 perf report
 ```
 
@@ -433,10 +433,10 @@ docker push registry.example.com/primusdb:latest
 ### Build Security
 ```bash
 # Verify checksums
-sha256sum target/release/primusdb-server
+sha256sum target/release/primusdb
 
 # Sign binaries
-gpg --detach-sign target/release/primusdb-server
+gpg --detach-sign target/release/primusdb
 
 # Use reproducible builds
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo build --release

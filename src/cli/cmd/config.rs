@@ -1,9 +1,15 @@
+//! Configuration subcommands (`config init`, `validate`, `show`).
+//!
+//! `init` writes a profile-based `primusdb.toml`; the other subcommands
+//! read and check that file locally (no server round-trip).
+
 use std::path::PathBuf;
 
 use crate::cli::command::{ConfigSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Return the default TOML template for the given profile.
 fn config_for_profile(profile: &str) -> &'static str {
     match profile {
         "single-node" => {
@@ -155,6 +161,7 @@ discovery_servers = []
     }
 }
 
+/// Dispatch a `config` subcommand to its handler.
 pub async fn handle_config(
     cmd: ConfigSubcommands,
     _global: &GlobalArgs,

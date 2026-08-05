@@ -1,7 +1,13 @@
+//! Graph subcommands (`graph nodes`, `edges`, `query`, `traverse`).
+//!
+//! Graph operations are not yet wired to the CLI; every subcommand directs
+//! the user to the SQL interface or the TUI.
+
 use crate::cli::command::{GlobalArgs, GraphSubcommands};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch a `graph` subcommand (all currently report "not yet available").
 pub async fn handle_graph(
     cmd: GraphSubcommands,
     _global: &GlobalArgs,

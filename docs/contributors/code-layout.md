@@ -9,7 +9,7 @@ project.
 primusdb/
 ├── Cargo.toml              # Workspace manifest, dependencies, binary definitions
 ├── Cargo.lock              # Dependency lock file
-├── CHANGELOG.md            # Full release history (v0.1.0 → v1.3.1-alpha)
+├── CHANGELOG.md            # Full release history (v0.1.0 → v1.3.2-alpha)
 ├── LICENSE                 # GPL-3.0 license
 ├── README.md               # Project overview and quick start
 ├── Dockerfile              # Multi-stage Docker build
@@ -39,21 +39,12 @@ src/
 ├── main.rs                 # Unified CLI entry point (primary binary)
 │                           #   Initializes tracing, calls cli::run()
 │
-├── bin/
-│   ├── server.rs           # Legacy server binary (primusdb-server)
-│   │                      #   Axum HTTP server with REST API
-│   ├── server.rs.bak       # Backup of previous server.rs
-│   ├── cli.rs              # Legacy CLI binary (primusdb-cli)
-│   │                      #   Thin wrapper around cli::run()
-│   └── cli.rs.bak          # Backup of previous cli.rs
-│
 ├── cli/                    # Unified CLI subsystem
 │   ├── mod.rs              # Dispatch: run() parses args, matches commands
 │   ├── command.rs          # Clap derive types: Cli, Commands, all subcommands
 │   ├── output.rs           # Output formatting: OutputFormat, OutputData, format_output()
-│   ├── tui.rs              # Terminal UI (Rich-style interactive interface)
 │   ├── discovery.rs        # Network node discovery via UDP broadcast
-│   ├── legacy.rs           # Legacy CLI compatibility shim
+│   ├── repl.rs             # Interactive REPL shell (primusdb shell / connect)
 │   └── cmd/                # Command handler implementations
 │       ├── mod.rs          # Module declarations for all command handlers
 │       ├── server.rs       #   Server lifecycle (start/stop/restart/status/health)
@@ -70,6 +61,9 @@ src/
 │       ├── vector.rs       #   Vector search/index management
 │       ├── graph.rs        #   Graph traversal
 │       ├── cdc.rs          #   Change Data Capture
+│       ├── governor.rs     #   Resource Governor (execution governance)
+│       ├── instance.rs     #   Local instance management
+│       ├── timeseries.rs   #   Time series operations (primusdb ts)
 │       ├── doctor.rs       #   Diagnostic checks
 │       └── discover.rs     #   Node discovery
 │
@@ -90,7 +84,8 @@ src/
 │   ├── vector.rs           # Vector engine: SIMD similarity search
 │   ├── document.rs         # Document engine: JSON storage with dynamic indexing
 │   ├── relational.rs       # Relational engine: SQL, FK, triggers, views, sequences
-│   └── keyvalue.rs         # Key-value engine: CouchDB-compatible (_id/_rev/Mango)
+│   ├── keyvalue.rs         # Key-value engine: CouchDB-compatible (_id/_rev/Mango)
+│   └── timeseries.rs       # Time series engine: high-resolution timestamped data
 │
 ├── crypto/                 # Cryptographic operations
 │   ├── mod.rs              # CryptoManager: key management, encrypt/decrypt
@@ -128,8 +123,9 @@ src/
 ├── namespace/              # Namespace isolation for multi-tenant/ multi-model
 │   └── mod.rs              # NamespaceController, NamespaceConfig
 │
-├── drivers/                # Server-side driver protocol handling
-│   └── mod.rs              # Protocol handling for external driver connections
+├── drivers/                # Legacy server-side driver protocol handling
+│   └── mod.rs              # (Not declared in lib.rs — superseded by the
+│                          #   `drivers/` workspace crates)
 │
 ├── protocol/               # Wire protocol implementation
 │   ├── mod.rs              # Protocol types and traits
@@ -143,14 +139,15 @@ src/
 ├── cache/                  # In-memory caching layer
 │   └── mod.rs              # LRU cache with bloom filters
 │
-├── metrics.rs              # Prometheus metrics collection
 ├── cdc.rs                  # Change Data Capture engine
+├── certs.rs                # Certificate management (CA, signing, self-signed)
 ├── error.rs                # Error types (Error enum with all variants)
-├── fulltext.rs             # Full-text search engine
-├── graph.rs                # Graph traversal engine
-├── parser.rs               # Legacy SQL/query parser (deprecated, use query/)
-└── main.legacy.rs.bak      # Backup of previous main.rs
+├── governor/               # Resource Governor (execution governance, policies)
+├── migration/              # External database migration (plan/import/validate/report)
+└── system/                 # System database, config store, audit, catalog
 ```
+
+Note: `src/fulltext.rs` and `src/graph.rs` remain on disk but are **not** declared in `lib.rs` and are therefore not part of the compiled crate.
 
 ## `crates/` — Workspace Crates
 
@@ -301,6 +298,6 @@ scripts/
 ## Version Compatibility
 
 All crates in the workspace should be bumped together during releases. The current
-version is `1.3.1-alpha`. The `primusdb` root crate and all sub-crates share the
+version is `1.3.2-alpha`. The `primusdb` root crate and all sub-crates share the
 same version number for simplicity, though individual crates may diverge when
 published separately.

@@ -18,9 +18,11 @@ class TestStorageType:
         assert StorageType.VECTOR.value == "vector"
         assert StorageType.DOCUMENT.value == "document"
         assert StorageType.RELATIONAL.value == "relational"
+        assert StorageType.KEYVALUE.value == "keyvalue"
+        assert StorageType.TIMESERIES.value == "timeseries"
 
     def test_members(self):
-        assert len(StorageType) == 4
+        assert len(StorageType) == 6
 
 
 # ==================== ConnectionConfig ====================
@@ -138,6 +140,84 @@ class TestRequest:
             async with PrimusDBClient() as client:
                 with pytest.raises(RuntimeError, match="Unknown error"):
                     await client._request("POST", "test")
+
+
+# ==================== Capability Negotiation ====================
+
+CAPABILITIES_PAYLOAD = {
+    "success": True,
+    "data": {
+        "protocol_version": 1,
+        "server": {
+            "version": "1.3.2-alpha",
+            "node_id": "node-1",
+            "instance_id": "inst-1",
+            "uptime_seconds": 42,
+        },
+        "engines": [
+            {"storage_type": "Relational", "tables": ["users"]},
+            {"storage_type": "Document", "tables": ["articles"]},
+        ],
+        "features": ["search", "graphql", "integrity", "capability_negotiation"],
+    },
+}
+
+
+class TestCapabilityNegotiation:
+    @pytest.mark.asyncio
+    async def test_fetch_capabilities(self):
+        with aioresponses() as mocked:
+            mocked.get(
+                "http://localhost:8080/api/v1/capabilities",
+                payload=CAPABILITIES_PAYLOAD,
+            )
+            async with PrimusDBClient() as client:
+                caps = await client.fetch_capabilities()
+                assert caps.protocol_version == 1
+                assert caps.server_version == "1.3.2-alpha"
+                assert caps.node_id == "node-1"
+                assert caps.has_feature("graphql")
+                assert not caps.has_feature("replication")
+                engine = caps.engine("Document")
+                assert engine is not None
+                assert engine.has_table("articles")
+                assert caps.engine(StorageType.RELATIONAL) is not None
+
+    @pytest.mark.asyncio
+    async def test_negotiate_ok(self):
+        with aioresponses() as mocked:
+            mocked.get(
+                "http://localhost:8080/api/v1/capabilities",
+                payload=CAPABILITIES_PAYLOAD,
+            )
+            async with PrimusDBClient() as client:
+                caps = await client.negotiate(
+                    required_features=["search", "integrity"],
+                    required_engines=[StorageType.RELATIONAL],
+                )
+                assert caps.has_feature("search")
+
+    @pytest.mark.asyncio
+    async def test_negotiate_missing_feature(self):
+        with aioresponses() as mocked:
+            mocked.get(
+                "http://localhost:8080/api/v1/capabilities",
+                payload=CAPABILITIES_PAYLOAD,
+            )
+            async with PrimusDBClient() as client:
+                with pytest.raises(RuntimeError, match="vector_index"):
+                    await client.negotiate(required_features=["vector_index"])
+
+    @pytest.mark.asyncio
+    async def test_negotiate_missing_engine(self):
+        with aioresponses() as mocked:
+            mocked.get(
+                "http://localhost:8080/api/v1/capabilities",
+                payload=CAPABILITIES_PAYLOAD,
+            )
+            async with PrimusDBClient() as client:
+                with pytest.raises(RuntimeError, match="KEYVALUE"):
+                    await client.negotiate(required_engines=[StorageType.KEYVALUE])
 
 
 # ==================== PrimusDBClient - CRUD ====================

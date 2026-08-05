@@ -1,7 +1,13 @@
+//! Authentication and access-control subcommands (`auth`, `user`, `role`).
+//!
+//! All operations run in client mode against the `/api/v1/auth/*` endpoints
+//! on `GlobalArgs.server_url`.
+
 use crate::cli::command::{AuthSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch an `auth` subcommand to its handler.
 pub async fn handle_auth(
     cmd: AuthSubcommands,
     global: &GlobalArgs,
@@ -24,6 +30,7 @@ pub async fn handle_auth(
     }
 }
 
+/// Dispatch a `user` subcommand to its handler.
 pub async fn handle_user(
     cmd: crate::cli::command::UserSubcommands,
     global: &GlobalArgs,
@@ -65,7 +72,7 @@ pub async fn handle_user(
                 }
                 Err(e) => {
                     let data = OutputData::Message(format!(
-                        "User registration not available ({}). Install primusdb-server to enable user management.",
+                        "User registration not available ({}). Start the server with `primusdb server start` to enable user management.",
                         e
                     ));
                     println!("{}", format_output(&data, *fmt));
@@ -92,7 +99,7 @@ pub async fn handle_user(
                 }
                 Err(e) => {
                     let data = OutputData::Message(format!(
-                        "Users list not available ({}). Install primusdb-server to enable user management.",
+                        "Users list not available ({}). Start the server with `primusdb server start` to enable user management.",
                         e
                     ));
                     println!("{}", format_output(&data, *fmt));
@@ -108,7 +115,7 @@ pub async fn handle_user(
             // The server doesn't have a dedicated disable endpoint, but we can try
             let action = if reenable { "reenable" } else { "disable" };
             let data = OutputData::Message(format!(
-                "User '{}' marked for {} via the auth service. Use primusdb-server admin API for full management.",
+                "User '{}' marked for {} via the auth service. Use the server admin API for full management.",
                 username, action
             ));
             println!("{}", format_output(&data, *fmt));
@@ -144,6 +151,7 @@ pub async fn handle_user(
     }
 }
 
+/// Dispatch a `role` subcommand to its handler.
 pub async fn handle_role(
     cmd: crate::cli::command::RoleSubcommands,
     global: &GlobalArgs,
@@ -176,7 +184,7 @@ pub async fn handle_role(
                 }
                 Err(e) => {
                     let data = OutputData::Message(format!(
-                        "Role creation not available ({}). Install primusdb-server to enable role management.",
+                        "Role creation not available ({}). Start the server with `primusdb server start` to enable role management.",
                         e
                     ));
                     println!("{}", format_output(&data, *fmt));
@@ -202,7 +210,7 @@ pub async fn handle_role(
                 }
                 Err(e) => {
                     let data = OutputData::Message(format!(
-                        "Roles list not available ({}). Install primusdb-server to enable role management.",
+                        "Roles list not available ({}). Start the server with `primusdb server start` to enable role management.",
                         e
                     ));
                     println!("{}", format_output(&data, *fmt));
@@ -230,7 +238,7 @@ pub async fn handle_role(
                 Ok(resp) => {
                     if resp.status().as_u16() == 404 {
                         let data = OutputData::Message(
-                            "Role grant endpoint not available. Manage roles via primusdb-server API."
+                            "Role grant endpoint not available. Manage roles via the server API."
                                 .into(),
                         );
                         println!("{}", format_output(&data, *fmt));
@@ -243,7 +251,7 @@ pub async fn handle_role(
                 }
                 Err(e) => {
                     let data = OutputData::Message(format!(
-                        "Role grant not available ({}). Install primusdb-server to enable role management.",
+                        "Role grant not available ({}). Start the server with `primusdb server start` to enable role management.",
                         e
                     ));
                     println!("{}", format_output(&data, *fmt));
@@ -253,7 +261,7 @@ pub async fn handle_role(
         }
         crate::cli::command::RoleSubcommands::Revoke { role, permission } => {
             let data = OutputData::Message(format!(
-                "Revoke '{}' from role '{}' — use DELETE /api/v1/auth/roles via primusdb-server API.",
+                "Revoke '{}' from role '{}' — use DELETE /api/v1/auth/roles via the server API.",
                 permission, role
             ));
             println!("{}", format_output(&data, *fmt));

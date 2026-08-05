@@ -4,13 +4,13 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.3.1--alpha-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.3.2--alpha-blue.svg)]()
 
-PrimusDB is a hybrid database engine written in Rust combining columnar, vector, document, and relational storage — with AI/ML, graph, full-text search, CDC, and blockchain-audited consensus.
+PrimusDB is a hybrid database engine written in Rust combining columnar, vector, document, relational, key-value, and time-series storage — with AI/ML, CDC, and blockchain-audited consensus.
 
 ## Current Status
 
-**Alpha release (v1.3.1-alpha).** Core storage engines and CLI are functional. Cluster, backup, federation, and some advanced features are partially implemented. See [CHANGELOG.md](CHANGELOG.md) for details.
+**Alpha release (v1.3.2-alpha).** Core storage engines and CLI are functional. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Quick Start
 
@@ -34,17 +34,16 @@ cargo build --release
 
 ## Features
 
-- **5 storage engines**: Columnar (analytics), Vector (similarity), Document (JSON), Relational (SQL), Key-Value (CouchDB-compatible)
+- **6 storage engines**: Columnar (analytics), Vector (similarity), Document (JSON), Relational (SQL), Key-Value (CouchDB-compatible), Time Series
 - **AI/ML**: Predictive analytics, anomaly detection, pattern analysis
-- **Graph engine**: Property graph with traversal queries
-- **Full-text search**: Inverted index with TF-IDF scoring
 - **CDC**: Change Data Capture with WAL-based streaming
 - **Blockchain consensus**: Hyperledger-style validation ledger
 - **Security**: Argon2 auth, AES-256-GCM, RBAC, API tokens
 - **SQL parser**: sqlparser-rs with SELECT/INSERT/UPDATE/DELETE/CREATE/DROP
 - **Prometheus metrics**: Tracing with tokio-rs/tracing
-- **Unified CLI**: 25+ subcommands with table/json/csv/yaml/plain output
-- **TUI**: Interactive terminal shell with auto-discovery
+- **System database**: Internal key-value store, config persistence, audit logging, runtime config snapshots, export/import REST API (sled-backed, serde_json serialization)
+- **Unified CLI**: 30+ subcommands with table/json/csv/yaml/plain output
+- **Diagnostics**: `primusdb doctor` with targeted flags (`--aggressive`, `--report`, `--config`, `--system-db`, `--notebooks`, `--rag`)
 
 ## Installation
 
@@ -75,6 +74,10 @@ primusdb server health                  # Health check
 primusdb doctor                         # Full system diagnostics
 primusdb doctor --aggressive            # Deep diagnostics (disk, metrics)
 primusdb doctor --report ./report.txt   # Write report
+primusdb doctor --config                # Config file diagnostics
+primusdb doctor --system-db             # System database diagnostics
+primusdb doctor --notebooks             # Notebook storage diagnostics
+primusdb doctor --rag                   # RAG workspace diagnostics
 
 # Configuration
 primusdb config show                    # Display current config
@@ -150,12 +153,13 @@ See [docs/getting-started/configuration.md](docs/getting-started/configuration.m
 | **Getting Started** | [Build from source](docs/getting-started/build-from-source.md) · [Configuration](docs/getting-started/configuration.md) · [Running locally](docs/getting-started/running-local.md) · [Docker](docs/getting-started/docker.md) · [Troubleshooting](docs/getting-started/troubleshooting.md) |
 | **User Guide** | [Overview](docs/user-guide/overview.md) · [Operations](docs/user-guide/operations.md) · [Administration](docs/user-guide/admin.md) |
 | **CLI** | [Guide](docs/cli/README.md) · [Commands](docs/cli/commands.md) · [Config](docs/cli/config.md) · [Migration](docs/cli/migration.md) |
-| **TUI** | [Interactive Shell](docs/tui/README.md) |
+| **System Database** | [System DB Guide](docs/system-database.md) |
 | **Operations** | [Start/Stop](docs/operations/start-stop.md) · [Health](docs/operations/health-checks.md) · [Metrics](docs/operations/metrics.md) · [Logging](docs/operations/logging.md) · [Backup/Restore](docs/operations/backup-restore.md) · [Local Cluster](docs/operations/local-cluster.md) · [Security](docs/operations/security.md) · [Doctor](docs/operations/doctor.md) |
 | **Architecture** | [Overview](docs/architecture/overview.md) · [Federated Scalar](docs/architecture/federated-scalar.md) · [Design](docs/architecture/explanation.md) |
-| **Features** | [Storage Engines](docs/features/storage-engines.md) · [Full-Text Search](docs/features/fulltext.md) · [Graph Engine](docs/features/graph.md) · [CDC](docs/features/cdc.md) · [Blockchain Consensus](docs/features/blockchain.md) · [Namespaces](docs/features/namespaces.md) · [SQL](docs/features/sql.md) · [AI/ML](docs/features/ai-ml.md) · [Observability](docs/features/observability.md) |
+| **Features** | [Storage Engines](docs/features/storage-engines.md) · [Full-Text Search](docs/features/fulltext.md) *(not compiled in v1.3.2-alpha)* · [Graph Engine](docs/features/graph.md) *(not compiled in v1.3.2-alpha)* · [CDC](docs/features/cdc.md) · [Blockchain Consensus](docs/features/blockchain.md) · [Namespaces](docs/features/namespaces.md) · [SQL](docs/features/sql.md) · [AI/ML](docs/features/ai-ml.md) · [RAG & Analytics](docs/features/rag-analytics.md) · [Observability](docs/features/observability.md) |
 | **Contributors** | [Architecture](docs/contributors/architecture.md) · [Code Layout](docs/contributors/code-layout.md) · [Build & Test](docs/contributors/build-test.md) · [Adding CLI Commands](docs/contributors/adding-cli-commands.md) · [Testing Strategy](docs/contributors/testing-strategy.md) · [Release Process](docs/contributors/release-process.md) |
 | **Reference** | [API](docs/reference/api.md) · [Security](docs/security/overview.md) |
+| **Release Notes** | [v1.3.2-alpha](docs/release-notes/v1.3.2-alpha.md) |
 | **Changelog** | [CHANGELOG.md](CHANGELOG.md) |
 
 ## Examples
@@ -223,7 +227,7 @@ See [docs/usage/drivers.md](docs/usage/drivers.md) for detailed usage.
 │  Drivers: Rust · Python · Node · Ruby   │
 ├─────────────────────────────────────────┤
 │            API Layer                    │
-│  REST API  ·  CLI (25+ commands)  · TUI │
+│  REST API  ·  CLI (25+ commands)          │
 ├─────────────────────────────────────────┤
 │         Processing Layer                │
 │  AI/ML · Consensus · SQL Parser · CDC   │
@@ -250,12 +254,15 @@ bash scripts/check-all.sh
 
 ## Roadmap
 
-- **v1.3.x**: CLI improvements, doctor command, config management, packaging scripts
-- **v1.4.0**: Full backup/restore implementation, cluster stability, federation
+- **v1.3.2-alpha** ✅: System database, extended doctor diagnostics, system DB export/import API
+- **v1.3.3-alpha**: Configuration Studio workspace, Table Explorer workspace
+- **v1.3.4-alpha**: Report Builder workspace, Notebook workspace
+- **v1.3.5-alpha**: RAG workspace, docs
+- **v1.4.0**: Full backup/restore, cluster stability, federation
 - **v1.5.0**: Driver maturity, benchmark suite, performance optimization
 - **v2.0.0**: Production release, GA
 
-## Known Limitations (v1.3.1-alpha)
+## Known Limitations (v1.3.2-alpha)
 
 - Federation is experimental
 - TLS not yet configurable via CLI

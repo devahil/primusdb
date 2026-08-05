@@ -1,7 +1,26 @@
+//! # GovernorEngine — Enforcement Engine
+//!
+//! Executes governance by tracking per-execution contexts and checking their
+//! usage against limits resolved from the applicable policy.
+//!
+//! ```text
+//! GovernorEngine::new(config)            (or new_disabled())
+//!   |
+//!   +-- start_execution(ns, wl, user, role)
+//!   |     resolve_policy() -> limits + action
+//!   |     register ExecutionContext -> ExecutionHandle
+//!   |
+//!   +-- check_limit(id, field, current, limit)
+//!   |     exceed? -> record Violation, bump counters,
+//!   |                Block => Err, Throttle/Warn => Ok(action)
+//!   |
+//!   +-- status() / metrics_snapshot() / list_violations()
+//! ```
+
 use super::policy::PolicyManager;
 use super::{
-    EnforcementAction, ExecutionContext, ExecutionLimits, GovernorConfig,
-    GovernorMetricsSnapshot, GovernorStatus, Policy, Violation, WorkloadType,
+    EnforcementAction, ExecutionContext, ExecutionLimits, GovernorConfig, GovernorMetricsSnapshot,
+    GovernorStatus, Policy, Violation, WorkloadType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -10,6 +29,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Shared interior state of the governor.
 struct Inner {
     policies: RwLock<PolicyManager>,
     executions: RwLock<HashMap<Uuid, ExecutionContext>>,
@@ -22,11 +42,14 @@ struct Inner {
     total_violations: AtomicU64,
 }
 
+/// Thread-safe engine that starts executions, resolves policies and enforces
+/// resource limits.
 pub struct GovernorEngine {
     inner: Arc<Inner>,
 }
 
 impl GovernorEngine {
+    /// Creates an enabled engine from the given configuration.
     pub fn new(config: GovernorConfig) -> Self {
         let policy_mgr = PolicyManager::from_config(&config.policies, &config.default_policy);
         Self {
@@ -44,6 +67,8 @@ impl GovernorEngine {
         }
     }
 
+    /// Creates a disabled engine; all checks return
+    /// [`EnforcementAction::Monitor`].
     pub fn new_disabled() -> Self {
         Self::new(GovernorConfig {
             enabled: false,
@@ -51,10 +76,14 @@ impl GovernorEngine {
         })
     }
 
+    /// Whether the governor is currently enabled.
     pub async fn is_enabled(&self) -> bool {
         self.inner.config.read().await.enabled
     }
 
+    /// Registers a new execution, resolving the applicable policy from the
+    /// namespace, workload type, user and role, and returns an
+    /// [`ExecutionHandle`] for the execution.
     pub async fn start_execution(
         &self,
         namespace: String,
@@ -67,8 +96,7 @@ impl GovernorEngine {
         let limits = policy.limits.clone();
         let action = policy.action;
 
-        let ctx = ExecutionContext::new(namespace, workload_type, limits)
-            .with_action(action);
+        let ctx = ExecutionContext::new(namespace, workload_type, limits).with_action(action);
 
         let exec_id = ctx.execution_id;
         self.inner.active_executions.fetch_add(1, Ordering::Relaxed);
@@ -84,12 +112,16 @@ impl GovernorEngine {
         }
     }
 
+    /// Deregisters a finished execution and decrements the active counter.
     pub async fn finish_execution(&self, execution_id: Uuid) {
         self.inner.active_executions.fetch_sub(1, Ordering::Relaxed);
         let mut execs = self.inner.executions.write().await;
         execs.remove(&execution_id);
     }
 
+    /// Core enforcement check: when `current >= limit` the violation is
+    /// recorded, counters are bumped, and the execution's action is applied
+    /// (`Block` returns an error, other actions are returned as `Ok`).
     pub async fn check_limit(
         &self,
         execution_id: Uuid,
@@ -178,7 +210,12 @@ impl GovernorEngine {
         }
     }
 
-    pub async fn check_memory(&self, execution_id: Uuid, current_mb: u64) -> Result<EnforcementAction, String> {
+    /// Checks current memory usage (MB) against the execution's memory limit.
+    pub async fn check_memory(
+        &self,
+        execution_id: Uuid,
+        current_mb: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.inner.executions.read().await;
             execs
@@ -189,6 +226,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks execution steps against the execution's step limit.
     pub async fn check_execution_steps(
         &self,
         execution_id: Uuid,
@@ -204,6 +242,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks CPU time (ms) against the execution's CPU time limit.
     pub async fn check_cpu_time(
         &self,
         execution_id: Uuid,
@@ -219,6 +258,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks query complexity against the execution's complexity limit.
     pub async fn check_query_complexity(
         &self,
         execution_id: Uuid,
@@ -231,10 +271,16 @@ impl GovernorEngine {
                 .and_then(|e| e.limits.query_complexity.max_query_complexity)
                 .map(|v| v as u64)
         };
-        self.check_limit(execution_id, "max_query_complexity", complexity as u64, limit)
-            .await
+        self.check_limit(
+            execution_id,
+            "max_query_complexity",
+            complexity as u64,
+            limit,
+        )
+        .await
     }
 
+    /// Checks join count against the execution's join limit.
     pub async fn check_join_count(
         &self,
         execution_id: Uuid,
@@ -251,6 +297,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks sort rows against the execution's sort row limit.
     pub async fn check_sort_rows(
         &self,
         execution_id: Uuid,
@@ -266,6 +313,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks pipeline depth against the execution's pipeline depth limit.
     pub async fn check_pipeline_depth(
         &self,
         execution_id: Uuid,
@@ -282,6 +330,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks pipeline stage count against the execution's stage limit.
     pub async fn check_pipeline_stages(
         &self,
         execution_id: Uuid,
@@ -298,6 +347,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks FFI call count against the execution's FFI call limit.
     pub async fn check_ffi_calls(
         &self,
         execution_id: Uuid,
@@ -313,6 +363,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks FFI memory usage (MB) against the execution's FFI memory limit.
     pub async fn check_ffi_memory(
         &self,
         execution_id: Uuid,
@@ -328,6 +379,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks FFI time (ms) against the execution's FFI time limit.
     pub async fn check_ffi_time(
         &self,
         execution_id: Uuid,
@@ -343,6 +395,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks training iterations against the execution's iteration limit.
     pub async fn check_training_iterations(
         &self,
         execution_id: Uuid,
@@ -358,6 +411,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks prediction batch size against the execution's batch limit.
     pub async fn check_prediction_batch(
         &self,
         execution_id: Uuid,
@@ -373,6 +427,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks embedding batch size against the execution's batch limit.
     pub async fn check_embedding_batch(
         &self,
         execution_id: Uuid,
@@ -388,6 +443,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks vector candidate count against the execution's candidate limit.
     pub async fn check_vector_candidates(
         &self,
         execution_id: Uuid,
@@ -403,6 +459,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks vector expansion count against the execution's expansion limit.
     pub async fn check_vector_expansions(
         &self,
         execution_id: Uuid,
@@ -418,6 +475,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks graph depth against the execution's graph depth limit.
     pub async fn check_graph_depth(
         &self,
         execution_id: Uuid,
@@ -434,6 +492,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks graph node count against the execution's node limit.
     pub async fn check_graph_nodes(
         &self,
         execution_id: Uuid,
@@ -449,6 +508,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks graph edge count against the execution's edge limit.
     pub async fn check_graph_edges(
         &self,
         execution_id: Uuid,
@@ -464,6 +524,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks imported rows against the execution's import row limit.
     pub async fn check_import_rows(
         &self,
         execution_id: Uuid,
@@ -479,6 +540,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks import batch count against the execution's batch limit.
     pub async fn check_import_batches(
         &self,
         execution_id: Uuid,
@@ -494,6 +556,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks backup size (MB) against the execution's backup size limit.
     pub async fn check_backup_size(
         &self,
         execution_id: Uuid,
@@ -509,6 +572,7 @@ impl GovernorEngine {
             .await
     }
 
+    /// Checks restore size (MB) against the execution's restore size limit.
     pub async fn check_restore_size(
         &self,
         execution_id: Uuid,
@@ -524,21 +588,25 @@ impl GovernorEngine {
             .await
     }
 
+    /// Returns a clone of the execution context with the given id, if active.
     pub async fn get_execution(&self, id: Uuid) -> Option<ExecutionContext> {
         let execs = self.inner.executions.read().await;
         execs.get(&id).cloned()
     }
 
+    /// Lists all active execution contexts.
     pub async fn list_executions(&self) -> Vec<ExecutionContext> {
         let execs = self.inner.executions.read().await;
         execs.values().cloned().collect()
     }
 
+    /// Lists all recorded policy violations.
     pub async fn list_violations(&self) -> Vec<Violation> {
         let violations = self.inner.violations.read().await;
         violations.clone()
     }
 
+    /// Lists violations recorded at or after the given timestamp.
     pub async fn violations_since(&self, since: chrono::DateTime<chrono::Utc>) -> Vec<Violation> {
         let violations = self.inner.violations.read().await;
         violations
@@ -548,6 +616,7 @@ impl GovernorEngine {
             .collect()
     }
 
+    /// Returns a high-level status snapshot of the governor.
     pub async fn status(&self) -> GovernorStatus {
         let enabled = self.is_enabled().await;
         let policies_loaded = self.inner.policies.read().await.list_policies().len();
@@ -562,13 +631,11 @@ impl GovernorEngine {
         }
     }
 
+    /// Returns an aggregated metrics snapshot sampled from active executions.
     pub async fn metrics_snapshot(&self) -> GovernorMetricsSnapshot {
         let (memory_usage_bytes, cpu_time_ms, ffi_calls_total) = {
             let execs = self.inner.executions.read().await;
-            let mem: u64 = execs
-                .values()
-                .map(|e| e.usage.memory.allocated_bytes)
-                .sum();
+            let mem: u64 = execs.values().map(|e| e.usage.memory.allocated_bytes).sum();
             let cpu: u64 = execs.values().map(|e| e.usage.cpu.cpu_time_ms).sum();
             let ffi: u64 = execs.values().map(|e| e.usage.ffi.calls).sum();
             (mem, cpu, ffi)
@@ -584,10 +651,12 @@ impl GovernorEngine {
         }
     }
 
+    /// Lists all currently loaded policies.
     pub async fn policies(&self) -> Vec<Policy> {
         self.inner.policies.read().await.list_policies()
     }
 
+    /// Adds or replaces a policy on the engine.
     pub async fn update_policy(
         &self,
         name: &str,
@@ -606,6 +675,7 @@ impl GovernorEngine {
         pm.add_policy(policy);
     }
 
+    /// Returns an [`Arc`]-shared handle over the same underlying engine.
     pub fn shared(&self) -> Arc<GovernorEngine> {
         Arc::new(GovernorEngine {
             inner: self.inner.clone(),
@@ -642,6 +712,9 @@ fn limit_name(field: &str) -> &'static str {
     }
 }
 
+/// A live handle to a registered execution, used to report usage against the
+/// execution's resolved limits. Dropping the handle without calling
+/// [`finish`](Self::finish) leaves the execution registered.
 pub struct ExecutionHandle {
     engine: Arc<Inner>,
     execution_id: Uuid,
@@ -649,14 +722,17 @@ pub struct ExecutionHandle {
 }
 
 impl ExecutionHandle {
+    /// Returns the execution id this handle references.
     pub fn id(&self) -> Uuid {
         self.execution_id
     }
 
+    /// Returns the enforcement action resolved for this execution.
     pub fn action(&self) -> EnforcementAction {
         self.action
     }
 
+    /// Checks current memory usage (MB) against this execution's memory limit.
     pub async fn check_memory(&self, current_mb: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
@@ -672,6 +748,7 @@ impl ExecutionHandle {
             .await
     }
 
+    /// Checks execution steps against this execution's step limit.
     pub async fn check_steps(&self, steps: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
@@ -694,217 +771,376 @@ impl ExecutionHandle {
                 .get(&self.execution_id)
                 .and_then(|e| e.limits.cpu.max_cpu_time_ms)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_cpu_time_ms", cpu_time_ms, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_cpu_time_ms", cpu_time_ms, limit)
+            .await
     }
 
-    pub async fn check_query_complexity(&self, complexity: u32) -> Result<EnforcementAction, String> {
+    pub async fn check_query_complexity(
+        &self,
+        complexity: u32,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.query_complexity.max_query_complexity)
                 .map(|v| v as u64)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_query_complexity", complexity as u64, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_query_complexity",
+                complexity as u64,
+                limit,
+            )
+            .await
     }
 
     pub async fn check_join_count(&self, joins: u32) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.query_complexity.max_join_count)
                 .map(|v| v as u64)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_join_count", joins as u64, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_join_count", joins as u64, limit)
+            .await
     }
 
     pub async fn check_sort_rows(&self, rows: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.query_complexity.max_sort_rows)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_sort_rows", rows, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_sort_rows", rows, limit)
+            .await
     }
 
     pub async fn check_pipeline_depth(&self, depth: u32) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.pipeline.max_pipeline_depth)
                 .map(|v| v as u64)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_pipeline_depth", depth as u64, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_pipeline_depth", depth as u64, limit)
+            .await
     }
 
     pub async fn check_pipeline_stages(&self, stages: u32) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.pipeline.max_pipeline_stages)
                 .map(|v| v as u64)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_pipeline_stages", stages as u64, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_pipeline_stages",
+                stages as u64,
+                limit,
+            )
+            .await
     }
 
     pub async fn check_ffi_calls(&self, calls: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.ffi.max_ffi_calls)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_ffi_calls", calls, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_ffi_calls", calls, limit)
+            .await
     }
 
     pub async fn check_ffi_memory(&self, memory_mb: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.ffi.max_ffi_memory_mb)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_ffi_memory_mb", memory_mb, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_ffi_memory_mb", memory_mb, limit)
+            .await
     }
 
     pub async fn check_ffi_time(&self, time_ms: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.ffi.max_ffi_time_ms)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_ffi_time_ms", time_ms, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_ffi_time_ms", time_ms, limit)
+            .await
     }
 
-    pub async fn check_training_iterations(&self, iterations: u64) -> Result<EnforcementAction, String> {
+    pub async fn check_training_iterations(
+        &self,
+        iterations: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.aiml.max_training_iterations)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_training_iterations", iterations, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_training_iterations",
+                iterations,
+                limit,
+            )
+            .await
     }
 
-    pub async fn check_prediction_batch(&self, batch_size: u64) -> Result<EnforcementAction, String> {
+    pub async fn check_prediction_batch(
+        &self,
+        batch_size: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.aiml.max_prediction_batch_size)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_prediction_batch_size", batch_size, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_prediction_batch_size",
+                batch_size,
+                limit,
+            )
+            .await
     }
 
-    pub async fn check_embedding_batch(&self, batch_size: u64) -> Result<EnforcementAction, String> {
+    pub async fn check_embedding_batch(
+        &self,
+        batch_size: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.aiml.max_embedding_batch_size)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_embedding_batch_size", batch_size, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_embedding_batch_size",
+                batch_size,
+                limit,
+            )
+            .await
     }
 
-    pub async fn check_vector_candidates(&self, candidates: u64) -> Result<EnforcementAction, String> {
+    pub async fn check_vector_candidates(
+        &self,
+        candidates: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.vector.max_vector_candidates)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_vector_candidates", candidates, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_vector_candidates",
+                candidates,
+                limit,
+            )
+            .await
     }
 
-    pub async fn check_vector_expansions(&self, expansions: u64) -> Result<EnforcementAction, String> {
+    pub async fn check_vector_expansions(
+        &self,
+        expansions: u64,
+    ) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.vector.max_vector_expansions)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_vector_expansions", expansions, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(
+                self.execution_id,
+                "max_vector_expansions",
+                expansions,
+                limit,
+            )
+            .await
     }
 
     pub async fn check_graph_depth(&self, depth: u32) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.graph.max_graph_depth)
                 .map(|v| v as u64)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_graph_depth", depth as u64, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_graph_depth", depth as u64, limit)
+            .await
     }
 
     pub async fn check_graph_nodes(&self, nodes: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.graph.max_graph_nodes)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_graph_nodes", nodes, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_graph_nodes", nodes, limit)
+            .await
     }
 
     pub async fn check_graph_edges(&self, edges: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.graph.max_graph_edges)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_graph_edges", edges, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_graph_edges", edges, limit)
+            .await
     }
 
     pub async fn check_import_rows(&self, rows: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.migration.max_import_rows)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_import_rows", rows, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_import_rows", rows, limit)
+            .await
     }
 
     pub async fn check_import_batches(&self, batches: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.migration.max_import_batches)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_import_batches", batches, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_import_batches", batches, limit)
+            .await
     }
 
     pub async fn check_backup_size(&self, size_mb: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.backup.max_backup_size)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_backup_size", size_mb, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_backup_size", size_mb, limit)
+            .await
     }
 
     pub async fn check_restore_size(&self, size_mb: u64) -> Result<EnforcementAction, String> {
         let limit = {
             let execs = self.engine.executions.read().await;
-            execs.get(&self.execution_id)
+            execs
+                .get(&self.execution_id)
                 .and_then(|e| e.limits.backup.max_restore_size)
         };
-        let engine = GovernorEngine { inner: self.engine.clone() };
-        engine.check_limit(self.execution_id, "max_restore_size", size_mb, limit).await
+        let engine = GovernorEngine {
+            inner: self.engine.clone(),
+        };
+        engine
+            .check_limit(self.execution_id, "max_restore_size", size_mb, limit)
+            .await
     }
 
     pub async fn finish(self) {
-        self.engine.active_executions.fetch_sub(1, Ordering::Relaxed);
+        self.engine
+            .active_executions
+            .fetch_sub(1, Ordering::Relaxed);
         let mut execs = self.engine.executions.write().await;
         execs.remove(&self.execution_id);
     }
@@ -1119,7 +1355,12 @@ mod tests {
         }
         let engine = test_engine_with_config(config);
         let handle = engine
-            .start_execution("vec-test".to_string(), WorkloadType::VectorSearch, None, None)
+            .start_execution(
+                "vec-test".to_string(),
+                WorkloadType::VectorSearch,
+                None,
+                None,
+            )
             .await;
         let result = handle.check_vector_candidates(200).await;
         assert!(result.is_err());
@@ -1135,7 +1376,12 @@ mod tests {
         }
         let engine = test_engine_with_config(config);
         let handle = engine
-            .start_execution("graph-test".to_string(), WorkloadType::GraphTraversal, None, None)
+            .start_execution(
+                "graph-test".to_string(),
+                WorkloadType::GraphTraversal,
+                None,
+                None,
+            )
             .await;
         let result = handle.check_graph_depth(10).await;
         assert!(result.is_err());
@@ -1151,7 +1397,12 @@ mod tests {
         }
         let engine = test_engine_with_config(config);
         let handle = engine
-            .start_execution("import-test".to_string(), WorkloadType::Migration, None, None)
+            .start_execution(
+                "import-test".to_string(),
+                WorkloadType::Migration,
+                None,
+                None,
+            )
             .await;
         let result = handle.check_import_rows(2000).await;
         assert!(result.is_err());

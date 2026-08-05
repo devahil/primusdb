@@ -1,3 +1,11 @@
+//! Applies committed consensus blocks to the storage engines.
+//!
+//! [`ConsensusStateMachine`] tracks the last applied block height and a set of
+//! already-applied transaction IDs so that blocks can be applied idempotently.
+//! Each transaction's operations are translated into
+//! [`crate::transaction::TransactionOperation`] values and executed through
+//! the per-storage-type engine registry.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -6,6 +14,8 @@ use crate::storage::StorageEngine;
 use crate::Result;
 use crate::StorageType;
 
+/// Applies committed blocks to storage engines, tracking progress so that
+/// blocks are never applied twice.
 pub struct ConsensusStateMachine {
     engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
     last_applied_height: Mutex<u64>,
@@ -19,6 +29,7 @@ fn parse_storage_type(s: &str) -> Result<StorageType> {
         "Columnar" => Ok(StorageType::Columnar),
         "Vector" => Ok(StorageType::Vector),
         "KeyValue" => Ok(StorageType::KeyValue),
+        "TimeSeries" => Ok(StorageType::TimeSeries),
         _ => Err(crate::Error::ValidationError(format!(
             "Unknown storage type: {}",
             s
@@ -27,6 +38,7 @@ fn parse_storage_type(s: &str) -> Result<StorageType> {
 }
 
 impl ConsensusStateMachine {
+    /// Create a state machine bound to the given engine registry.
     pub fn new(engines: HashMap<StorageType, Arc<dyn StorageEngine>>) -> Self {
         Self {
             engines,
@@ -35,10 +47,12 @@ impl ConsensusStateMachine {
         }
     }
 
+    /// Height of the most recently applied block.
     pub fn last_applied_height(&self) -> u64 {
         *self.last_applied_height.lock().unwrap()
     }
 
+    /// Apply a committed block, skipping transactions already applied.
     pub async fn apply_block(&self, block: &Block) -> Result<()> {
         for tx in &block.transactions {
             if self.applied_txns.lock().unwrap().contains(&tx.id) {

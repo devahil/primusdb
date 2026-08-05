@@ -8,126 +8,60 @@
 /*!
 # PrimusDB Storage Engine Architecture
 
-This module defines the storage layer of PrimusDB, providing a unified interface
-for multiple storage engines optimized for different data access patterns.
+This module defines the storage layer of PrimusDB: a shared [`StorageEngine`]
+trait plus schema/field/index/constraint types, and six engine implementations
+(columnar, vector, document, relational, key-value, time-series). Each engine
+persists to its own embedded sled database under the configured data directory.
 
 ## Storage Engine Types
 
 ```text
 Storage Engine Matrix
-═══════════════════════════════════════════════════════════════
 
-Feature Comparison:
-┌─────────────────┬───────────┬──────────┬──────────┬───────────┐
-│ Feature         │ Columnar  │ Vector   │ Document │ Relational│
-├─────────────────┼───────────┼──────────┼──────────┼───────────┤
-│ Primary Use     │ Analytics │ Search   │ Content  │ Business  │
-│ Data Structure  │ Columns   │ Vectors  │ JSON     │ Tables    │
-│ Query Pattern   │ OLAP      │ KNN      │ Document │ SQL       │
-│ Compression     │ High      │ Medium   │ Low      │ Medium    │
-│ Indexes         │ Bitmap    │ FAISS    │ B-Tree   │ B-Tree    │
-│ Transactions    │ Snapshot  │ None     │ MVCC     │ ACID      │
-│ Scaling         │ Partition │ Shard    │ Replica  │ Shard     │
-└─────────────────┴───────────┴──────────┴──────────┴───────────┘
+Engine        Columnar    Vector   Document  Relational Key-Value  Time Series
+------------  ----------  -------  --------  ---------  --------   -----------
+Sled dir      {data}/col  {data}/v {data}/d  {data}/re {data}/ke  {data}/time
+Record shape  JSON blob   JSON+vec Document  Row(typed) KvDocument Tagged point
+Query style   full scan   cosine   Mango ops SQL-like   CouchDB/M  time buckets
+Unique        ts keys     top-K    agg pipe  joins/FKs  _rev MVCC  rollups
 
-Storage Engine Interfaces:
-• StorageEngine trait - Core operations (CRUD + analytics)
-• Schema management - Table creation with constraints
-• Index management - Automatic and custom indexes
-• Transaction support - Varies by engine type
-• Performance optimization - Engine-specific tuning
+(Sled dirs are abbreviated; the full subdirectories are listed in each
+engine's module header.)
+
+StorageEngine trait (CRUD + analyze + lifecycle) --> 6 engines --> sled trees
 ```
 
-## Usage Examples
+## Shared Types
 
-### Creating Tables
+- [`Schema`], [`Field`], [`FieldType`], [`Index`], [`IndexType`], [`Constraint`],
+  [`ConstraintType`], [`ReferentialAction`]: schema and integrity model shared
+  by the engines (each engine decides how much of it to enforce).
+- [`TableInfo`]: introspection metadata (schema, row count, size, timestamps).
+- [`Sequence`], [`View`], [`Trigger`]: database objects used by the relational
+  engine and exposed through the query layer.
+- [`StorageEngineType`]: runtime identifier for an engine, used by the API and
+  CLI to dispatch operations.
+
+## Usage Example
+
 ```ignore
-use primusdb::storage::{Schema, Field, FieldType, Index};
-
-// Define a document collection schema
-let user_schema = Schema {
-    fields: vec![
-        Field {
-            name: "id".to_string(),
-            field_type: FieldType::String,
-            nullable: false,
-            default_value: None,
-        },
-        Field {
-            name: "email".to_string(),
-            field_type: FieldType::String,
-            nullable: false,
-            default_value: None,
-        },
-        Field {
-            name: "age".to_string(),
-            field_type: FieldType::Integer,
-            nullable: true,
-            default_value: Some(serde_json::json!(25)),
-        },
-    ],
-    indexes: vec![
-        Index {
-            name: "email_idx".to_string(),
-            fields: vec!["email".to_string()],
-            index_type: IndexType::Unique,
-        },
-    ],
-    constraints: vec![],
-};
-
-// Create the table
-storage_engine.create_table("users", &user_schema).await?;
+let engine = storage::columnar::ColumnarEngine::new(&config)?;
+engine.create_table("users", &schema)?;
+engine.insert("users", &serde_json::json!({"id": "u1", "age": 30}), &txn).await?;
+let rows = engine.select("users", None, 10, 0, &txn).await?;
 ```
 
-### Data Operations
-```ignore
-// Insert data
-let user_data = serde_json::json!({
-    "id": "user123",
-    "email": "user@example.com",
-    "age": 30
-});
-storage_engine.insert("users", &user_data, &transaction).await?;
+## Engine Notes
 
-// Query with conditions
-let conditions = serde_json::json!({"age": {"$gt": 25}});
-let users = storage_engine.select("users", Some(&conditions), Some(10), Some(0), &transaction).await?;
-
-// Update records
-let update_data = serde_json::json!({"age": 31});
-let updated_count = storage_engine.update("users", Some(&conditions), &update_data, &transaction).await?;
-```
-
-## Performance Characteristics
-
-### Columnar Engine
-- **Best for**: Analytical queries, aggregations, reporting
-- **Compression**: LZ4 with bitmap indexes for fast filtering
-- **Query Speed**: 1M+ rows/second for aggregations
-- **Storage**: 20-50% smaller than row-based storage
-- **Limitations**: Slower single-row updates
-
-### Vector Engine
-- **Best for**: Similarity search, ML embeddings, recommendations
-- **Indexing**: FAISS-style with SIMD acceleration
-- **Query Speed**: Sub-millisecond similarity search
-- **Scalability**: Efficient sharding for large datasets
-- **Limitations**: No complex filtering beyond vector distance
-
-### Document Engine
-- **Best for**: Flexible schemas, nested data, content management
-- **Indexing**: Dynamic B-Tree indexes on any field
-- **Query Speed**: Fast document retrieval with path queries
-- **Flexibility**: Schema-less with optional validation
-- **Limitations**: No complex joins or aggregations
-
-### Relational Engine
-- **Best for**: Traditional applications, complex relationships
-- **Features**: Full SQL support, foreign keys, ACID transactions
-- **Query Speed**: Optimized for OLTP workloads
-- **Consistency**: Strong consistency with serializable isolation
-- **Limitations**: Fixed schema, less flexible than document storage
+- Columnar, vector, relational, key-value and time-series are all backed by
+  embedded sled databases opened under `config.storage.data_dir`. See each
+  module's header for its exact on-disk layout.
+- The columnar engine stores whole JSON rows today; per-column compression and
+  bitmap indexes are planned, not implemented.
+- The vector engine answers queries with a brute-force cosine scan; no
+  approximate (IVHNSW/quantised) indexes are built yet.
+- Encryption flags on document/key-value collections are flag-only: the
+  read/write paths do not currently transform stored data.
 */
 
 use crate::{Record, Result};
@@ -266,6 +200,15 @@ pub trait StorageEngine: Send + Sync {
     /// # Returns
     /// TableInfo structure with schema, size, and performance statistics
     async fn table_info(&self, table: &str) -> Result<TableInfo>;
+
+    /// Enumerate the names of all tables/collections in this engine.
+    ///
+    /// Used by unified search and discovery to route operations to existing
+    /// tables without a hardcoded catalog. Engines that cannot enumerate their
+    /// tables return an empty list.
+    fn list_tables(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Schema definition for tables/collections
@@ -771,26 +714,30 @@ pub mod vector;
 /// bulk operations, views, and Mango query syntax.
 pub mod keyvalue;
 
+/// Time Series storage engine implementation
+///
+/// Optimized for IoT metrics, logs, and temporal data with
+/// tag-based partitioning, retention policies, and aggregation.
+pub mod timeseries;
+
+/// Shared validation helpers for storage engines
+///
+/// Centralizes strict numeric/vector parsing and JSON shape checks so
+/// every engine rejects malformed input instead of silently dropping it.
+pub mod validation;
+
 /*
-Storage Module Hierarchy:
-══════════════════════════
+Storage Module Layout:
+══════════════════════
 
 storage/
-├── mod.rs              - Core traits and types
-├── columnar/           - Columnar analytics engine
-│   ├── mod.rs         - Columnar storage implementation
-│   └── index.rs       - Bitmap and compression indexes
-├── document/           - Document storage engine
-│   ├── mod.rs         - JSON document storage
-│   └── index.rs       - Dynamic field indexing
-├── relational/         - Relational/SQL engine
-│   ├── mod.rs         - Table storage with constraints
-│   ├── transaction.rs - ACID transaction support
-│   └── query.rs       - SQL parser and optimizer
-└── vector/             - Vector similarity engine
-    ├── mod.rs         - Vector storage and indexing
-    ├── similarity.rs  - Distance metrics and search
-    └── quantization.rs- Vector compression techniques
+├── mod.rs       - Core traits and shared types
+├── columnar.rs  - Columnar analytics engine (LZ4 + bitmap indexes)
+├── document.rs  - JSON document storage with dynamic indexing
+├── keyvalue.rs  - CouchDB-compatible key-value/document engine
+├── relational.rs- Relational/SQL engine with ACID transactions
+├── timeseries.rs- Time-series engine with tag partitioning
+└── vector.rs    - Vector similarity engine with distance metrics
 */
 
 /// Storage engine type enumeration
@@ -808,9 +755,12 @@ pub enum StorageEngineType {
     Relational,
     /// Key-Value storage engine - optimized for high-speed access
     KeyValue,
+    /// Time Series storage engine - optimized for IoT, metrics, and temporal data
+    TimeSeries,
 }
 
 impl StorageEngineType {
+    /// Return the lowercase string identifier of this engine type.
     pub fn as_str(&self) -> &'static str {
         match self {
             StorageEngineType::Columnar => "columnar",
@@ -818,9 +768,12 @@ impl StorageEngineType {
             StorageEngineType::Document => "document",
             StorageEngineType::Relational => "relational",
             StorageEngineType::KeyValue => "keyvalue",
+            StorageEngineType::TimeSeries => "timeseries",
         }
     }
 
+    /// Parse a case-insensitive engine type from a string identifier
+    /// (accepts `keyvalue` or `kv` for the key-value engine).
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
@@ -829,6 +782,7 @@ impl StorageEngineType {
             "document" => Some(StorageEngineType::Document),
             "relational" => Some(StorageEngineType::Relational),
             "keyvalue" | "kv" => Some(StorageEngineType::KeyValue),
+            "timeseries" | "ts" => Some(StorageEngineType::TimeSeries),
             _ => None,
         }
     }

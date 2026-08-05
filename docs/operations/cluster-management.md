@@ -1,6 +1,6 @@
 # Cluster Management
 
-This guide covers cluster architecture, CLI commands, TUI cluster management, federation, and known limitations in PrimusDB v1.3.1-alpha.
+This guide covers cluster architecture, CLI commands, federation, and known limitations in PrimusDB v1.3.2-alpha.
 
 ---
 
@@ -310,20 +310,6 @@ primusdb cluster config --set replication_factor=5
 
 ---
 
-## TUI Cluster Management
-
-The TUI provides a read-only Clusters section that displays:
-
-- **Cluster Status** — Raw JSON from `GET /api/v1/cluster/status`
-- **Cluster Nodes** — Formatted table with ID, Role, Status (color-coded), and Address
-- **Cluster Health** — Raw JSON from `GET /api/v1/cache/cluster/health`
-
-Press `r` to refresh all three views. The TUI does **not** support join, leave, rebalance, failover, sync, inspect, topology, or config operations — use the CLI commands listed above.
-
-For full details, see [docs/tui/cluster-management.md](../tui/cluster-management.md).
-
----
-
 ## Federation
 
 Federation connects multiple PrimusDB clusters across regions for global deployments.
@@ -376,7 +362,7 @@ curl http://localhost:8080/api/v1/federation/metrics
 
 ---
 
-## Known Limitations (v1.3.1-alpha)
+## Known Limitations (v1.3.2-alpha)
 
 | Feature | Status |
 |---------|--------|

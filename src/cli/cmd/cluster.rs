@@ -1,9 +1,15 @@
+//! Cluster operation subcommands (`cluster status`, `nodes`, `join`, ...).
+//!
+//! All operations run in client mode against the `/api/v1/cluster/*`
+//! endpoints on `GlobalArgs.server_url`.
+
 use std::path::PathBuf;
 
 use crate::cli::command::{ClusterSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch a `cluster` subcommand to its handler.
 pub async fn handle_cluster(
     cmd: ClusterSubcommands,
     global: &GlobalArgs,

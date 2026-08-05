@@ -1,5 +1,7 @@
 # TUI Cluster Management
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The Clusters section provides visibility into cluster state, including an ASCII topology diagram, a nodes table, cluster health, and recent events.
 
 ## Prerequisites

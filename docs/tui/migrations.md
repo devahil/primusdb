@@ -1,5 +1,7 @@
 # TUI Migrations & Migration Wizard
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The Migrations section provides a guided **12-step migration wizard** for importing data from external databases into PrimusDB. When the wizard is not active, it shows supported sources and CLI commands.
 
 ## Supported Sources

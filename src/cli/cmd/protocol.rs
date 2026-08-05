@@ -1,7 +1,14 @@
+//! Protocol-layer subcommands (`protocol health`, `status`, `peers`,
+//! `metrics`).
+//!
+//! All operations run in client mode against the `/protocol/*` endpoints on
+//! `GlobalArgs.server_url`.
+
 use crate::cli::command::{GlobalArgs, ProtocolSubcommands};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch a `protocol` subcommand to its handler.
 pub async fn handle_protocol(
     cmd: ProtocolSubcommands,
     global: &GlobalArgs,

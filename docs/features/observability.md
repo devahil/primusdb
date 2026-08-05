@@ -16,10 +16,10 @@ Two HTTP endpoints provide liveness and readiness information:
 
 ```bash
 curl http://localhost:8080/health
-# → {"status":"ok"}
+# → {"success":true,"data":{"status":"healthy","node_id":"...","instance_id":"...","version":"1.3.2-alpha","uptime_seconds":12345,"architecture":"centralized"}}
 
 curl http://localhost:8080/status
-# → {"version":"1.3.1-alpha","uptime_secs":12345,"engines":{...}}
+# → {"success":true,"data":{"status":"running","uptime_seconds":12345,"version":"1.3.2-alpha","storage_engines":{"columnar":"available","vector":"available","document":"available","relational":"available","keyvalue":"available"},"ai_enabled":true,"cache_enabled":true,"transactions_enabled":true}}
 ```
 
 The `primusdb server health` CLI command wraps these checks:
@@ -161,7 +161,7 @@ primusdb server start --log-level debug
 Equivalent to:
 
 ```bash
-RUST_LOG=debug primusdb-server
+RUST_LOG=debug primusdb server start
 ```
 
 ---

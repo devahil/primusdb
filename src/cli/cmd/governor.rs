@@ -1,11 +1,16 @@
+//! Resource Governor subcommands (`governor status`, `policies`, `inspect`,
+//! `metrics`, `violations`, `set`).
+//!
+//! These drive the in-process [`crate::governor`] engine directly rather
+//! than the HTTP API.
+
 use crate::cli::command::{GlobalArgs, GovernorSubcommands};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
-use crate::governor::{
-    EnforcementAction, ExecutionLimits, GovernorConfig,
-};
 use crate::governor::engine::GovernorEngine;
+use crate::governor::{EnforcementAction, ExecutionLimits, GovernorConfig};
 use crate::Result;
 
+/// Dispatch a `governor` subcommand to its handler.
 pub async fn handle_governor(
     cmd: GovernorSubcommands,
     _global: &GlobalArgs,
@@ -89,10 +94,7 @@ async fn cmd_status(fmt: &OutputFormat) -> Result<()> {
     let engine = GovernorEngine::new(GovernorConfig::default());
     let status = engine.status().await;
     let data = OutputData::Table {
-        headers: vec![
-            "Field".to_string(),
-            "Value".to_string(),
-        ],
+        headers: vec!["Field".to_string(), "Value".to_string()],
         rows: vec![
             vec!["Enabled".to_string(), status.enabled.to_string()],
             vec![
@@ -103,22 +105,13 @@ async fn cmd_status(fmt: &OutputFormat) -> Result<()> {
                 "Total Violations".to_string(),
                 status.total_violations.to_string(),
             ],
-            vec![
-                "Blocked".to_string(),
-                status.blocked_count.to_string(),
-            ],
-            vec![
-                "Throttled".to_string(),
-                status.throttled_count.to_string(),
-            ],
+            vec!["Blocked".to_string(), status.blocked_count.to_string()],
+            vec!["Throttled".to_string(), status.throttled_count.to_string()],
             vec![
                 "Policies Loaded".to_string(),
                 status.policies_loaded.to_string(),
             ],
-            vec![
-                "Uptime (s)".to_string(),
-                status.uptime_seconds.to_string(),
-            ],
+            vec!["Uptime (s)".to_string(), status.uptime_seconds.to_string()],
         ],
     };
     println!("{}", format_output(&data, *fmt));
@@ -174,25 +167,15 @@ async fn cmd_inspect(execution_id: String, fmt: &OutputFormat) -> Result<()> {
                         "Workload Type".to_string(),
                         ctx.workload_type.as_str().to_string(),
                     ],
-                    vec![
-                        "Action".to_string(),
-                        ctx.action.as_str().to_string(),
-                    ],
-                    vec![
-                        "Created".to_string(),
-                        ctx.created_at.to_rfc3339(),
-                    ],
-                    vec![
-                        "Elapsed (ms)".to_string(),
-                        ctx.elapsed_ms().to_string(),
-                    ],
+                    vec!["Action".to_string(), ctx.action.as_str().to_string()],
+                    vec!["Created".to_string(), ctx.created_at.to_rfc3339()],
+                    vec!["Elapsed (ms)".to_string(), ctx.elapsed_ms().to_string()],
                 ],
             };
             println!("{}", format_output(&data, *fmt));
         }
         None => {
-            let data =
-                OutputData::Message(format!("Execution not found: {}", execution_id));
+            let data = OutputData::Message(format!("Execution not found: {}", execution_id));
             println!("{}", format_output(&data, *fmt));
         }
     }
@@ -358,9 +341,7 @@ async fn cmd_set(
         },
     };
     let engine = GovernorEngine::new(GovernorConfig::default());
-    engine
-        .update_policy(&name, limits, action, scope)
-        .await;
+    engine.update_policy(&name, limits, action, scope).await;
     let data = OutputData::Message(format!("Policy '{}' updated.", name));
     println!("{}", format_output(&data, *fmt));
     Ok(())

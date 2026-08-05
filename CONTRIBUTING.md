@@ -132,7 +132,6 @@ src/
 │   ├── command.rs   # Clap command definitions
 │   ├── mod.rs       # Dispatch logic
 │   ├── output.rs    # Output formatting (table/json/csv/yaml/plain)
-│   ├── tui.rs       # Terminal UI
 │   ├── discovery.rs # Node discovery
 │   └── cmd/         # Command handlers
 │       ├── server.rs
@@ -177,7 +176,6 @@ docs/               # Documentation
 ├── features/
 ├── contributors/
 ├── cli/
-├── tui/
 ├── reference/
 ├── security/
 └── README.md

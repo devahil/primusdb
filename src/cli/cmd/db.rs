@@ -1,7 +1,14 @@
+//! Database management subcommands (`db list`, `db create`, `db drop`, ...).
+//!
+//! All operations run in client mode: they issue HTTP requests against
+//! `GlobalArgs.server_url` and render the response through `fmt`.
+
 use crate::cli::command::{DbSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
+use serde_json::json;
 
+/// Dispatch a `db` subcommand to its handler.
 pub async fn handle_db(cmd: DbSubcommands, global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
     match cmd {
         DbSubcommands::List { all, engine } => cmd_list(all, engine, global, fmt).await,
@@ -23,7 +30,7 @@ async fn cmd_list(
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/info-schema/relational/tables", global.server_url);
+    let url = format!("{}/api/v1/databases", global.server_url);
 
     match client.get(&url).send().await {
         Ok(resp) => {
@@ -49,20 +56,24 @@ async fn cmd_list(
 async fn cmd_create(
     name: String,
     engine: String,
-    _namespace: Option<String>,
+    namespace: Option<String>,
     global: &GlobalArgs,
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/api/v1/table/{}/{}/create",
-        global.server_url, engine, name
-    );
+    let url = format!("{}/api/v1/databases", global.server_url);
 
-    match client.post(&url).send().await {
+    let body = json!({
+        "name": name,
+        "engines": [engine],
+        "namespace": namespace,
+    });
+
+    match client.post(&url).json(&body).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
-                let data = OutputData::Message(format!("Database '{}' created", name));
+                let json: serde_json::Value = resp.json().await.unwrap_or_default();
+                let data = OutputData::Json(json);
                 println!("{}", format_output(&data, *fmt));
             } else {
                 let status = resp.status();
@@ -86,10 +97,7 @@ async fn cmd_drop(
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/api/v1/table/relational/{}/drop",
-        global.server_url, name
-    );
+    let url = format!("{}/api/v1/namespaces/{}", global.server_url, name);
 
     match client.delete(&url).send().await {
         Ok(resp) => {
@@ -118,10 +126,7 @@ async fn cmd_describe(
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/api/v1/table/relational/{}/info",
-        global.server_url, name
-    );
+    let url = format!("{}/api/v1/namespaces/{}/resources", global.server_url, name);
 
     match client.get(&url).send().await {
         Ok(resp) => {

@@ -158,7 +158,7 @@ max_file_size = 104857600
 max_files = 10
 ```
 
-> **Note:** File logging and rotation are planned features. In v1.3.1-alpha, log output goes to stderr. Use shell redirection or a process manager to capture logs to a file.
+> **Note:** File logging and rotation are planned features. In v1.3.2-alpha, log output goes to stderr. Use shell redirection or a process manager to capture logs to a file.
 
 ### Shell Redirection Example
 

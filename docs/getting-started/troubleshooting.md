@@ -161,9 +161,8 @@ cargo build
 ```bash
 # Use the unified CLI
 ./target/release/primusdb --version
-
-# The legacy binaries (primusdb-server, primusdb-cli) have fewer features
-# and are deprecated. Always prefer `primusdb`.
+# The legacy binaries (primusdb-server, primusdb-cli) were removed in v1.3.2-alpha.
+# Use `primusdb server start` to run the server and `primusdb <command>` for everything else.
 ```
 
 2. **Not built from source.** There are no pre-compiled binaries. The version in your package manager (if any) may be outdated. Always build from the repository.
@@ -212,7 +211,7 @@ Report bugs and feature requests at:
 
 [https://github.com/devahil/primusdb/issues](https://github.com/devahil/primusdb/issues)
 
-Check the existing issues before filing a new one. The issue tracker includes a template (`ISSUES-1.3.1-alpha.md`) with guidelines for reporting problems.
+Check the existing issues before filing a new one. The issue tracker includes a template (`ISSUES-1.3.2-alpha.md`) with guidelines for reporting problems.
 
 ### Community Resources
 

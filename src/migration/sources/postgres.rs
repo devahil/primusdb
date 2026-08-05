@@ -1,3 +1,10 @@
+//! PostgreSQL source implementation for the migration framework.
+//!
+//! Connects via the `tokio-postgres` crate and reads column metadata from
+//! `information_schema.columns`. Enabled by the `postgres-source` feature; a
+//! fallback implementation reports [`crate::Error::Unsupported`] when the
+//! feature is disabled.
+
 #[allow(unused_imports)]
 use super::super::source::{
     MigrationSource, RowStream, SourceColumn, SourceDatabase, SourceObject, SourceSchema,
@@ -14,6 +21,8 @@ pub struct PostgresSource {
 }
 
 impl PostgresSource {
+    /// Creates a source from a PostgreSQL URL, keeping a masked copy of the
+    /// URL for display.
     pub fn new(url: &str) -> Result<Self> {
         let masked = crate::migration::report::MigrationReport::mask_url(url);
         Ok(Self {

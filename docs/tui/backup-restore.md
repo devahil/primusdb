@@ -1,5 +1,7 @@
 # TUI Backups
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The Backups section lists backup files found in the local `./backups/` directory. It supports both a **simple list** view and an **enhanced detail** view when a `.index.json` manifest is present.
 
 ## How It Works

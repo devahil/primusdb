@@ -1,5 +1,7 @@
 # TUI Dashboard
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The Dashboard is the default section shown on TUI startup. It provides an at-a-glance overview: connection info, health gauges, ASCII bar charts, and discovery results.
 
 ## Connected View

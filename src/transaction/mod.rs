@@ -1,131 +1,77 @@
 /*!
 # PrimusDB Transaction Manager - ACID Compliance Layer
 
-The transaction manager provides ACID (Atomicity, Consistency, Isolation, Durability)
-guarantees for PrimusDB operations. It coordinates multi-operation transactions,
-manages concurrency control, and ensures data consistency across storage engines.
+The transaction manager coordinates multi-operation transactions: it journals
+operations to a sled-backed WAL, seeks agreement through the consensus engine,
+commits durably (journal flush), and rolls back via per-operation before-images.
+It targets ACID semantics; see the isolation caveat below for the current gap.
 
-## ACID Properties Implementation
-
-```text
-ACID Properties in PrimusDB
-═══════════════════════════════════════════════════════════════
-
-┌─────────────────────────────────────────────────────────┐
-│                ATOMICITY                                │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  "All or Nothing" Principle                    │    │
-│  │  • Transaction either fully completes         │    │
-│  │  • Or fully rolls back on failure             │    │
-│  │  • No partial state changes                    │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│                CONSISTENCY                              │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Data Integrity Preservation                    │    │
-│  │  • Database constraints maintained              │    │
-│  │  • Referential integrity enforced               │    │
-│  │  • Business rules preserved                     │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│                ISOLATION                               │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Concurrent Transaction Separation              │    │
-│  │  • Read Uncommitted: Dirty reads allowed       │    │
-│  │  • Read Committed: No dirty reads              │    │
-│  │  • Repeatable Read: Consistent reads           │    │
-│  │  • Serializable: Full isolation                │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│                DURABILITY                               │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Crash Recovery & Persistence                   │    │
-│  │  • WAL (Write-Ahead Logging)                   │    │
-│  │  • Transaction log persistence                 │    │
-│  │  • Automatic crash recovery                    │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Transaction Lifecycle
+## Architecture
 
 ```text
-Transaction Execution Flow
-═══════════════════════════════════════════════════════════════
-
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  BEGIN      │ -> │  EXECUTE    │ -> │  COMMIT     │
-│  Transaction│    │  Operations │    │  Changes    │
-└─────────────┘    └─────────────┘    └─────────────┘
-       │                   │                   │
-       │                   │                   │
-       v                   v                   v
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  Acquire    │    │  Log        │    │  Persist    │
-│  Locks      │    │  Operations │    │  Changes    │
-└─────────────┘    └─────────────┘    └─────────────┘
-
-   On Failure: ROLLBACK → Release Locks → Cleanup
+TransactionManager
+  ├─ begin_transaction        -> logs BEGIN marker, returns Transaction
+  ├─ commit_transaction       -> journal ops -> consensus -> flush journal
+  ├─ rollback_transaction     -> reverses executed ops via before-images
+  │                               / rollback data
+  ├─ create_savepoint / rollback_to_savepoint
+  ├─ FileTransactionLog       -> sled-backed operation log
+  └─ JournalManager           -> sled-backed journal (WAL) with recovery
 ```
+
+## ACID Properties
+
+```text
+ACID
+  ├─ Atomicity  - transaction fully commits or fully rolls back
+  │               (no partial state changes)
+  ├─ Consistency- storage engines enforce schema/integrity rules
+  ├─ Isolation  - IsolationLevel is recorded per transaction, but the
+  │               storage engines do not yet act on it: reads/writes are
+  │               not serialized by any locking or MVCC scheme
+  └─ Durability - journal flushed to disk before commit returns
+```
+
+> **Isolation caveat**: the four [`IsolationLevel`] values are accepted and
+> stored, but no engine consults them today — the level does not currently
+> change read/write behaviour. Concurrency control is effectively
+> "no isolation between concurrent transactions".
 
 ## Isolation Levels
 
-### Read Uncommitted (Lowest Isolation)
-- **Allows**: Dirty reads, non-repeatable reads, phantom reads
-- **Performance**: Highest performance
-- **Use Case**: Bulk operations where consistency is not critical
+- **ReadUncommitted** - defined as allowing dirty reads, non-repeatable reads, phantom reads
+- **ReadCommitted** - defined as preventing dirty reads; the default level assigned to new transactions
+- **RepeatableRead** - defined as preventing dirty and non-repeatable reads; allows phantom reads
+- **Serializable** - defined as preventing all concurrency anomalies
 
-### Read Committed (Default)
-- **Prevents**: Dirty reads
-- **Allows**: Non-repeatable reads, phantom reads
-- **Performance**: Good balance
-- **Use Case**: Most OLTP applications
+All four map to the same (currently unenforced) behaviour; they document intent
+for a future concurrency-control implementation.
 
-### Repeatable Read
-- **Prevents**: Dirty reads, non-repeatable reads
-- **Allows**: Phantom reads
-- **Performance**: Moderate
-- **Use Case**: Financial applications requiring consistent reads
+## Commit Flow
 
-### Serializable (Highest Isolation)
-- **Prevents**: All concurrency anomalies
-- **Performance**: Lowest performance
-- **Use Case**: High-stakes operations requiring absolute consistency
+1. Mark transaction `Prepared`.
+2. Write each operation as a journal entry (keyed by LSN).
+3. Propose the transaction to the consensus engine; if rejected, roll back.
+4. Mark `Committed`, flush the journal for durability.
 
-## Transaction Manager Architecture
+## Rollback Flow
 
-### Key Components:
-```text
-TransactionManager
-├── Transaction Log      - WAL for durability
-├── Lock Manager        - Concurrency control
-├── Isolation Engine    - MVCC/Snapshot isolation
-├── Recovery Manager    - Crash recovery
-└── Coordinator         - Distributed transaction coordination
-```
+- Fetch the transaction's executed operations from the transaction log.
+- Walk them in reverse, using `before_image`/`rollback_data` to re-insert
+  deletes, restore updates, and remove inserts through each storage engine.
 
-### Storage Integration:
-- **Columnar Engine**: Snapshot isolation, optimistic concurrency
-- **Vector Engine**: Simplified transactions (no complex locking)
-- **Document Engine**: MVCC with versioned documents
-- **Relational Engine**: Full ACID with 2PL (Two-Phase Locking)
-
-## Usage Examples
+## Usage
 
 ### Basic Transaction
 ```ignore
 use primusdb::transaction::{TransactionManager, IsolationLevel};
 
-let tx_manager = TransactionManager::new(&config)?;
+// TransactionManager::new requires a config, a consensus engine and the
+// per-storage-type engine registry.
+let tx_manager = TransactionManager::new(&config, consensus_engine, engines)?;
 
 // Start transaction
-let mut transaction = tx_manager.begin_transaction(IsolationLevel::ReadCommitted)?;
+let mut transaction = tx_manager.begin_transaction().await?;
 
 // Execute operations
 let insert_op = TransactionOperation {
@@ -135,7 +81,7 @@ let insert_op = TransactionOperation {
     ..Default::default()
 };
 
-transaction.add_operation(insert_op)?;
+transaction.operations.push(insert_op);
 let update_op = TransactionOperation {
     operation_type: OperationType::Update,
     table: "counters".to_string(),
@@ -144,148 +90,32 @@ let update_op = TransactionOperation {
     ..Default::default()
 };
 
-transaction.add_operation(update_op)?;
+transaction.operations.push(update_op);
 
 // Commit transaction
 tx_manager.commit_transaction(transaction).await?;
 ```
 
-### Nested Transactions (Savepoints)
+### Savepoints
 ```ignore
-let transaction = tx_manager.begin_transaction(IsolationLevel::Serializable)?;
+let transaction = tx_manager.begin_transaction().await?;
 
 // Create savepoint
-let savepoint = transaction.create_savepoint("before_critical_operation")?;
+let savepoint = tx_manager.create_savepoint(&transaction.id, "before_critical_operation").await?;
 
-transaction.add_operation(critical_operation)?;
+transaction.operations.push(critical_operation);
 
 // If something fails, rollback to savepoint
 if some_condition_fails {
-    transaction.rollback_to_savepoint(savepoint)?;
+    tx_manager.rollback_to_savepoint(&transaction.id, &savepoint.id).await?;
 }
 
 // Continue with other operations...
-transaction.add_operation(another_operation)?;
+transaction.operations.push(another_operation);
 
 // Final commit
 tx_manager.commit_transaction(transaction).await?;
 ```
-
-### Distributed Transactions (2PC)
-```ignore
-let distributed_tx = tx_manager.begin_distributed_transaction(
-    vec!["node1", "node2", "node3"]  // Participating nodes
-)?;
-
-// Phase 1: Prepare
-for node in distributed_tx.participants() {
-    node.prepare()?;
-}
-
-// Phase 2: Commit/Rollback
-if all_prepared_successfully {
-    distributed_tx.commit()?;
-} else {
-    distributed_tx.rollback()?;
-}
-```
-
-## Concurrency Control
-
-### Multi-Version Concurrency Control (MVCC)
-```text
-MVCC Implementation:
-• Each transaction sees a consistent snapshot
-• Versions maintained for concurrent access
-• Automatic cleanup of old versions
-• Minimal locking for read operations
-```
-
-### Lock-Based Concurrency
-```text
-Lock Types:
-• Shared Locks (S) - Multiple readers, no writers
-• Exclusive Locks (X) - Single writer, no readers
-• Update Locks (U) - Intent to update, allows reads
-• Intent Locks (IS/IX) - Hierarchical locking
-```
-
-### Deadlock Prevention
-```text
-Deadlock Detection & Resolution:
-• Wait-for graph analysis
-• Timeout-based deadlock detection
-• Victim selection algorithms
-• Automatic rollback of victim transactions
-```
-
-## Recovery & Durability
-
-### Write-Ahead Logging (WAL)
-```text
-WAL Structure:
-• Transaction ID
-• Operation Type
-• Before/After Images
-• Checksum for integrity
-• Timestamp for ordering
-```
-
-### Crash Recovery Process
-```text
-Recovery Flow:
-1. Analyze WAL for incomplete transactions
-2. Rollback uncommitted transactions
-3. Redo committed but unflushed operations
-4. Validate data consistency
-5. Resume normal operations
-```
-
-## Performance Considerations
-
-### Transaction Overhead:
-- **Short Transactions**: Minimal overhead, high throughput
-- **Long Transactions**: Increased lock contention, potential deadlocks
-- **Read-Only Transactions**: Optimized with snapshot isolation
-- **Write-Heavy Transactions**: Potential bottleneck, consider batching
-
-### Optimization Strategies:
-1. **Batch Operations**: Group related operations
-2. **Appropriate Isolation**: Choose minimal required level
-3. **Connection Pooling**: Reuse transaction contexts
-4. **Index Usage**: Reduce lock contention through better indexing
-
-## Monitoring & Observability
-
-### Transaction Metrics:
-- **Active Transactions**: Current running transactions
-- **Transaction Rate**: TPS (transactions per second)
-- **Lock Contention**: Percentage of time spent waiting for locks
-- **Deadlock Rate**: Frequency of deadlock occurrences
-- **Rollback Rate**: Percentage of transactions that rollback
-
-### Health Checks:
-```ignore
-// Transaction manager health
-let health = tx_manager.health_check()?;
-assert!(health.active_transactions < 1000);  // Reasonable limit
-assert!(health.deadlock_rate < 0.01);        // Less than 1%
-assert!(health.average_latency < 100);       // Under 100ms
-```
-
-## Limitations & Future Work
-
-### Current Limitations:
-- **Distributed Transactions**: Basic 2PC, no full XA support
-- **Long-Running Transactions**: Potential for increased conflicts
-- **Memory Usage**: MVCC versions can consume significant memory
-- **Nested Transactions**: Limited support for complex nesting
-
-### Planned Enhancements:
-- **XA Transactions**: Full distributed transaction support
-- **Sagas**: Compensation-based distributed transactions
-- **Optimistic Concurrency**: Reduced locking for better performance
-- **Real-time Monitoring**: Advanced transaction observability
 */
 
 use crate::storage::StorageEngine;
@@ -421,67 +251,105 @@ pub enum OperationType {
     /// Requires: data payload
     /// Rollback: Delete the inserted record
     Insert,
+    /// Modify existing records
+    /// Requires: conditions + data payload
+    /// Rollback: Restore the before-image
     Update,
+    /// Remove records
+    /// Requires: conditions
+    /// Rollback: Re-insert the deleted records
     Delete,
+    /// Create a new object (table, namespace, index)
+    /// Requires: data payload
+    /// Rollback: Drop the created object
     Create,
+    /// Drop an existing object
+    /// Requires: conditions targeting the object
+    /// Rollback: Re-create the object
     Drop,
+    /// Read data (no write effect, only tracked for auditing)
+    /// Requires: conditions
     Read,
 }
 
+/// A single append-only entry in the durable transaction log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionLog {
+    /// Monotonic sequence number for ordering
     pub sequence_number: u64,
+    /// Owning transaction id
     pub transaction_id: String,
+    /// The operation being recorded
     pub operation: TransactionOperation,
+    /// When the entry was written
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Integrity checksum over the entry
     pub checksum: String,
 }
 
+/// A marker that captures the state of a transaction for partial rollback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Savepoint {
+    /// Savepoint identifier
     pub id: String,
+    /// Owning transaction id
     pub transaction_id: String,
+    /// Number of executed operations at the point the savepoint was taken
     pub operations_count: usize,
+    /// When the savepoint was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Coordinates transactional execution across storage engines.
+///
+/// Appends to the transaction log, drives commit/abort through the consensus
+/// engine, and routes operations to the storage engine registered for each
+/// involved storage type.
 pub struct TransactionManager {
     config: PrimusDBConfig,
-    #[allow(dead_code)]
-    active_transactions: HashMap<String, Transaction>,
     transaction_log: Arc<dyn TransactionLogStore>,
     consensus_engine: Arc<dyn ConsensusEngine>,
     journal: Arc<JournalManager>,
     engines: HashMap<StorageType, Arc<dyn StorageEngine>>,
 }
 
+/// Durable backend that stores transaction log entries.
 #[async_trait]
 pub trait TransactionLogStore: Send + Sync {
+    /// Append a single log entry to the store.
     async fn append_log(&self, log: &TransactionLog) -> Result<()>;
+    /// Fetch all log entries for a transaction, in sequence order.
     async fn get_logs(&self, transaction_id: &str) -> Result<Vec<TransactionLog>>;
+    /// Remove log entries with a sequence number below the given threshold.
     async fn truncate_logs(&self, before_sequence: u64) -> Result<()>;
+    /// Verify the integrity of the stored log.
     async fn verify_integrity(&self) -> Result<bool>;
 }
 
+/// Sled-backed write-ahead journal used for durability before commit.
 pub struct JournalManager {
     db: sled::Db,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct JournalFile;
-
+/// A single write-ahead journal record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
+    /// Log Sequence Number (monotonic)
     pub lsn: u64, // Log Sequence Number
+    /// Owning transaction id
     pub transaction_id: String,
+    /// The operation being journaled
     pub operation: TransactionOperation,
+    /// LSN of the previous entry in the same transaction
     pub prev_lsn: Option<u64>,
+    /// When the entry was written
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Integrity checksum over the entry
     pub checksum: String,
 }
 
 impl TransactionManager {
+    /// Convert a [`Transaction`] into the consensus engine's transaction type.
     fn convert_to_consensus_tx(&self, transaction: &Transaction) -> crate::consensus::Transaction {
         crate::consensus::Transaction {
             id: transaction.id.clone(),
@@ -514,6 +382,8 @@ impl TransactionManager {
             proposer: self.config.cluster.node_id.clone(),
         }
     }
+    /// Build a [`TransactionManager`] from the given config, consensus engine
+    /// and per-storage-type engine registry.
     pub fn new(
         config: &PrimusDBConfig,
         consensus_engine: Arc<dyn ConsensusEngine>,
@@ -524,7 +394,6 @@ impl TransactionManager {
 
         Ok(TransactionManager {
             config: config.clone(),
-            active_transactions: HashMap::new(),
             transaction_log,
             consensus_engine,
             journal,
@@ -532,6 +401,7 @@ impl TransactionManager {
         })
     }
 
+    /// Begin a new transaction, logging the BEGIN marker to the transaction log.
     pub async fn begin_transaction(&self) -> Result<Transaction> {
         let transaction_id = format!(
             "tx_{}",
@@ -573,6 +443,8 @@ impl TransactionManager {
         Ok(transaction)
     }
 
+    /// Commit a transaction using a two-phase protocol: journal the
+    /// operations, reach consensus, then flush the journal to disk.
     pub async fn commit_transaction(&self, mut transaction: Transaction) -> Result<()> {
         info!("Committing transaction: {}", transaction.id);
 
@@ -618,6 +490,8 @@ impl TransactionManager {
         }
     }
 
+    /// Roll back a transaction by reversing each executed operation through
+    /// its storage engine (re-inserting deletes, restoring before-images).
     pub async fn rollback_transaction(&self, transaction_id: String) -> Result<()> {
         warn!("Rolling back transaction: {}", transaction_id);
 
@@ -711,6 +585,7 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Create a savepoint capturing the current executed-operation count.
     pub async fn create_savepoint(
         &self,
         transaction_id: &str,
@@ -732,6 +607,7 @@ impl TransactionManager {
         })
     }
 
+    /// Roll back to a savepoint by reversing the operations executed after it.
     pub async fn rollback_to_savepoint(
         &self,
         transaction_id: &str,
@@ -830,6 +706,7 @@ impl TransactionManager {
 }
 
 impl JournalManager {
+    /// Open (or create) the sled-backed journal database under the data dir.
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let path = format!("{}/transactions/journal", config.storage.data_dir);
         std::fs::create_dir_all(&path)?;
@@ -838,6 +715,7 @@ impl JournalManager {
         Ok(JournalManager { db })
     }
 
+    /// Persist a journal entry, keyed by its log sequence number.
     pub async fn write_entry(&self, entry: &JournalEntry) -> Result<()> {
         let tree = self.db.open_tree("journal")?;
         let value = serde_json::to_vec(entry)?;
@@ -846,6 +724,7 @@ impl JournalManager {
         Ok(())
     }
 
+    /// Force pending journal writes to disk for durability.
     pub async fn flush(&self) -> Result<()> {
         let tree = self.db.open_tree("journal")?;
         tree.flush()?;
@@ -853,11 +732,13 @@ impl JournalManager {
         Ok(())
     }
 
+    /// Rebuild committed transactions from the journal, grouped by
+    /// transaction and ordered by log sequence number.
     pub async fn recover(&self) -> Result<Vec<Transaction>> {
         let tree = self.db.open_tree("journal")?;
         let mut entries_by_tx: HashMap<String, Vec<JournalEntry>> = HashMap::new();
 
-        for result in tree.iter() {
+        for result in &tree {
             let (_key, value) = result?;
             let entry: JournalEntry = serde_json::from_slice(&value)?;
             entries_by_tx
@@ -897,11 +778,13 @@ impl JournalManager {
     }
 }
 
+/// Sled-backed [`TransactionLogStore`] implementation persisting logs on disk.
 pub struct FileTransactionLog {
     db: sled::Db,
 }
 
 impl FileTransactionLog {
+    /// Open (or create) the sled-backed transaction log database under the data dir.
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let path = format!("{}/transactions/logs", config.storage.data_dir);
         std::fs::create_dir_all(&path)?;
@@ -942,7 +825,7 @@ impl TransactionLogStore for FileTransactionLog {
     async fn truncate_logs(&self, before_sequence: u64) -> Result<()> {
         let tree = self.db.open_tree("transaction_logs")?;
         let mut to_remove = Vec::new();
-        for result in tree.iter() {
+        for result in &tree {
             let (key, _value) = result?;
             let key_str = String::from_utf8_lossy(&key);
             if let Some(seq_str) = key_str.split(':').nth(1) {

@@ -1,48 +1,51 @@
 /*!
-# Memory Cache System - High-Performance In-Memory Caching
+# Memory Cache System - In-Memory Caching
 
-The memory cache system provides ultra-fast data access with minimal memory footprint through advanced compression techniques. It features compressed data storage, in-place search capabilities, and corruption prevention mechanisms.
+The memory cache system stores values LZ4-compressed, enforces a memory budget
+with LRU eviction, verifies data integrity with CRC32 checksums, and indexes
+cached values for pattern search. The public surface is [`MemoryCache`], backed
+by the [`cache`], [`compression`] and [`search`] submodules.
 
 ## Architecture Overview
 
 ```text
 Memory Cache Architecture
-══════════════════════════════════════════════════════════════
+=======================================================
 
-┌─────────────────────────────────────────────────────────┐
-│                    Cache Manager                        │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Memory Pool:                                   │    │
-│  │  • Compressed data blocks                      │    │
-│  │  • Metadata (keys, sizes, checksums)           │    │
-│  │  • LRU tracking                                │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Compression Engine:                            │    │
-│  │  • LZ4 compression/decompression               │    │
-│  │  • Dictionary-based optimization               │    │
-│  │  • Adaptive compression levels                 │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Search Engine:                                │    │
-│  │  • Compressed pattern matching                 │    │
-│  │  • Index-based lookups                         │    │
-│  │  • Bloom filters for fast rejection            │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
++-----------------------------------------------------------+
+|                    Cache Manager                           |
+|  +-----------------------------------------------------+  |
+|  | Memory Pool:                                        |  |
+|  |  * Compressed data blocks                           |  |
+|  |  * Metadata (keys, sizes, checksums)                |  |
+|  |  * LRU tracking                                     |  |
+|  +-----------------------------------------------------+  |
+|                                                           |
+|  +-----------------------------------------------------+  |
+|  | Compression Engine:                                 |  |
+|  |  * LZ4 compression/decompression                    |  |
+|  |  * Configurable compression levels                   |  |
+|  |  * CRC32 corruption detection                       |  |
+|  +-----------------------------------------------------+  |
+|                                                           |
+|  +-----------------------------------------------------+  |
+|  | Search Engine:                                      |  |
+|  |  * Term indexes built from cached values            |  |
+|  |  * Bloom filters for fast rejection                 |  |
+|  +-----------------------------------------------------+  |
++-----------------------------------------------------------+
 ```
 
 ## Features
 
-- **Ultra-Low Memory Footprint**: LZ4 compression reduces memory usage by 60-80%
-- **Compressed Search**: Pattern matching without full decompression
-- **LRU Eviction**: Intelligent cache management with configurable policies
-- **Corruption Prevention**: CRC32 checksums for data integrity
-- **Adaptive Compression**: Dynamic compression levels based on data patterns
-- **Thread Safety**: Concurrent access with fine-grained locking
-- **Zero-Copy Operations**: Direct memory access where possible
+- **Compressed Storage**: Values are stored LZ4-compressed; the memory savings
+  depend entirely on the data (repetitive data compresses well, small or
+  already-dense payloads gain little)
+- **Compressed Search**: Pattern matching over an index built from cached values
+- **LRU Eviction**: Least-recently-used entries evicted when the memory budget
+  is exceeded (can be disabled via `lru_enabled`)
+- **Corruption Prevention**: CRC32 checksums verified on read
+- **Thread Safety**: Concurrent access guarded by `RwLock`s
 
 ## Usage
 
@@ -88,22 +91,12 @@ let config = CacheConfig {
 
 ## Performance Characteristics
 
-### Memory Efficiency
-- **Compression Ratio**: 60-80% reduction in memory usage
-- **Overhead**: ~5-10% for metadata and indexes
-- **Fragmentation**: Minimized through memory pooling
-
-### Performance Benchmarks
-- **Put Operation**: < 1μs for small objects
-- **Get Operation**: < 500ns with decompression
-- **Search Operation**: < 10μs for compressed pattern matching
-- **Memory Allocation**: Zero-copy when possible
-
-### CPU Usage
-- **Compression**: LZ4 @ ~500MB/s
-- **Decompression**: LZ4 @ ~2GB/s
-- **Search**: SIMD-accelerated pattern matching
-- **Maintenance**: Background LRU cleanup
+No micro-benchmarks are maintained in-tree. In practice, LZ4 is a very fast
+codec: compressed payloads are small enough to keep the cache in RAM, and each
+`get` pays one CRC32 verify plus one LZ4 decompress. Compression and
+decompression are CPU-bound and scale with payload size, so actual latency
+depends on the data being cached. Note that values are cloned (never zero-copy)
+as they move between the storage map and the caller.
 
 ## Configuration Options
 
@@ -111,9 +104,9 @@ let config = CacheConfig {
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
-| max_memory | u64 | Maximum memory usage in bytes | 1GB |
+| max_memory | u64 | Maximum memory usage in bytes | 512MB |
 | compression_enabled | bool | Enable LZ4 compression | true |
-| compression_level | CompressionLevel | Compression speed/quality trade-off | Fast |
+| compression_level | CompressionLevel | Compression speed/quality trade-off | Balanced |
 | enable_search | bool | Enable compressed search | true |
 | corruption_check | bool | Enable CRC32 checksums | true |
 | lru_enabled | bool | Enable LRU eviction | true |
@@ -121,28 +114,17 @@ let config = CacheConfig {
 
 ### CompressionLevel
 
-- **Fast**: Maximum speed, ~60% compression
-- **Balanced**: Good speed/ratio balance, ~70% compression
-- **High**: Maximum compression, ~80% compression
+- **Fast**: Highest speed, lowest ratio
+- **Balanced**: Default speed/ratio compromise
+- **High**: Highest ratio, slowest speed
 
-## Integration with Storage Engines
-
-The cache system integrates seamlessly with all storage engines:
-
-```ignore
-// Cache-enabled operations
-let result = primusdb.query_with_cache(
-    storage_type,
-    table,
-    conditions,
-    cache_config
-)?;
-```
+Ratios are data-dependent; the levels only tune the LZ4 encoder speed/size
+trade-off.
 
 ## Monitoring and Statistics
 
 ```ignore
-let stats = cache.get_statistics()?;
+let stats = cache.get_statistics();
 println!("Cache hit rate: {:.2}%", stats.hit_rate);
 println!("Memory usage: {} MB", stats.memory_used / 1024 / 1024);
 println!("Compression ratio: {:.2}%", stats.compression_ratio);
@@ -150,12 +132,12 @@ println!("Compression ratio: {:.2}%", stats.compression_ratio);
 
 ## Error Handling
 
-The cache system provides detailed error information:
+The cache system provides detailed error information via [`CacheError`]:
 
-- **CacheFull**: Cache memory limit exceeded
-- **CompressionError**: LZ4 compression/decompression failure
-- **CorruptionDetected**: Data integrity check failed
-- **InvalidKey**: Key format validation error
+- **OutOfMemory**: Memory limit exceeded after LRU eviction
+- **Compression**: LZ4 compression/decompression failure
+- **CorruptionDetected**: Stored CRC32 checksum did not match on read
+- **SearchNotEnabled**: Search requested but disabled in configuration
 
 ## Thread Safety
 
@@ -163,21 +145,16 @@ All operations are thread-safe with fine-grained locking:
 
 - **Read Operations**: Shared locks for concurrent access
 - **Write Operations**: Exclusive locks during modification
-- **Search Operations**: Read locks with copy-on-write semantics
+- **Search Operations**: Read locks over the index structures
 
 ## Memory Management
 
-### Allocation Strategies
-- **Memory Pool**: Pre-allocated pools for small objects
-- **Direct Allocation**: Large objects bypass pool
-- **Defragmentation**: Background compaction during low usage
-
-### Garbage Collection
-- **LRU Eviction**: Least recently used items removed first
-- **Size-Based**: Large items evicted preferentially
-- **TTL Support**: Time-based expiration (optional)
-
-This cache system provides enterprise-grade performance with minimal resource overhead, making it ideal for high-throughput database operations.
+- **Compressed Storage**: Values are stored LZ4-compressed to minimise memory use
+- **LRU Eviction**: Least recently used entries evicted when the memory budget
+  is exceeded; if eviction is disabled or cannot free enough space, `put`
+  returns [`CacheError::OutOfMemory`]
+- The compression engine keeps a small buffer-pool field, but buffers are
+  currently never returned to it, so allocation reuse is not yet effective
 */
 
 #[allow(clippy::module_inception)]

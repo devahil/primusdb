@@ -1,5 +1,7 @@
 # TUI Local Discovery
 
+> **DEPRECATED**: This documents the TUI, which was removed from the build in v1.3.2-alpha. Use the CLI/REPL or REST API instead.
+
 The PrimusDB TUI automatically discovers running PrimusDB instances on your local machine each time it starts, and on demand via the `discover` command.
 
 ---

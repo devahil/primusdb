@@ -1,51 +1,66 @@
-/// Local instance discovery for PrimusDB.
-///
-/// Detects running PrimusDB instances by probing:
-///   1. Default ports (8080-8083, 9090-9093)
-///   2. Configured ports from known config paths
-///   3. Local process list (where supported)
-///   4. Docker Compose services (when available)
-///
-/// # Flow
-/// ```text
-/// +----------------+     +-------------------+     +------------------+
-/// | Port Scanner   | --> | Config File Reader| --> | Process Checker  |
-/// +----------------+     +-------------------+     +------------------+
-///         |                      |                         |
-///         v                      v                         v
-///     +-------------------------------------------------------+
-///     |              Health Probe (/health)                    |
-///     +-------------------------------------------------------+
-///         |
-///         v
-///     +-------------------------------------------------------+
-///     |              DiscoveryResult list                      |
-///     +-------------------------------------------------------+
-/// ```
+//! Local instance discovery for PrimusDB.
+//!
+//! Detects running PrimusDB instances by scanning a set of ports on
+//! localhost (default 8080-8083, 9090-9093) and probing each reachable
+//! endpoint's health endpoints (`/health`, `/status`, `/protocol/health`)
+//! to build an [`InstanceInfo`] for every responding server.
+//!
+//! # Flow
+//! ```text
+//! DiscoveryConfig.ports ──► for each port
+//!          │
+//!          ▼
+//!   probe_instance(endpoint)
+//!          │  try /health, /status, /protocol/health
+//!          ▼
+//!   parse_instance (unwrap APIResponse "data" if present)
+//!          │
+//!          ▼
+//!   Vec<InstanceInfo>
+//! ```
+//!
+//! [`DiscoveryConfig`] also exposes `scan_localhost`, `check_config_files`
+//! and `check_processes` switches; today `discover_local` always scans
+//! `127.0.0.1` and only probes ports — the config-file and process-list
+//! strategies are reserved for future work.
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// A discovered PrimusDB instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
+    /// Base endpoint URL of the instance, e.g. `http://127.0.0.1:8080`
     pub endpoint: String,
+    /// Instance identifier reported by the server, if any
     pub instance_id: Option<String>,
+    /// Node identifier reported by the server, if any
     pub node_id: Option<String>,
+    /// Server version string, if reported
     pub version: Option<String>,
+    /// Health status, e.g. `healthy` or `unknown`
     pub status: String,
+    /// Uptime in seconds, when reported
     pub uptime_seconds: Option<u64>,
+    /// Storage engines enabled on the instance
     pub enabled_engines: Vec<String>,
+    /// Cluster role (leader, follower, ...) when the instance is clustered
     pub cluster_role: Option<String>,
+    /// Protocol layer status, when reported
     pub protocol_status: Option<String>,
 }
 
 /// Discovery configuration
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
+    /// Ports to probe on localhost
     pub ports: Vec<u16>,
+    /// Per-probe timeout in milliseconds
     pub timeout_ms: u64,
+    /// Whether to scan localhost at all
     pub scan_localhost: bool,
+    /// Whether to consult known config files for configured ports
     pub check_config_files: bool,
+    /// Whether to inspect the local process list (where supported)
     pub check_processes: bool,
 }
 
@@ -97,23 +112,33 @@ async fn probe_instance(endpoint: &str, timeout: Duration) -> Option<InstanceInf
 }
 
 fn parse_instance(endpoint: &str, body: &serde_json::Value) -> InstanceInfo {
+    // Unwrap APIResponse wrapper if present (PrimusDB endpoints return {success, data, ...})
+    let data = body
+        .get("data")
+        .filter(|_| {
+            body.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .unwrap_or(body);
+
     InstanceInfo {
         endpoint: endpoint.to_string(),
-        instance_id: body
+        instance_id: data
             .get("instance_id")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
-        node_id: body
+        node_id: data
             .get("node_id")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
-        version: body
+        version: data
             .get("version")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
-        status: body
+        status: data
             .get("status")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or("unknown".into()),
-        uptime_seconds: body.get("uptime_seconds").and_then(|v| v.as_u64()),
-        enabled_engines: body
+        uptime_seconds: data.get("uptime_seconds").and_then(|v| v.as_u64()),
+        enabled_engines: data
             .get("enabled_engines")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -122,10 +147,10 @@ fn parse_instance(endpoint: &str, body: &serde_json::Value) -> InstanceInfo {
                     .collect()
             })
             .unwrap_or_default(),
-        cluster_role: body
+        cluster_role: data
             .get("role")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
-        protocol_status: body
+        protocol_status: data
             .get("protocol_status")
             .and_then(|v| v.as_str().map(|s| s.to_string())),
     }

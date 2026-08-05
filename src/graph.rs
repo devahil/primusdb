@@ -15,17 +15,17 @@ with nodes and directed edges, labels, and key-value properties.
 
 ```text
 Property Graph Model
-═══════════════════════════════════════════════════════════════
+================================================
 
-  ┌──────────────────┐          ┌──────────────────┐
-  │     GraphNode    │          │     GraphEdge    │
-  ├──────────────────┤          ├──────────────────┤
-  │ id: NodeId       │          │ id: EdgeId       │
-  │ labels: Vec<String>   │───>  │ source: NodeId   │
-  │ properties: Map  │          │ target: NodeId   │
-  └──────────────────┘          │ label: String    │
-                                │ properties: Map  │
-                                └──────────────────┘
++------------------+          +------------------+
+|    GraphNode     |          |    GraphEdge     |
++------------------+          +------------------+
+| id: NodeId       |          | id: EdgeId       |
+| labels: Vec      |--------->| source: NodeId   |
+| properties: Map  |          | target: NodeId   |
++------------------+          | label: String    |
+                              | properties: Map  |
+                              +------------------+
 
 Features:
 - Nodes with multiple labels and arbitrary JSON properties

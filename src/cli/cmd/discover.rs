@@ -1,7 +1,13 @@
+//! Network discovery subcommand (`discover`).
+//!
+//! Probes a single port for PrimusDB instances using
+//! [`crate::cli::discovery::discover_local`].
+
 use crate::cli::discovery::{self, DiscoveryConfig};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Probe the given broadcast/port for PrimusDB instances.
 pub async fn handle_discover(
     broadcast: String,
     port: u16,

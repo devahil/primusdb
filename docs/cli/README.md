@@ -14,11 +14,8 @@ primusdb version
 # Start a server
 primusdb server start
 
-# Connect to a running server
-primusdb connect http://localhost:8080
-
-# Launch interactive TUI
-primusdb tui
+# Connect to a running server (interactive REPL)
+primusdb connect --server http://localhost:8080
 
 # Execute a query
 primusdb query "SELECT * FROM users LIMIT 10"
@@ -43,13 +40,15 @@ primusdb
 │   ├── status      Show server status
 │   ├── health      Check server health
 │   └── config      View or modify configuration
-├── connect         Connect to a running PrimusDB instance
-├── tui             Launch the terminal user interface
+├── connect         Connect to a running PrimusDB instance (opens the REPL)
+├── shell           Launch the interactive REPL shell
 ├── query           Execute a raw query
 ├── sql             Execute a SQL query
+├── health          Alias for server health
+├── status          Alias for server status
 ├── db              Manage databases
 │   ├── list        List all databases
-│   ├── create      Create a new database
+│   ├── create      Create a new database (supports `--engine` and `--namespace`)
 │   ├── drop        Drop a database
 │   ├── describe    Describe a database
 │   └── use         Switch active database
@@ -64,6 +63,17 @@ primusdb
 │   ├── drop        Drop a namespace
 │   ├── describe    Describe a namespace
 │   └── policy      View or set namespace policy
+├── config          Manage configuration
+│   ├── init        Generate a default configuration file
+│   ├── validate    Validate a configuration file
+│   └── show        Display current configuration
+├── instance        Manage running instances
+│   ├── list        List all local instances
+│   ├── discover    Discover instances on a host/port range
+│   ├── inspect     Show detailed instance info
+│   ├── connect     Test connectivity to an instance
+│   ├── stop        Stop a running instance
+│   └── logs        View instance logs
 ├── cluster         Manage cluster operations
 │   ├── status      Show cluster status
 │   ├── nodes       List cluster nodes
@@ -108,14 +118,10 @@ primusdb
 │   └── anomalies   Detect anomalies in a dataset
 ├── vector          Vector search and index management
 │   ├── search      Perform vector similarity search
-│   ├── index       Create or rebuild a vector index
-│   ├── stats       Show vector index statistics
-│   └── compact     Compact and optimize vector indexes
-├── graph           Graph traversal and management
-│   ├── nodes       Query graph nodes
-│   ├── edges       Query graph edges
-│   ├── query       Execute a graph query
-│   └── traverse    Traverse the graph from a starting node
+│   ├── index       Create or rebuild a vector index (not yet wired)
+│   ├── stats       Show vector index statistics (not yet wired)
+│   └── compact     Compact and optimize vector indexes (not yet wired)
+├── graph           Graph operations (registered but not yet available — see note)
 ├── cdc             Change Data Capture (CDC) operations
 │   ├── status      Show CDC status
 │   ├── stream      Manage a CDC stream
@@ -126,11 +132,37 @@ primusdb
 │   ├── run         Run a benchmark
 │   ├── list        List available benchmark profiles
 │   └── report      Generate a benchmark report
+├── ts              Time series operations
+│   ├── list        List time series metrics
+│   ├── describe    Describe a time series metric
+│   ├── query       Query time series data points
+│   ├── aggregate   Aggregate time series data
+│   ├── downsample  Downsample a metric to a lower resolution
+│   ├── retain      Apply a retention policy to a metric
+│   ├── resolution  Add or update a resolution for a metric
+│   └── stats       Show engine statistics
+├── migrate         Migrate data from external databases
+│   ├── inspect-source  Inspect the source database
+│   ├── plan        Plan a migration
+│   ├── import      Execute a migration import
+│   ├── validate    Validate a migration configuration
+│   └── report      Generate a migration report
+├── governor        Resource Governor (execution governance)
+│   ├── status      Show governor status
+│   ├── policies    List governance policies
+│   ├── inspect     Inspect a specific execution
+│   ├── metrics     Show governor metrics snapshot
+│   ├── violations  List policy violations
+│   └── set         Set or update a governance policy
+├── certs           Certificate management (create CA, sign certs, self-signed)
 ├── doctor          Run diagnostic checks on the database
 ├── discover        Discover PrimusDB nodes on the network
 ├── completion      Generate shell completion scripts
 └── version         Display version information
 ```
+
+> **Note**: The `graph` subcommand group is registered but graph operations are not
+> yet available via the CLI — use the SQL interface instead.
 
 ## Installation
 

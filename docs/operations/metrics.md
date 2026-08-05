@@ -19,7 +19,7 @@ primusdb_up 1
 
 # HELP primusdb_version PrimusDB version
 # TYPE primusdb_version gauge
-primusdb_version{version="1.3.1-alpha"} 1
+primusdb_version{version="1.3.2-alpha"} 1
 
 # HELP primusdb_uptime_seconds Service uptime in seconds
 # TYPE primusdb_uptime_seconds counter
@@ -259,7 +259,7 @@ groups:
 
 ## Alpha Limitations
 
-As of v1.3.1-alpha:
+As of v1.3.2-alpha:
 
 - **Not all engine metrics are wired** — per-engine operation durations and cache metrics may report zero.
 - **Histogram buckets** are pre-configured and not user-configurable at runtime.

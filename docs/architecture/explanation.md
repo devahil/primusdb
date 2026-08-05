@@ -168,7 +168,7 @@ enabled = false
 
 ## References
 
-- **[README.md](README.md)** - General information
-- **[USER.md](USER.md)** - User guide
-- **[API_REFERENCE.md](API_REFERENCE.md)** - API
+- **[README.md](../README.md)** - General information
+- **[USER.md](../user-guide/operations.md)** - User guide
+- **[API_REFERENCE.md](../reference/api.md)** - API
 - **[drivers/](drivers/)** - Driver source code

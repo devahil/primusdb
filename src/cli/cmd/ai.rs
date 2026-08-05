@@ -1,7 +1,14 @@
+//! AI/ML subcommands (`ai models`, `train`, `predict`, `analyze`,
+//! `anomalies`).
+//!
+//! `predict` and `analyze` call the server's advanced AI endpoints; the
+//! remaining subcommands are not yet wired to the CLI.
+
 use crate::cli::command::{AiSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch an `ai` subcommand to its handler.
 pub async fn handle_ai(cmd: AiSubcommands, _global: &GlobalArgs, fmt: &OutputFormat) -> Result<()> {
     match cmd {
         AiSubcommands::Models { .. }
@@ -21,9 +28,7 @@ pub async fn handle_ai(cmd: AiSubcommands, _global: &GlobalArgs, fmt: &OutputFor
             input,
             raw,
             top_k,
-        } => {
-            cmd_predict(model, input, raw, top_k, _global, fmt).await
-        }
+        } => cmd_predict(model, input, raw, top_k, _global, fmt).await,
         AiSubcommands::Analyze {
             table,
             columns,
@@ -41,7 +46,10 @@ async fn cmd_predict(
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/advanced/predict/relational/{}", global.server_url, input);
+    let url = format!(
+        "{}/api/v1/advanced/predict/relational/{}",
+        global.server_url, input
+    );
     let body = serde_json::json!({"data": {}, "prediction_type": "regression"});
 
     match client.post(&url).json(&body).send().await {

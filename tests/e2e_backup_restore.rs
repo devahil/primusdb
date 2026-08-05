@@ -18,13 +18,15 @@ fn server_binary() -> PathBuf {
     if path.ends_with("deps") {
         path.pop();
     }
-    path.join("primusdb-server")
+    path.join("primusdb")
 }
 
 fn start_server(port: u16, data_dir: &Path) -> Child {
     Command::new(server_binary())
-        .arg("--port")
-        .arg(port.to_string())
+        .arg("server")
+        .arg("start")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--data-dir")
         .arg(data_dir)
         .arg("--log-level")
@@ -32,7 +34,7 @@ fn start_server(port: u16, data_dir: &Path) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to start primusdb-server")
+        .expect("failed to start primusdb server")
 }
 
 fn wait_for_health(port: u16, timeout: Duration) -> bool {

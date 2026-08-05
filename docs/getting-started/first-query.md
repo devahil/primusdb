@@ -46,7 +46,7 @@ This compiles the unified `primusdb` CLI binary along with its server, client, a
 
 **Expected output (last lines):**
 ```
-   Compiling primusdb v1.3.1-alpha (/home/user/primusdb)
+   Compiling primusdb v1.3.2-alpha (/home/user/primusdb)
     Finished `release` profile [optimized + LTO] target(s) in 5m 12s
 ```
 
@@ -109,9 +109,15 @@ Probes the `/health` endpoint and returns the server status.
 **Expected output:**
 ```json
 {
-  "status": "healthy",
-  "version": "1.3.1-alpha",
-  "uptime_seconds": 12
+  "success": true,
+  "data": {
+    "status": "healthy",
+    "node_id": "local_node",
+    "instance_id": "local_instance",
+    "version": "1.3.2-alpha",
+    "uptime_seconds": 12,
+    "architecture": "centralized"
+  }
 }
 ```
 
@@ -124,10 +130,22 @@ Probes the `/health` endpoint and returns the server status.
 **Expected output:**
 ```json
 {
-  "status": "running",
-  "version": "1.3.1-alpha",
-  "node_id": "local_node",
-  "uptime_seconds": 30
+  "success": true,
+  "data": {
+    "status": "running",
+    "uptime_seconds": 30,
+    "version": "1.3.2-alpha",
+    "storage_engines": {
+      "columnar": "available",
+      "vector": "available",
+      "document": "available",
+      "relational": "available",
+      "keyvalue": "available"
+    },
+    "ai_enabled": true,
+    "cache_enabled": true,
+    "transactions_enabled": true
+  }
 }
 ```
 
@@ -181,7 +199,7 @@ Runs a comprehensive system check — Rust version, binary info, config file, da
   Check                Result
   ────────────────────────────────────────────────────────
 ● Rust toolchain       rustc 1.75.0 (9dcdc4a5c 2023-12-17)
-● PrimusDB version     1.3.1-alpha
+● PrimusDB version     1.3.2-alpha
 ● Build profile        release
 ● License              GPL-3.0
 ✓ Config file          primusdb.toml
@@ -201,4 +219,4 @@ Runs a comprehensive system check — Rust version, binary info, config file, da
 | Querying | [Query Execution Guide](../usage/querying.md) |
 | Namespaces | [Namespace Usage Guide](../usage/namespaces.md) |
 | Language Drivers | [Driver Usage Guide](../usage/drivers.md) |
-| TUI | [TUI Guide](../tui/README.md) |
+

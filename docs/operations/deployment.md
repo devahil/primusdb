@@ -1,7 +1,7 @@
 # PrimusDB Deployment Guide
 =========================
 
-This guide covers deploying PrimusDB v1.3.1-alpha in various environments, from single-node installations to large-scale federated clusters.
+This guide covers deploying PrimusDB v1.3.2-alpha in various environments, from single-node installations to large-scale federated clusters.
 
 ## Quick Start Deployment
 
@@ -24,7 +24,7 @@ curl http://localhost:8080/health
 # Download and install
 wget https://github.com/devahil/primusdb/releases/latest/download/primusdb-linux-x64.tar.gz
 tar -xzf primusdb-linux-x64.tar.gz
-sudo mv primusdb-server primusdb-cli /usr/local/bin/
+sudo mv primusdb /usr/local/bin/
 
 # Initialize
 sudo mkdir -p /var/lib/primusdb /var/log/primusdb /etc/primusdb
@@ -47,7 +47,7 @@ file = "/var/log/primusdb/primusdb.log"
 EOF
 
 # Start service
-primusdb-server --config /etc/primusdb/primusdb.toml
+primusdb server start --config /etc/primusdb/primusdb.toml
 ```
 
 ## Production Deployment
@@ -115,7 +115,7 @@ Requires=local-fs.target
 Type=exec
 User=primusdb
 Group=primusdb
-ExecStart=/usr/local/bin/primusdb-server --config /etc/primusdb/primusdb.toml
+ExecStart=/usr/local/bin/primusdb server start --config /etc/primusdb/primusdb.toml
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Security settings
@@ -199,8 +199,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r primusdb && useradd -r -g primusdb primusdb
 
-COPY --from=builder /usr/src/primusdb/target/release/primusdb-server /usr/local/bin/
-COPY --from=builder /usr/src/primusdb/target/release/primusdb-cli /usr/local/bin/
+COPY --from=builder /usr/src/primusdb/target/release/primusdb /usr/local/bin/
 
 RUN mkdir -p /var/lib/primusdb /var/log/primusdb \
     && chown -R primusdb:primusdb /var/lib/primusdb /var/log/primusdb
@@ -209,9 +208,9 @@ USER primusdb
 EXPOSE 8080 9090
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD primusdb-cli status || exit 1
+    CMD primusdb server status || exit 1
 
-CMD ["primusdb-server", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["primusdb", "server", "start", "--host", "0.0.0.0", "--port", "8080"]
 ```
 
 ### Docker Compose Production
@@ -244,7 +243,7 @@ services:
           memory: 4G
           cpus: '2.0'
     healthcheck:
-      test: ["CMD", "primusdb-cli", "status"]
+      test: ["CMD", "primusdb", "server", "status"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -446,29 +445,26 @@ spec:
 ### Multi-Node Setup
 ```bash
 # Node 1 (Coordinator)
-primusdb-server \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --cluster \
-  --node-id coordinator \
+primusdb server start \
+  --bind 0.0.0.0:8080 \
+  --cluster-id my-cluster \
+  --region us-east \
   --data-dir /var/lib/primusdb
 
 # Node 2 (Worker)
-primusdb-server \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --cluster \
-  --node-id worker1 \
-  --discovery coordinator:8080 \
+primusdb server start \
+  --bind 0.0.0.0:8080 \
+  --cluster-id my-cluster \
+  --federation-discovery coordinator:8080 \
+  --region us-east \
   --data-dir /var/lib/primusdb
 
 # Node 3 (Worker)
-primusdb-server \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --cluster \
-  --node-id worker2 \
-  --discovery coordinator:8080 \
+primusdb server start \
+  --bind 0.0.0.0:8080 \
+  --cluster-id my-cluster \
+  --federation-discovery coordinator:8080 \
+  --region us-east \
   --data-dir /var/lib/primusdb
 ```
 
@@ -572,7 +568,7 @@ DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_NAME="primusdb_$DATE"
 
 # Create backup
-primusdb-cli backup --destination "$BACKUP_DIR/$BACKUP_NAME"
+primusdb backup create --destination "$BACKUP_DIR/$BACKUP_NAME"
 
 # Compress
 tar -czf "$BACKUP_DIR/${BACKUP_NAME}.tar.gz" -C "$BACKUP_DIR" "$BACKUP_NAME"
@@ -584,7 +580,7 @@ aws s3 cp "$BACKUP_DIR/${BACKUP_NAME}.tar.gz" "s3://primusdb-backups/"
 find "$BACKUP_DIR" -name "*.tar.gz" -mtime +30 -delete
 
 # Verify backup integrity
-primusdb-cli restore --source "$BACKUP_DIR/$BACKUP_NAME" --dry-run
+primusdb backup restore --source "$BACKUP_DIR/$BACKUP_NAME" --dry-run
 ```
 
 ### Disaster Recovery
@@ -606,14 +602,14 @@ tar -xzf "$RESTORE_DIR/backup.tar.gz" -C "$RESTORE_DIR/backup"
 systemctl stop primusdb
 
 # Restore data
-primusdb-cli restore --source "$RESTORE_DIR/backup"
+primusdb backup restore --source "$RESTORE_DIR/backup"
 
 # Start service
 systemctl start primusdb
 
 # Verify recovery
 curl http://localhost:8080/health
-primusdb-cli status
+primusdb server status
 ```
 
 ## Security Hardening
@@ -628,30 +624,13 @@ sudo ufw allow 8080/tcp
 sudo ufw allow 9090/tcp
 sudo ufw --force enable
 
-# SSL/TLS configuration
-cat > /etc/primusdb/ssl.conf << EOF
-[req]
-distinguished_name = req_distinguished_name
-req_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-C = US
-ST = State
-L = City
-O = Organization
-OU = Unit
-CN = primusdb.example.com
-
-[v3_req]
-keyUsage = keyEncipherment, dataEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = primusdb.example.com
-DNS.2 = *.primusdb.example.com
-EOF
+# Generate TLS certificates using PrimusDB's built-in cert manager
+primusdb certs create-ca --out-dir /etc/primusdb/ssl --name "MyOrg CA"
+primusdb certs create-cert \
+  --ca-dir /etc/primusdb/ssl \
+  --out-dir /etc/primusdb/ssl \
+  --hosts primusdb.example.com \
+  --server
 ```
 
 ### Access Control
@@ -662,10 +641,12 @@ encryption_enabled = true
 key_rotation_interval = 86400
 auth_required = true
 
-[security.tls]
-certificate_path = "/etc/primusdb/cert.pem"
-key_path = "/etc/primusdb/key.pem"
-min_tls_version = "1.2"
+[network]
+tls_enabled = true
+tls_cert_path = "/etc/primusdb/ssl/cert.pem"
+tls_key_path = "/etc/primusdb/ssl/key.pem"
+tls_ca_path = "/etc/primusdb/ssl/ca.crt"
+mtls_enabled = false
 
 [security.auth]
 require_auth = true
@@ -828,7 +809,7 @@ cluster-asia:
 
 ```bash
 # Start federated cluster nodes
-primusdb-server --host 0.0.0.0 --port 8080 \
+primusdb server start --bind 0.0.0.0:8080 \
   --federation-id global-fed --cluster-id cluster-us --region us-east-1 \
   --federation-discovery cluster-eu:8080,cluster-asia:8080
 ```

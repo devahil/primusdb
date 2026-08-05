@@ -19,6 +19,83 @@ class StorageType(Enum):
     VECTOR = "vector"
     DOCUMENT = "document"
     RELATIONAL = "relational"
+    KEYVALUE = "keyvalue"
+    TIMESERIES = "timeseries"
+
+
+@dataclass
+class EngineCapabilities:
+    """Capabilities of a single storage engine on the server."""
+    storage_type: str
+    tables: List[str]
+
+    @classmethod
+    def from_json(cls, data: Dict) -> "EngineCapabilities":
+        return cls(
+            storage_type=data.get("storage_type", ""),
+            tables=list(data.get("tables", []) or []),
+        )
+
+    def has_table(self, table: str) -> bool:
+        return table in self.tables
+
+
+@dataclass
+class ServerCapabilities:
+    """Capability snapshot of a PrimusDB node (capability negotiation)."""
+    protocol_version: int
+    server_version: str
+    node_id: str
+    instance_id: str
+    uptime_seconds: int
+    engines: List[EngineCapabilities]
+    features: List[str]
+
+    @classmethod
+    def from_json(cls, data: Dict) -> "ServerCapabilities":
+        server = data.get("server", {})
+        return cls(
+            protocol_version=int(data.get("protocol_version", 0)),
+            server_version=str(server.get("version", "")),
+            node_id=str(server.get("node_id", "")),
+            instance_id=str(server.get("instance_id", "")),
+            uptime_seconds=int(server.get("uptime_seconds", 0)),
+            engines=[
+                EngineCapabilities.from_json(e) for e in (data.get("engines", []) or [])
+            ],
+            features=list(data.get("features", []) or []),
+        )
+
+    def has_feature(self, feature: str) -> bool:
+        return feature in self.features
+
+    def require_features(self, features: List[str]) -> None:
+        missing = [f for f in features if f not in self.features]
+        if missing:
+            raise RuntimeError(
+                "Server missing required capabilities: "
+                + ", ".join(missing)
+            )
+
+    def engine(self, storage_type: Union[str, StorageType]) -> Optional[EngineCapabilities]:
+        name = (
+            storage_type.value if isinstance(storage_type, StorageType) else storage_type
+        )
+        for e in self.engines:
+            if e.storage_type.lower() == name.lower():
+                return e
+        return None
+
+    def require_engine(self, storage_type: Union[str, StorageType]) -> EngineCapabilities:
+        engine = self.engine(storage_type)
+        if engine is None:
+            name = (
+                storage_type.name if isinstance(storage_type, StorageType) else storage_type
+            )
+            raise RuntimeError(
+                "Server does not advertise the '%s' engine" % name
+            )
+        return engine
 
 
 @dataclass
@@ -70,6 +147,47 @@ class PrimusDBClient:
         if self._session:
             await self._session.close()
             self._connected = False
+
+    # ==================== Capability Negotiation ====================
+
+    async def fetch_capabilities(self) -> ServerCapabilities:
+        """
+        Fetch and parse the server capability snapshot.
+
+        Capabilities are the negotiation contract between a driver and the
+        server: version, node id, every storage engine with its tables, and
+        additive feature flags. Use `require_features` / `require_engine` to
+        fail fast when the server cannot satisfy the application's needs.
+
+        Returns:
+            ServerCapabilities describing the connected node.
+        """
+        data = await self._request("GET", "capabilities")
+        return ServerCapabilities.from_json(data)
+
+    async def negotiate(self, required_features: Optional[List[str]] = None,
+                        required_engines: Optional[List[Union[str, StorageType]]] = None
+                        ) -> ServerCapabilities:
+        """
+        Negotiate with the server: fetch capabilities and validate that the
+        node supports everything the application requires.
+
+        Args:
+            required_features: Feature flags the server must advertise.
+            required_engines: Storage engines the server must advertise.
+
+        Returns:
+            ServerCapabilities of the connected node.
+
+        Raises:
+            RuntimeError: If a required feature or engine is missing.
+        """
+        caps = await self.fetch_capabilities()
+        if required_features:
+            caps.require_features(required_features)
+        for engine in (required_engines or []):
+            caps.require_engine(engine)
+        return caps
 
     async def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
         """Make an HTTP request to the PrimusDB server."""
@@ -262,6 +380,86 @@ class PrimusDBClient:
         endpoint = f"advanced/cluster/{storage_type.value}/{table}"
         payload = params or {"algorithm": "kmeans", "clusters": 5}
         return await self._request("POST", endpoint, payload)
+
+    # ==================== TimeSeries Methods ====================
+
+    async def ts_list_metrics(self) -> List[Dict]:
+        """List all time-series metrics."""
+        return await self._request("GET", "timeseries/metrics")
+
+    async def ts_describe_metric(self, metric: str) -> Dict:
+        """Describe a time-series metric."""
+        return await self._request("GET", f"timeseries/metrics/{metric}")
+
+    async def ts_query(self, metric: str, start_time: Optional[int] = None,
+                       end_time: Optional[int] = None,
+                       resolution: Optional[str] = None,
+                       tags: Optional[Dict] = None,
+                       fields: Optional[List[str]] = None,
+                       limit: Optional[int] = None) -> List[Dict]:
+        """Query time-series data points."""
+        params = {"metric": metric}
+        if start_time is not None: params["start_time"] = start_time
+        if end_time is not None: params["end_time"] = end_time
+        if resolution is not None: params["resolution"] = resolution
+        if tags is not None: params["tags"] = json.dumps(tags)
+        if fields is not None: params["fields"] = ",".join(fields)
+        if limit is not None: params["limit"] = str(limit)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        return await self._request("GET", f"timeseries/{metric}/query?{query}")
+
+    async def ts_insert_point(self, metric: str, timestamp: int,
+                              fields: Dict, tags: Optional[Dict] = None) -> Dict:
+        """Insert a single time-series data point."""
+        payload = {"metric": metric, "timestamp": timestamp, "fields": fields}
+        if tags: payload["tags"] = tags
+        return await self._request("POST", "timeseries/insert", payload)
+
+    async def ts_aggregate(self, metric: str, fn: str,
+                           start_time: Optional[int] = None,
+                           end_time: Optional[int] = None,
+                           resolution: Optional[str] = None,
+                           tags: Optional[Dict] = None,
+                           fill_policy: Optional[str] = None) -> List[Dict]:
+        """Aggregate time-series data."""
+        payload = {"metric": metric, "fn": fn}
+        if start_time is not None: payload["start_time"] = start_time
+        if end_time is not None: payload["end_time"] = end_time
+        if resolution is not None: payload["resolution"] = resolution
+        if tags is not None: payload["tags"] = tags
+        if fill_policy is not None: payload["fill_policy"] = fill_policy
+        return await self._request("POST", f"timeseries/{metric}/aggregate", payload)
+
+    async def ts_downsample(self, metric: str, target_resolution: str,
+                            source_resolution: str = "raw") -> Dict:
+        """Downsample time-series data to a lower resolution."""
+        payload = {
+            "metric": metric,
+            "target_resolution": target_resolution,
+            "source_resolution": source_resolution,
+        }
+        return await self._request("POST", f"timeseries/{metric}/downsample", payload)
+
+    async def ts_set_retention(self, metric: str, retention_days: int) -> Dict:
+        """Set retention policy for a time-series metric."""
+        payload = {"metric": metric, "retention_days": retention_days}
+        return await self._request("POST", f"timeseries/{metric}/retain", payload)
+
+    async def ts_add_resolution(self, metric: str, resolution: str,
+                                retention_days: int = 0,
+                                aggregation_fn: str = "avg") -> Dict:
+        """Add a rollup resolution to a time-series metric."""
+        payload = {
+            "metric": metric,
+            "resolution": resolution,
+            "retention_days": retention_days,
+            "aggregation_fn": aggregation_fn,
+        }
+        return await self._request("POST", f"timeseries/{metric}/resolution", payload)
+
+    async def ts_stats(self) -> Dict:
+        """Get time-series engine statistics."""
+        return await self._request("GET", "timeseries/stats")
 
     # ==================== Cluster Gateway Methods ====================
 
@@ -703,5 +901,7 @@ __all__ = [
     "StorageType",
     "ConnectionConfig",
     "Collection",
+    "ServerCapabilities",
+    "EngineCapabilities",
     "connect",
 ]

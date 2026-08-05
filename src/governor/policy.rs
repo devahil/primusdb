@@ -1,6 +1,34 @@
-use super::{
-    EnforcementAction, ExecutionLimits, Policy, PolicyConfig, PolicyScope, WorkloadType,
-};
+//! Resource usage policies for the Governor engine.
+//!
+//! Policies bundle an execution limit set ([`super::ExecutionLimits`]) with a
+//! scope and an enforcement action. [`PolicyManager`] resolves the most
+//! specific matching policy for a request and merges broader policies with
+//! more specific overrides:
+//!
+//! ```text
+//! +-------------------------+
+//! | PolicyManager           |
+//! |  policies: name ->      |
+//! |  Policy (scope, limits, |
+//! |         action)         |
+//! +------------+------------+
+//!              | resolve(namespace, workload, user, role)
+//!              v
+//! +-------------------------+
+//! | matching policies        |
+//! |  global < namespace <    |
+//! |  user ... (specificity)  |
+//! |  merge: specific limits  |
+//! |  override general ones   |
+//! +------------+------------+
+//!              |
+//!              v
+//! +-------------------------+
+//! | resolved Policy          |
+//! +-------------------------+
+//! ```
+
+use super::{EnforcementAction, ExecutionLimits, Policy, PolicyConfig, PolicyScope, WorkloadType};
 use std::collections::HashMap;
 
 pub struct PolicyManager {
@@ -27,10 +55,7 @@ impl PolicyManager {
         }
     }
 
-    pub fn from_config(
-        config: &HashMap<String, PolicyConfig>,
-        default_name: &str,
-    ) -> Self {
+    pub fn from_config(config: &HashMap<String, PolicyConfig>, default_name: &str) -> Self {
         let mut policies = HashMap::new();
         for (name, cfg) in config {
             if let Some(policy) = Self::config_to_policy(name, cfg) {

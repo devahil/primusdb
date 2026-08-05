@@ -7,7 +7,34 @@
 
 //! Distributed Consensus Protocol
 //!
-//! This module implements a Raft-style consensus protocol for PrimusDB cluster operations.
+//! This module implements a Raft-style consensus protocol for PrimusDB cluster
+//! operations. It defines the pure state and message types shared by the sync
+//! layer's quorum consensus: the per-node [`ConsensusState`], the
+//! [`VoteRequest`]/[`VoteResponse`] election exchange, the
+//! [`AppendEntriesRequest`]/[`AppendEntriesResponse`] replication exchange and
+//! the [`LogEntry`] units those exchanges carry. [`ConsensusConfig`] tunes the
+//! election timeouts, heartbeat interval and batching limits.
+//!
+//! # Placement in the architecture
+//!
+//! These types underpin [`crate::cluster::sync::SyncCoordinator`] (quorum
+//! writes/reads and leader election) and are reused by the
+//! [`crate::cluster::raft::RaftNode`] for the cluster-wide replicated log.
+//!
+//! ```text
+//!   SyncCoordinator::consensus_write / elect_leader
+//!                        │
+//!                        ▼
+//!   ConsensusState (role, term, voted_for) + ConsensusConfig
+//!                        │
+//!            ┌───────────┼───────────────┐
+//!            ▼           ▼               ▼
+//!   VoteRequest/     AppendEntries/   LogEntry
+//!   Response         Response         (index, term, op_type, data)
+//!   (leader          (log             │
+//!    election)        replication)     ▼
+//!                              applied log / state machine
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +159,7 @@ pub struct LogEntry {
 pub struct ConsensusConfig {
     /// Election timeout range (ms)
     pub election_timeout_min_ms: u64,
+    /// Upper bound of the randomized election timeout (ms)
     pub election_timeout_max_ms: u64,
     /// Heartbeat interval (ms)
     pub heartbeat_interval_ms: u64,

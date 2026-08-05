@@ -8,259 +8,42 @@
 /*!
 # Vector Storage Engine - Similarity Search Database
 
-The vector storage engine is optimized for high-performance similarity search,
-embeddings storage, and machine learning applications. It provides efficient
-nearest neighbor search using advanced indexing algorithms and SIMD acceleration.
-
-## Architecture Overview
+The vector storage engine stores JSON records in sled-backed collections and
+answers cosine-similarity queries. A record's `vector` field (an array of
+numbers) is compared against a query vector with a brute-force cosine
+similarity scan, and the top-K matches are returned ranked by descending
+similarity (exposed in each record's `similarity` metadata). Use it for ML
+embeddings, semantic search, and feature-vector storage where an exhaustive
+scan over the collection is acceptable.
 
 ```text
-Vector Storage Architecture
-═══════════════════════════════════════════════════════════════
+Vector Engine Data Flow
+═══════════════════════════════════════════════════
 
-┌─────────────────────────────────────────────────────────┐
-│              Vector Data Flow                           │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Input Embeddings:                             │    │
-│  │  • Text embeddings (768-1024 dim)              │    │
-│  │  • Image embeddings (512-2048 dim)             │    │
-│  │  • Audio embeddings (128-512 dim)              │    │
-│  │  • Custom ML model outputs                     │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Storage & Indexing:                           │    │
-│  │  • Quantization (PQ, SQ)                       │    │
-│  │  • IVF (Inverted File) indexing                │    │
-│  │  • HNSW graph-based indexing                   │    │
-│  │  • Flat storage for small datasets             │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Query Processing:                             │    │
-│  │  • Distance calculation (Cosine, Euclidean)   │    │
-│  │  • Index traversal and pruning                │    │
-│  │  • Top-K selection with heap                   │    │
-│  │  • Metadata filtering                          │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│              Index Types & Performance                  │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  IVF (Inverted File):                           │    │
-│  │  • Partitions vectors into clusters             │    │
-│  │  • Fast approximate search                      │    │
-│  │  • Configurable nprobe for accuracy/speed      │    │
-│  │  • Excellent for large datasets                 │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  HNSW (Hierarchical Navigable Small World):    │    │
-│  │  • Graph-based navigation                       │    │
-│  │  • High accuracy with good speed               │    │
-│  │  │  • Excellent for real-time search            │    │
-│  │  • Memory efficient                            │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Flat (Brute Force):                           │    │
-│  │  • Exact search, no approximations             │    │
-│  │  • Best accuracy, slowest for large datasets   │    │
-│  │  • Perfect for small collections               │    │
-│  │  • Baseline for accuracy comparison            │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+insert / update / delete ──► VectorEngine (sled db "vector")
+        │                       └─► tree "table:{collection}" (JSON records)
+        ▼
+select with { "query_vector": [...] } ──► brute-force cosine scan
+        │                                   └─► top-K ranked by similarity
+        └─► plain paginated scan (offset/limit) when no query_vector
 ```
 
-## Use Cases
+## Main Types & Functions
 
-### Perfect For:
-- **Semantic Search**: Text similarity, document retrieval
-- **Recommendation Systems**: User/item embeddings
-- **Image Search**: Visual similarity matching
-- **Anomaly Detection**: Outlier identification in high dimensions
-- **ML Applications**: Embedding storage and retrieval
+- [`VectorEngine`]: the vector similarity engine implementing [`StorageEngine`].
+- `insert`: store a record under an auto-generated nanosecond-timestamp id.
+- `select`: cosine-similarity search when `query_vector` is supplied, otherwise
+  a paginated scan of the collection.
+- `analyze`: per-collection record count, field occurrence counts, and inferred
+  field types.
+- `create_table` / `drop_table` / `truncate_table` / `table_info`: collection
+  lifecycle and metadata inspection.
 
-### Performance Characteristics:
-- **Query Latency**: Sub-millisecond for approximate search
-- **Throughput**: 1000-10000 queries/second depending on index
-- **Accuracy**: Configurable trade-off between speed and precision
-- **Scalability**: Efficient indexing for millions of vectors
-- **Memory Usage**: Optimized for both memory and disk usage
+## Limitations
 
-## Distance Metrics
-
-### Supported Metrics:
-- **Cosine Similarity**: Best for text embeddings and directions
-- **Euclidean Distance**: Standard distance in vector space
-- **Dot Product**: Useful for normalized vectors
-- **Manhattan Distance**: Robust to outliers, good for sparse data
-
-### Metric Selection Guide:
-```ignore
-// Text embeddings - use Cosine
-let text_results = vector_engine.search("text_collection", query_embedding,
-    DistanceMetric::Cosine, 10)?;
-
-// Image features - use Euclidean
-let image_results = vector_engine.search("image_collection", query_embedding,
-    DistanceMetric::Euclidean, 10)?;
-
-// Normalized vectors - use Dot Product
-let normalized_results = vector_engine.search("normalized_collection", query_embedding,
-    DistanceMetric::DotProduct, 10)?;
-```
-
-## Indexing Strategies
-
-### IVF (Inverted File) Indexing:
-```ignore
-let ivf_config = VectorIndexConfig {
-    index_type: VectorIndexType::IVF {
-        nlist: 1024,    // Number of clusters
-        nprobe: 10,     // Clusters to search
-    },
-    distance_metric: DistanceMetric::Cosine,
-};
-
-// Trade-offs:
-// - nlist ↑: Better partitioning, more memory
-// - nprobe ↑: Higher accuracy, slower search
-```
-
-### HNSW Indexing:
-```ignore
-let hnsw_config = VectorIndexConfig {
-    index_type: VectorIndexType::HNSW {
-        m: 16,              // Max connections per node
-        ef_construction: 200, // Construction quality
-    },
-    distance_metric: DistanceMetric::Cosine,
-};
-
-// Parameters:
-// - m ↑: Better connectivity, more memory/longer construction
-// - ef_construction ↑: Higher quality index, slower build
-```
-
-## Storage Format
-
-### On-Disk Structure:
-```text
-Vector Collection/
-├── metadata.json          # Collection info, dimensions, index type
-├── vectors/               # Directory for vector data
-│   ├── shard_001.data     # Quantized vectors (PQ/SQ)
-│   ├── shard_002.data     # Additional shards for scalability
-│   └── ...
-├── index/                 # Index structures
-│   ├── ivf_centroids.data # IVF cluster centroids
-│   ├── hnsw_graph.data    # HNSW navigation graph
-│   └── quantizer.data     # Quantization parameters
-└── metadata/              # Additional metadata
-    ├── id_mapping.data    # ID to vector mapping
-    └── stats.json         # Collection statistics
-```
-
-### Quantization Techniques:
-- **Product Quantization (PQ)**: Divides vectors into sub-vectors
-- **Scalar Quantization (SQ)**: Reduces precision per dimension
-- **Memory-mapped storage**: Efficient memory usage for large datasets
-
-## Query Processing
-
-### Similarity Search Flow:
-```text
-Query Vector → Preprocessing → Index Search → Distance Calculation → Top-K Selection
-      ↓              ↓              ↓              ↓              ↓
-   Normalize    Quantize       IVF/HNSW       Cosine/Euclidean   Heap Sort
-   (if needed)  (if used)     Traversal     Computation       + Filtering
-```
-
-### Performance Optimizations:
-1. **SIMD Operations**: Vectorized distance calculations
-2. **Index Pruning**: Early termination for irrelevant results
-3. **Quantization**: Reduced precision for faster computation
-4. **Parallel Search**: Multi-threaded query processing
-
-## Implementation Details
-
-### Key Components:
-- **FAISS-inspired indexing**: Industry-standard algorithms
-- **SIMD acceleration**: CPU vector instructions for speed
-- **Memory mapping**: Efficient handling of large datasets
-- **Concurrent access**: Thread-safe operations
-
-### Memory Management:
-- **Paged storage**: Vectors loaded on-demand
-- **Index caching**: Frequently accessed index structures
-- **Quantization**: Reduced memory footprint
-- **Garbage collection**: Automatic cleanup of deleted vectors
-
-## Best Practices
-
-### Index Selection:
-```ignore
-// Small collections (< 10K vectors)
-let index = VectorIndexType::Flat; // Exact search
-
-// Medium collections (10K - 1M vectors)
-let index = VectorIndexType::IVF { nlist: 512, nprobe: 8 };
-
-// Large collections (> 1M vectors)
-let index = VectorIndexType::HNSW { m: 32, ef_construction: 400 };
-```
-
-### Performance Tuning:
-```ignore
-// High accuracy, lower speed
-let search_config = SearchConfig {
-    ef_search: 64,    // HNSW search parameter
-    nprobe: 20,       // IVF clusters to search
-    max_results: 100,
-};
-
-// High speed, lower accuracy
-let search_config = SearchConfig {
-    ef_search: 32,
-    nprobe: 5,
-    max_results: 50,
-};
-```
-
-### Batch Operations:
-```ignore
-// Bulk insert for better performance
-let vectors = vec![embedding1, embedding2, embedding3];
-vector_engine.insert_batch("embeddings", vectors, metadata_list)?;
-```
-
-## Limitations & Considerations
-
-### Dimensionality:
-- **Low dimensions** (< 100): Flat index often sufficient
-- **High dimensions** (> 1000): Careful index selection required
-- **Very high dimensions** (> 10000): Consider dimensionality reduction
-
-### Dataset Size:
-- **Small datasets**: Flat search may be fastest
-- **Large datasets**: IVF or HNSW required for performance
-- **Streaming data**: Consider incremental indexing strategies
-
-### Accuracy vs Speed:
-- **Exact search**: Use Flat index
-- **Approximate search**: Configure IVF/HNSW parameters
-- **Real-time requirements**: May need to sacrifice accuracy
-
-## Future Enhancements
-
-### Planned Features:
-- **GPU acceleration**: CUDA/ROCm support for faster search
-- **Distributed indexing**: Sharding across multiple nodes
-- **Advanced quantization**: More sophisticated compression
-- **Filtered search**: Metadata-based filtering during search
-- **Streaming updates**: Real-time index updates
+- Search is an exhaustive linear scan; no approximate (IVF/HNSW) indexes or
+  quantized layouts are built yet, so latency scales linearly with collection
+  size.
 */
 
 use crate::{
@@ -270,125 +53,130 @@ use crate::{
 use async_trait::async_trait;
 use tracing::info;
 
-use crate::crypto::FileEncryptionManager;
 use sled::Db;
 use std::any::Any;
 use std::collections::HashMap;
 
-use std::sync::Arc;
-use std::sync::RwLock;
+fn table_key(table: &str) -> String {
+    format!("table:{}", table)
+}
 
-/// Vector storage engine for high-performance similarity search
+fn dim_key(table: &str) -> String {
+    format!("dim:{}", table)
+}
+
+/// Read the established embedding dimension for a collection, if any.
 ///
-/// Specialized engine for storing and searching vector embeddings with
-/// advanced indexing algorithms. Supports multiple distance metrics and
-/// provides both exact and approximate nearest neighbor search.
+/// Dimensions are tracked per collection in a shared `dims` sled tree so that
+/// inserts and queries are validated against a consistent shape instead of
+/// failing mid-scan.
+fn read_collection_dim(db: &Db, table: &str) -> crate::Result<Option<usize>> {
+    let dims = db.open_tree("dims")?;
+    match dims.get(dim_key(table))? {
+        Some(bytes) => {
+            let dim = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or_else(|| crate::Error::DataCorruption("corrupt dimension metadata".into()))?;
+            Ok(Some(dim))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Persist the embedding dimension for a collection.
+fn write_collection_dim(db: &Db, table: &str, dim: usize) -> crate::Result<()> {
+    let dims = db.open_tree("dims")?;
+    dims.insert(dim_key(table), dim.to_string().as_bytes())?;
+    dims.flush()?;
+    Ok(())
+}
+
+/// Remove the embedding dimension for a collection.
+fn clear_collection_dim(db: &Db, table: &str) -> crate::Result<()> {
+    let dims = db.open_tree("dims")?;
+    dims.remove(dim_key(table))?;
+    Ok(())
+}
+
+/// Validate a record's `vector` field against the collection dimension,
+/// establishing the dimension on first insert. Records without a `vector`
+/// field are allowed (payload records) but are skipped by similarity scans.
+fn validate_and_track_dimension(
+    db: &Db,
+    table: &str,
+    data: &serde_json::Value,
+) -> crate::Result<()> {
+    let Some(vector) = data.get("vector") else {
+        return Ok(());
+    };
+    let dim = crate::storage::validation::vector_dimension(vector)?;
+    match read_collection_dim(db, table)? {
+        Some(d) if d != dim => {
+            return Err(crate::Error::InvalidRequest(format!(
+                "vector dimension {} does not match collection dimension {}",
+                dim, d
+            )));
+        }
+        Some(_) => {}
+        None => write_collection_dim(db, table, dim)?,
+    }
+    Ok(())
+}
+
+/// Vector storage engine for brute-force similarity search
+///
+/// Stores JSON records in sled-backed collections (one sled tree per
+/// collection) and answers cosine-similarity queries. Each record is inserted
+/// under a nanosecond-timestamp id; a `vector` field holds the embedding to
+/// compare against.
 ///
 /// # Key Features
-/// - Multiple indexing algorithms (IVF, HNSW, Flat)
-/// - SIMD-accelerated distance calculations
-/// - Configurable quantization for memory efficiency
-/// - Concurrent read/write operations
-/// - Metadata storage alongside vectors
+/// - Brute-force cosine similarity search via `query_vector` conditions
+/// - Paginated scans of a collection when no query vector is given
+/// - Per-collection analysis (record counts, field types) via `analyze`
+/// - Thread-safe concurrent reads and writes through sled trees
 ///
-/// # Supported Use Cases
+/// # Use Cases
 /// - Semantic search and retrieval
-/// - Recommendation systems
-/// - Image and video similarity
-/// - Anomaly detection in high dimensions
-/// - ML model embeddings storage
+/// - ML model embedding storage
+/// - Recommendation features and anomaly detection features
 ///
 /// # Performance Characteristics
-/// - **Query Latency**: < 1ms for approximate search (typical)
-/// - **Throughput**: 1000-10000 queries/second
-/// - **Accuracy**: Configurable (90-99% recall possible)
-/// - **Memory Efficiency**: 20-80% compression via quantization
-/// - **Scalability**: Millions of vectors supported
+/// - Search is O(n) over the collection with no approximate indexes
+/// - Suitable for datasets where an exhaustive cosine scan is acceptable
 pub struct VectorEngine {
-    /// Configuration for vector operations and indexing
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
-    /// Embedded database for persistent vector storage
     db: Db,
-    /// File encryption manager for data-at-rest security
-    /// Vector files are encrypted with AES-256-GCM to prevent
-    /// unauthorized reading with hexadecimal editors
-    #[allow(dead_code)]
-    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
-}
-
-/// Internal representation of a vector collection
-///
-/// Contains all data and metadata for a single vector collection,
-/// including the vectors themselves, their metadata, and indexing structures.
-#[allow(dead_code)]
-#[derive(Debug)]
-struct VectorCollection {
-    /// Collection name/identifier
-    name: String,
-    /// Vector dimensionality (fixed for all vectors in collection)
-    dimension: usize,
-    /// Storage for vector data and associated metadata
-    vectors: Vec<VectorData>,
-    /// Optional index for accelerated similarity search
-    index: Option<VectorIndex>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct VectorData {
-    id: String,
-    vector: Vec<f32>,
-    metadata: serde_json::Value,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct VectorIndex {
-    index_type: VectorIndexType,
-    data: Vec<u8>,
-}
-
-#[allow(dead_code, clippy::upper_case_acronyms)]
-#[derive(Debug)]
-enum VectorIndexType {
-    IVF { nlist: usize, nprobe: usize },
-    HNSW { m: usize, ef_construction: usize },
-    Flat,
 }
 
 impl VectorEngine {
+    /// Create a new vector engine instance.
+    ///
+    /// Opens the sled database at `{data_dir}/vector`. Collections are created
+    /// lazily on first use.
+    ///
+    /// # Errors
+    /// Returns an error if the sled database cannot be opened.
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/vector", config.storage.data_dir);
         let db = sled::open(&db_path)?;
 
-        let file_encryption = if config.security.encryption_enabled {
-            Some(FileEncryptionManager::new())
-        } else {
-            None
-        };
-
-        Ok(VectorEngine {
-            config: config.clone(),
-            db,
-            file_encryption: Arc::new(RwLock::new(file_encryption)),
-        })
+        Ok(VectorEngine { db })
     }
 
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> crate::Result<f32> {
+        if a.len() != b.len() {
+            return Err(crate::Error::InvalidRequest(
+                "vector dimensions must match".into(),
+            ));
+        }
         let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        dot_product / (norm_a * norm_b)
-    }
-
-    #[allow(dead_code)]
-    fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y).powi(2))
-            .sum::<f32>()
-            .sqrt()
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return Ok(0.0);
+        }
+        Ok(dot_product / (norm_a * norm_b))
     }
 
     fn matches_conditions(data: &serde_json::Value, conditions: &serde_json::Value) -> bool {
@@ -419,24 +207,27 @@ impl StorageEngine for VectorEngine {
         self
     }
 
+    /// Insert a new vector record, returning its timestamp-based unique id.
     async fn insert(
         &self,
         table: &str,
         data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
+        let value = serde_json::to_vec(data)?;
+        let table_owned = table.to_string();
+        let data = data.clone();
         let result: u64 = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
-            let data = data.clone();
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<u64> {
+                validate_and_track_dimension(&db, &table_owned, &data)?;
                 let tree = db.open_tree(table_key)?;
                 let id = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_nanos() as u64;
                 let key = id.to_be_bytes();
-                let value = serde_json::to_vec(&data)?;
                 tree.insert(key, value)?;
                 tree.flush()?;
                 Ok(id)
@@ -447,6 +238,12 @@ impl StorageEngine for VectorEngine {
         Ok(result)
     }
 
+    /// Query records from a vector collection.
+    ///
+    /// If `conditions` contains a `query_vector` array, performs a cosine
+    /// similarity search and returns the top-K matches ranked by descending
+    /// similarity (exposed in each record's `similarity` metadata). Otherwise
+    /// performs a plain paginated scan of all records.
     async fn select(
         &self,
         table: &str,
@@ -456,43 +253,52 @@ impl StorageEngine for VectorEngine {
         _transaction: &crate::transaction::Transaction,
     ) -> Result<Vec<Record>> {
         if let Some(conditions) = conditions {
-            if let Some(query_vec) = conditions.get("query_vector").and_then(|v| v.as_array()) {
-                let query_vec: Vec<f32> = query_vec
-                    .iter()
-                    .filter_map(|v| v.as_f64())
-                    .map(|v| v as f32)
-                    .collect();
+            if let Some(query_vec_val) = conditions.get("query_vector") {
+                let query_vec = crate::storage::validation::parse_finite_vector(query_vec_val)?;
                 let limit = if limit == 0 { 10 } else { limit };
 
                 let result: Vec<Record> = tokio::task::spawn_blocking({
                     let db = self.db.clone();
-                    let table_key = format!("table:{}", table);
+                    let table_key = table_key(table);
+                    let table_owned = table.to_string();
                     let query_vec = query_vec.clone();
                     move || -> crate::Result<Vec<Record>> {
                         let tree = db.open_tree(table_key)?;
+                        if let Some(d) = read_collection_dim(&db, &table_owned)? {
+                            if d != query_vec.len() {
+                                return Err(crate::Error::InvalidRequest(format!(
+                                "query vector dimension {} does not match collection dimension {}",
+                                query_vec.len(),
+                                d
+                            )));
+                            }
+                        }
                         let mut similarities = Vec::new();
 
-                        for item in tree.iter() {
+                        for item in &tree {
                             let (key, value) = item?;
-                            let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
+                            let ts_bytes: [u8; 8] = key.as_ref().try_into().map_err(|_| {
+                                crate::Error::DataCorruption("vector key is not 8 bytes".into())
+                            })?;
+                            let id = u64::from_be_bytes(ts_bytes);
                             let data: serde_json::Value = serde_json::from_slice(&value)?;
 
-                            if let Some(vec) = data.get("vector").and_then(|v| v.as_array()) {
-                                let vec: Vec<f32> = vec
-                                    .iter()
-                                    .filter_map(|v| v.as_f64())
-                                    .map(|v| v as f32)
-                                    .collect();
-                                let similarity = Self::cosine_similarity(&query_vec, &vec);
-                                similarities.push((id, data, similarity));
-                            }
+                            let Some(vec_val) = data.get("vector") else {
+                                continue;
+                            };
+                            let vec = crate::storage::validation::parse_finite_vector(vec_val)?;
+                            let similarity = Self::cosine_similarity(&query_vec, &vec)?;
+                            similarities.push((id, data, similarity));
                         }
 
                         similarities.sort_by(|a, b| {
                             b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
                         });
                         let mut records = Vec::new();
-                        for (id, data, similarity) in similarities.into_iter().take(limit as usize)
+                        for (id, data, similarity) in similarities
+                            .into_iter()
+                            .skip(offset as usize)
+                            .take(limit as usize)
                         {
                             let mut metadata = HashMap::new();
                             metadata.insert("similarity".to_string(), similarity.to_string());
@@ -513,7 +319,7 @@ impl StorageEngine for VectorEngine {
                 // Normal select
                 let result: Vec<Record> = tokio::task::spawn_blocking({
                     let db = self.db.clone();
-                    let table_key = format!("table:{}", table);
+                    let table_key = table_key(table);
                     let limit = if limit == 0 { u64::MAX } else { limit };
                     move || -> crate::Result<Vec<Record>> {
                         let tree = db.open_tree(table_key)?;
@@ -528,7 +334,10 @@ impl StorageEngine for VectorEngine {
                             }
 
                             let (key, value) = item?;
-                            let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
+                            let ts_bytes: [u8; 8] = key.as_ref().try_into().map_err(|_| {
+                                crate::Error::DataCorruption("vector key is not 8 bytes".into())
+                            })?;
+                            let id = u64::from_be_bytes(ts_bytes);
                             let data: serde_json::Value = serde_json::from_slice(&value)?;
 
                             records.push(Record {
@@ -558,6 +367,8 @@ impl StorageEngine for VectorEngine {
         }
     }
 
+    /// Update records matching the conditions by merging the new field values,
+    /// returning the number of updated records.
     async fn update(
         &self,
         table: &str,
@@ -570,13 +381,14 @@ impl StorageEngine for VectorEngine {
         let table_owned = table.to_string();
         let result: u64 = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table_owned);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<u64> {
+                validate_and_track_dimension(&db, &table_owned, &data)?;
                 let tree = db.open_tree(table_key)?;
                 let mut updated = 0u64;
                 let mut batch = Vec::new();
 
-                for item in tree.iter() {
+                for item in &tree {
                     let (key, value) = item?;
                     let stored: serde_json::Value = serde_json::from_slice(&value)?;
 
@@ -618,6 +430,7 @@ impl StorageEngine for VectorEngine {
         Ok(result)
     }
 
+    /// Delete records matching the conditions, returning the number deleted.
     async fn delete(
         &self,
         table: &str,
@@ -628,13 +441,13 @@ impl StorageEngine for VectorEngine {
         let table_owned = table.to_string();
         let result: u64 = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table_owned);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<u64> {
                 let tree = db.open_tree(table_key)?;
                 let mut deleted = 0u64;
                 let mut to_remove = Vec::new();
 
-                for item in tree.iter() {
+                for item in &tree {
                     let (key, value) = item?;
                     let stored: serde_json::Value = serde_json::from_slice(&value)?;
 
@@ -664,6 +477,8 @@ impl StorageEngine for VectorEngine {
         Ok(result)
     }
 
+    /// Produce a JSON analysis of a vector collection: total records,
+    /// per-field occurrence counts, and inferred field types.
     async fn analyze(
         &self,
         table: &str,
@@ -673,14 +488,14 @@ impl StorageEngine for VectorEngine {
         let table_owned = table.to_string();
         let result: serde_json::Value = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table_owned);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<serde_json::Value> {
                 let tree = db.open_tree(table_key)?;
                 let mut total_records = 0u64;
                 let mut field_counts: HashMap<String, u64> = HashMap::new();
                 let mut field_types: HashMap<String, String> = HashMap::new();
 
-                for item in tree.iter() {
+                for item in &tree {
                     let (_, value) = item?;
                     total_records += 1;
                     let data: serde_json::Value = serde_json::from_slice(&value)?;
@@ -720,10 +535,11 @@ impl StorageEngine for VectorEngine {
         Ok(serde_json::to_string(&result)?)
     }
 
+    /// Create a vector collection by opening its backing sled tree.
     async fn create_table(&self, table: &str, _schema: &Schema) -> Result<()> {
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(table);
             move || -> crate::Result<()> {
                 db.open_tree(table_key)?;
                 Ok(())
@@ -735,12 +551,15 @@ impl StorageEngine for VectorEngine {
         Ok(())
     }
 
+    /// Drop a vector collection by deleting its backing sled tree.
     async fn drop_table(&self, table: &str) -> Result<()> {
+        let table_owned = table.to_string();
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<()> {
                 db.drop_tree(table_key)?;
+                clear_collection_dim(&db, &table_owned)?;
                 Ok(())
             }
         })
@@ -750,10 +569,12 @@ impl StorageEngine for VectorEngine {
         Ok(())
     }
 
+    /// Delete every record from a vector collection by clearing its tree.
     async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
+        let table_owned = table.to_string();
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<()> {
                 let tree = db.open_tree(table_key)?;
                 let mut iter = tree.iter();
@@ -761,6 +582,7 @@ impl StorageEngine for VectorEngine {
                     tree.remove(key)?;
                 }
                 tree.flush()?;
+                clear_collection_dim(&db, &table_owned)?;
                 Ok(())
             }
         })
@@ -770,10 +592,13 @@ impl StorageEngine for VectorEngine {
         Ok(())
     }
 
+    /// Return [`TableInfo`] for a vector collection, including row count,
+    /// sampled field names, and a schema declaring a cosine-similarity index
+    /// on the `vector` column.
     async fn table_info(&self, table: &str) -> Result<TableInfo> {
         let (count, size, fields): (usize, u64, Vec<String>) = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(table);
             move || -> crate::Result<(usize, u64, Vec<String>)> {
                 let tree = db.open_tree(table_key)?;
                 let count = tree.len();
@@ -826,5 +651,128 @@ impl StorageEngine for VectorEngine {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         })
+    }
+
+    /// Enumerate the names of all vector collections from their sled trees.
+    fn list_tables(&self) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .db
+            .tree_names()
+            .into_iter()
+            .filter_map(|name| {
+                let name = String::from_utf8(name.to_vec()).ok()?;
+                name.strip_prefix("table:").map(|t| t.to_string())
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::{IsolationLevel, Transaction, TransactionStatus};
+
+    fn config(dir: &tempfile::TempDir) -> PrimusDBConfig {
+        let mut config = PrimusDBConfig::default();
+        config.storage.data_dir = dir.path().to_string_lossy().into_owned();
+        config
+    }
+
+    fn tx() -> Transaction {
+        Transaction {
+            id: "test".to_string(),
+            operations: vec![],
+            status: TransactionStatus::Prepared,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            isolation_level: IsolationLevel::ReadCommitted,
+            timeout_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vector_dimension_tracking_rejects_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VectorEngine::new(&config(&dir)).unwrap();
+
+        engine
+            .insert(
+                "dims",
+                &serde_json::json!({"vector": [1.0, 2.0, 3.0]}),
+                &tx(),
+            )
+            .await
+            .unwrap();
+
+        let err = engine
+            .insert("dims", &serde_json::json!({"vector": [1.0, 2.0]}), &tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_vector_rejects_non_numeric_elements() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VectorEngine::new(&config(&dir)).unwrap();
+
+        let err = engine
+            .insert("bad", &serde_json::json!({"vector": [1.0, "x"]}), &tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_vector_query_dimension_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VectorEngine::new(&config(&dir)).unwrap();
+
+        engine
+            .insert("q", &serde_json::json!({"vector": [1.0, 2.0, 3.0]}), &tx())
+            .await
+            .unwrap();
+
+        let err = engine
+            .select(
+                "q",
+                Some(&serde_json::json!({"query_vector": [1.0, 2.0]})),
+                10,
+                0,
+                &tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_vector_zero_norm_similarity_is_zero_not_nan() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VectorEngine::new(&config(&dir)).unwrap();
+
+        engine
+            .insert(
+                "zero",
+                &serde_json::json!({"vector": [0.0, 0.0, 0.0]}),
+                &tx(),
+            )
+            .await
+            .unwrap();
+
+        let records = engine
+            .select(
+                "zero",
+                Some(&serde_json::json!({"query_vector": [1.0, 0.0, 0.0]})),
+                10,
+                0,
+                &tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].metadata.get("similarity").unwrap(), "0");
     }
 }

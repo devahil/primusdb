@@ -11,8 +11,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/* && \
     groupadd -r primusdb && useradd -r -g primusdb primusdb
-COPY --from=builder /build/target/release/primusdb-server /usr/local/bin/
-COPY --from=builder /build/target/release/primusdb-cli /usr/local/bin/
+COPY --from=builder /build/target/release/primusdb /usr/local/bin/
 USER primusdb
 EXPOSE 8080 9090
-ENTRYPOINT ["primusdb-server"]
+ENTRYPOINT ["primusdb", "server", "start"]

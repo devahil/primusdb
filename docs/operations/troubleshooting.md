@@ -16,7 +16,7 @@ curl http://localhost:8080/status
 curl http://localhost:8080/metrics
 
 # CLI status check
-primusdb-cli status
+primusdb server status
 ```
 
 ### Log Analysis
@@ -81,7 +81,7 @@ sudo chown -R primusdb:primusdb /var/lib/primusdb
 sudo chown -R primusdb:primusdb /var/log/primusdb
 
 # Check configuration syntax
-primusdb-server --config /etc/primusdb/primusdb.toml --dry-run
+primusdb server start --config /etc/primusdb/primusdb.toml --dry-run
 ```
 
 ### 2. High Memory Usage
@@ -101,7 +101,7 @@ free -h
 curl http://localhost:8080/metrics | grep cache
 
 # Analyze heap usage (if debug build)
-valgrind --tool=massif primusdb-server
+valgrind --tool=massif primusdb server start
 ```
 
 #### Solutions
@@ -135,7 +135,7 @@ echo 3 > /proc/sys/vm/drop_caches
 ```bash
 # Enable query logging
 export RUST_LOG=debug
-primusdb-server --log-level debug
+primusdb server start --log-level debug
 
 # Check query execution stats
 curl http://localhost:8080/metrics | grep query_duration
@@ -192,7 +192,7 @@ netstat -tlnp | grep LISTEN
 sudo ufw allow 8080/tcp
 
 # Check server binding
-primusdb-server --host 0.0.0.0 --port 8080
+primusdb server start --bind 0.0.0.0:8080
 
 # Verify configuration
 cat /etc/primusdb/primusdb.toml | grep -A 5 network
@@ -213,8 +213,11 @@ telnet localhost 8080
 # Check data integrity
 curl http://localhost:8080/api/v1/cache/cluster/health
 
-# Verify checksums
-primusdb-cli advanced analyze --storage-type columnar --table corrupted_table
+# Verify table schema and records
+primusdb db describe corrupted_table --schema
+
+# Verify signed integrity records
+primusdb integrity verify corrupted_table
 
 # Check disk health
 sudo smartctl -a /dev/sda
@@ -227,14 +230,17 @@ grep "ERROR\|WARN" /var/log/primusdb/primusdb.log | tail -20
 #### Solutions
 ```bash
 # Run consistency check
-primusdb-cli advanced analyze --storage-type columnar --table problematic_table
+primusdb integrity verify problematic_table
+
+# Run deep diagnostics
+primusdb doctor --aggressive
 
 # Repair corrupted data (if possible)
 # Backup current data first
-primusdb-cli backup --destination /backup/pre_repair_$(date +%Y%m%d)
+primusdb backup create --destination /backup/pre_repair_$(date +%Y%m%d)
 
 # Restore from backup if corruption is severe
-primusdb-cli restore --source /backup/latest_backup
+primusdb restore /backup/latest_backup
 ```
 
 ### 6. Cluster Synchronization Problems
@@ -268,7 +274,7 @@ curl -X POST http://coordinator:8080/api/v1/cluster/sync
 curl -X POST http://coordinator:8080/api/v1/cluster/rebalance
 
 # Check and repair replication
-primusdb-cli cluster repair --node problematic_node
+primusdb cluster repair --node problematic_node
 ```
 
 ### 7. AI/ML Operation Failures
@@ -330,7 +336,7 @@ gc_interval_seconds = 300
 ### CPU Optimization
 ```bash
 # Set CPU affinity
-taskset -c 0-7 primusdb-server
+taskset -c 0-7 primusdb server start
 
 # Adjust thread pool size
 export RAYON_NUM_THREADS=8
@@ -364,13 +370,13 @@ kill -9 $(pgrep primusdb)
 ### 2. Data Recovery
 ```bash
 # Create emergency backup
-primusdb-cli backup --destination /emergency_backup_$(date +%s)
+primusdb backup create --destination /emergency_backup_$(date +%s)
 
 # Restore from backup
-primusdb-cli restore --source /path/to/good/backup
+primusdb restore /path/to/good/backup
 
 # Verify data integrity
-primusdb-cli status
+primusdb server status
 ```
 
 ### 3. Cluster Recovery
@@ -444,7 +450,7 @@ if ! curl -s http://localhost:8080/health | grep -q '"status":"healthy"'; then
 fi
 
 # Weekly backups
-0 2 * * 1 primusdb-cli backup --destination /backup/weekly
+0 2 * * 1 primusdb backup create --destination /backup/weekly
 
 # Monthly performance review
 0 3 1 * * /path/to/performance_check.sh

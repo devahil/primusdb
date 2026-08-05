@@ -1,6 +1,6 @@
 # Driver Usage Guide
 
-PrimusDB provides language drivers for Rust, Python, Node.js, Java, and Ruby. As of v1.3.1-alpha, **no driver is published to a package registry** — all must be compiled from source.
+PrimusDB provides language drivers for Rust, Python, Node.js, Java, and Ruby. As of v1.3.2-alpha, **no driver is published to a package registry** — all must be compiled from source.
 
 All drivers communicate with a running PrimusDB server via its HTTP REST API. The native Rust driver additionally provides an in-process embedded mode.
 

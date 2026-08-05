@@ -32,8 +32,6 @@ impl Default for TrustConfig {
 }
 
 pub struct TrustManager {
-    #[allow(dead_code)]
-    config: TrustConfig,
     trusted_nodes: RwLock<HashMap<String, NodeTrustInfo>>,
 }
 
@@ -56,9 +54,8 @@ pub enum TrustLevel {
 }
 
 impl TrustManager {
-    pub fn new(config: TrustConfig) -> Result<Self, TrustError> {
+    pub fn new(_config: TrustConfig) -> Result<Self, TrustError> {
         Ok(Self {
-            config,
             trusted_nodes: RwLock::new(HashMap::new()),
         })
     }

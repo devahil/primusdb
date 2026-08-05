@@ -1,3 +1,9 @@
+//! Core primitives for PrimusDB.
+//!
+//! Defines the foundational types used throughout the project:
+//! `PrimusDBConfig`, `PrimusDB` struct, `Error` types, `Query` and
+//! `QueryOperation` types, and re-exports of common abstractions.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -76,6 +82,7 @@ pub struct SecurityConfig {
     pub encryption_enabled: bool,
     pub key_rotation_interval: u64,
     pub auth_required: bool,
+    pub mfa_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

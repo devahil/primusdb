@@ -45,9 +45,7 @@ cargo build --release --workspace
 ```
 
 Release binaries are placed in `target/release/`:
-- `target/release/primusdb` — Unified CLI (primary)
-- `target/release/primusdb-server` — Legacy server binary
-- `target/release/primusdb-cli` — Legacy CLI binary
+- `target/release/primusdb` — Unified CLI (primary; includes server via `primusdb server start`)
 
 ### Build Individual Packages
 
@@ -282,7 +280,7 @@ Creates a Linux distribution tarball containing binaries, docs, and configs:
 ./scripts/package-linux.sh
 
 # Package with explicit version
-./scripts/package-linux.sh --version 1.3.1-alpha
+./scripts/package-linux.sh --version 1.3.2-alpha
 
 # Package to custom output directory
 ./scripts/package-linux.sh --output ./dist

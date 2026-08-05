@@ -36,7 +36,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/executions/start")
                     .post(body)
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -57,7 +56,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/executions/" + executionId + "/finish")
                     .post(body)
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -81,7 +79,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/executions/" + executionId + "/check")
                     .post(body)
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -101,7 +98,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/status")
                     .get()
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -121,7 +117,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/metrics")
                     .get()
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -141,7 +136,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/executions")
                     .get()
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -161,7 +155,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/violations")
                     .get()
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -181,7 +174,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/policies")
                     .get()
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {
@@ -208,7 +200,6 @@ public class GovernorGateway {
             Request request = new Request.Builder()
                     .url(baseUrl + "/governor/policies/update")
                     .post(body)
-                    .addHeader("Authorization", "Bearer " + connection.getToken())
                     .build();
 
             try (Response response = httpClient.newCall(request).execute()) {

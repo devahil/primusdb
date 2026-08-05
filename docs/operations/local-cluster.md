@@ -24,7 +24,7 @@ A PrimusDB cluster consists of multiple nodes that communicate over the network.
                  Consensus (Raft) Layer
 ```
 
-In v1.3.1-alpha, cluster functionality is **partially implemented**. The CLI commands for querying cluster state are functional.
+In v1.3.2-alpha, cluster functionality is **partially implemented**. The CLI commands for querying cluster state are functional.
 
 ## `primusdb cluster status`
 
@@ -191,7 +191,7 @@ primusdb cluster leave --force
 
 ### Alpha Status: Stub
 
-In v1.3.1-alpha, `cluster leave` prints a placeholder message. The node is **not** removed from the cluster membership. Data draining is not implemented.
+In v1.3.2-alpha, `cluster leave` prints a placeholder message. The node is **not** removed from the cluster membership. Data draining is not implemented.
 
 ## Starting a Local Multi-Node Cluster
 
@@ -268,7 +268,7 @@ primusdb server start --config node1.toml
 primusdb server start --config node2.toml
 ```
 
-## Known Limitations in v1.3.1-alpha
+## Known Limitations in v1.3.2-alpha
 
 - **`cluster join`** sends a registration request but does not negotiate membership, replicate data, or participate in consensus automatically.
 - **`cluster leave`** / **`cluster failover`** send API requests to the cluster gateway. Data draining is not yet integrated.
@@ -277,7 +277,7 @@ primusdb server start --config node2.toml
 - **Consensus** (Raft) structure is present in the codebase but is not active in the default cluster configuration.
 - **Multi-node clusters** are effectively manual; each node operates independently unless manually coordinated via the API.
 
-## Federation: `primusdb-server --federation-id`
+## Federation: `primusdb server start --federation-id`
 
 For global deployments, PrimusDB supports a federation layer that connects multiple clusters across regions.
 
@@ -334,4 +334,4 @@ curl http://localhost:8080/api/v1/federation/domains
 curl http://localhost:8080/api/v1/federation/metrics
 ```
 
-> **Note:** Federation is also partially implemented in v1.3.1-alpha. API endpoints respond with data structures, but cross-cluster replication and DataDomain enforcement are not fully operational.
+> **Note:** Federation is also partially implemented in v1.3.2-alpha. API endpoints respond with data structures, but cross-cluster replication and DataDomain enforcement are not fully operational.

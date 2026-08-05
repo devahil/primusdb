@@ -38,8 +38,8 @@ Each candidate is verified by sending HTTP GET requests to `/health`, `/status`,
 ```
 Endpoint                   Node ID              Version    Status
 ---------------------------------------------------------------------------
-http://127.0.0.1:8080      local_node           1.3.1-alpha healthy
-http://127.0.0.1:8081      secondary_node        1.3.1-alpha healthy
+http://127.0.0.1:8080      local_node           1.3.2-alpha healthy
+http://127.0.0.1:8081      secondary_node        1.3.2-alpha healthy
 ```
 
 **JSON output:**
@@ -51,7 +51,7 @@ primusdb instance list --format json
   {
     "endpoint": "http://127.0.0.1:8080",
     "node_id": "local_node",
-    "version": "1.3.1-alpha",
+    "version": "1.3.2-alpha",
     "status": "healthy",
     "uptime_seconds": 3600,
     "enabled_engines": ["columnar", "vector", "document", "relational"],
@@ -91,8 +91,8 @@ primusdb instance discover --host 192.168.1.100 --start-port 8080 --max-ports 5 
 ```
 Endpoint                   Node ID              Version    Status
 ---------------------------------------------------------------------------
-http://192.168.1.100:8080  node_alpha           1.3.1-alpha healthy
-http://192.168.1.100:9090  node_beta            1.3.1-alpha healthy
+http://192.168.1.100:8080  node_alpha           1.3.2-alpha healthy
+http://192.168.1.100:9090  node_beta            1.3.2-alpha healthy
 ```
 
 **No instances found:**
@@ -132,7 +132,7 @@ Key              Value
 Endpoint         http://localhost:8080
 Health           healthy
 status.status    running
-status.version   1.3.1-alpha
+status.version   1.3.2-alpha
 status.node_id   local_node
 ```
 
@@ -143,11 +143,11 @@ Key                        Value
 Endpoint                   http://localhost:8080
 Health                     healthy
 health.status              healthy
-health.version             1.3.1-alpha
+health.version             1.3.2-alpha
 health.uptime_seconds      3600
 health.enabled_engines     ["columnar","vector","document","relational"]
 status.status              running
-status.version             1.3.1-alpha
+status.version             1.3.2-alpha
 status.node_id             local_node
 status.uptime_seconds      3600
 status.enabled_engines     ["columnar","vector","document","relational"]
@@ -222,7 +222,7 @@ Could not stop http://localhost:8080: No process found on port 8080. Try: kill $
 
 ## `primusdb instance logs`
 
-> **Alpha limitation:** Log retrieval is not fully implemented in v1.3.1-alpha.
+> **Alpha limitation:** Log retrieval is not fully implemented in v1.3.2-alpha.
 
 **Usage:**
 ```bash
@@ -240,7 +240,7 @@ primusdb instance logs http://localhost:8080 --follow
 
 **Expected output:**
 ```
-Log retrieval not implemented in v1.3.1-alpha.
+Log retrieval not implemented in v1.3.2-alpha.
 Use: journalctl -u primusdb or check server output.
 ```
 
@@ -286,7 +286,7 @@ The following config files are checked for `network.port` and `network.bind_addr
 
 ### Process List
 
-On Linux, running PrimusDB processes are detected by scanning `/proc` for binaries named `primusdb` or `primusdb-server` and extracting their listening ports.
+On Linux, running PrimusDB processes are detected by scanning `/proc` for binaries named `primusdb` and extracting their listening ports.
 
 ---
 

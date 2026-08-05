@@ -5,6 +5,43 @@
  * Version: 1.2.0-alpha - Added: Key-Value engine with CouchDB-like API
  */
 
+/*!
+# PrimusDB Key-Value Storage Engine
+
+The key-value engine exposes a CouchDB-compatible document API over an
+embedded sled database: databases of JSON documents with MVCC-style revision
+tracking (`_id`/`_rev`), bulk operations, Mango-style `find` selectors,
+secondary indexes, and per-database encryption flags. Use it when you need
+simple, high-speed, schema-free document storage with revision control and a
+familiar CouchDB/Mango query surface.
+
+```text
+Key-Value Engine (CouchDB-compatible)
+═══════════════════════════════════════════════════
+
+put / get / delete ──► KeyValueEngine ──► RwLock maps ──► sled tree per DB
+                            │
+                            ├─► revision control (_rev, MVCC)
+                            ├─► secondary indexes (Mango)
+                            └─► change sequence (_meta:sequence)
+
+all_docs / find ──► selector match ($eq $gt $in $exists ...) ──► JSON rows
+```
+
+## Main Types & Functions
+
+- [`KeyValueEngine`]: the key-value storage engine implementing [`StorageEngine`].
+- [`KvDocument`]: a stored document with CouchDB-style `_id`/`_rev` fields.
+- [`KvAttachment`]: a binary attachment associated with a document.
+- [`KvBulkDocsRequest`] / [`KvBulkDocsResponse`]: bulk `_bulk_docs` payloads.
+- [`KvViewRequest`] / [`KvViewResult`]: map/reduce view definitions.
+- [`KvFindRequest`]: Mango-style `find` query.
+- [`KvIndex`]: a secondary index definition.
+- `create_database` / `delete_database` / `list_databases`: database lifecycle.
+- `put_document` / `get_document` / `delete_document` / `bulk_docs`: document CRUD.
+- `find` / `all_docs` / `get_db_info`: querying and introspection.
+*/
+
 use crate::{
     storage::{Schema, StorageEngine, TableInfo},
     PrimusDBConfig, Record, Result,
@@ -16,91 +53,152 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
+/// A document in the key-value store with CouchDB-style revision tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvDocument {
+    /// Document identifier (CouchDB-style `_id`).
     pub _id: String,
+    /// Current revision string (e.g. `1-<hash>`), used for MVCC checks.
     pub _rev: Option<String>,
+    /// The document body as JSON.
     pub value: serde_json::Value,
+    /// Creation timestamp in RFC 3339 format.
     pub created_at: Option<String>,
+    /// Last modification timestamp in RFC 3339 format.
     pub updated_at: Option<String>,
+    /// Whether the document has been tombstoned (soft-deleted).
     pub deleted: bool,
+    /// Unix timestamp in epoch millis after which the document is treated as
+    /// expired and invisible to reads. `None` means the document never expires.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
+/// A binary attachment associated with a key-value document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvAttachment {
+    /// MIME content type of the attachment.
     pub content_type: String,
+    /// Base64-encoded binary payload.
     pub data: String,
+    /// Byte length of the decoded payload.
     pub length: u64,
 }
 
+/// A `_bulk_docs` request: a batch of documents with an optional atomicity flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvBulkDocsRequest {
+    /// Documents to insert or update in a single batch.
     pub docs: Vec<KvDocument>,
+    /// If `true`, the whole batch succeeds or fails as a unit (no partial application).
     pub all_or_nothing: Option<bool>,
 }
 
+/// Per-document result of a `_bulk_docs` operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvBulkDocsResponse {
+    /// ID of the affected document.
     pub id: String,
+    /// New revision of the document on success.
     pub rev: Option<String>,
+    /// Error key (e.g. `"conflict"`) when the operation failed.
     pub error: Option<String>,
 }
 
+/// A map/reduce view request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvViewRequest {
+    /// JavaScript map function (stored, not executed).
     pub map: String,
+    /// Optional JavaScript reduce function (stored, not executed).
     pub reduce: Option<String>,
 }
 
+/// A single row emitted by a view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvViewResult {
+    /// Document ID associated with the row.
     pub id: String,
+    /// Emitted key.
     pub key: serde_json::Value,
+    /// Emitted value.
     pub value: serde_json::Value,
 }
 
+/// A Mango-style `find` query over a database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvFindRequest {
+    /// Selector object describing the match conditions.
     pub selector: serde_json::Value,
+    /// Maximum number of documents to return.
     pub limit: Option<usize>,
+    /// Number of documents to skip.
     pub skip: Option<usize>,
+    /// Sort specification (`{"field": "...", "direction": "asc"|"desc"}`).
     pub sort: Option<Vec<serde_json::Value>>,
 }
 
+/// A secondary index definition on a database.
 #[derive(Debug, Clone)]
 pub struct KvIndex {
+    /// Unique index name within the database.
     pub name: String,
+    /// Fields the index is built over.
     pub fields: Vec<String>,
+    /// Optional partial-index selector.
     pub selector: Option<serde_json::Value>,
 }
 
+/// Key-value storage engine with a CouchDB-compatible API.
+///
+/// Supports document CRUD, revision control, bulk operations, Mango-style
+/// queries (`find`), secondary indexes, and per-database encryption.
 #[derive(Clone)]
 pub struct KeyValueEngine {
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
     db: sled::Db,
     databases: Arc<RwLock<HashMap<String, KvDatabase>>>,
     encrypted_databases: Arc<RwLock<HashMap<String, bool>>>,
 }
 
+/// An in-memory view of a key-value database.
+///
+/// Holds the live document map, secondary indexes, and the per-database
+/// update sequence used for change tracking.
 #[derive(Clone)]
 pub struct KvDatabase {
-    #[allow(dead_code)]
-    name: String,
     documents: Arc<RwLock<HashMap<String, KvDocument>>>,
     indexes: Arc<RwLock<HashMap<String, KvIndex>>>,
     sequence: Arc<RwLock<u64>>,
-    #[allow(dead_code)]
-    attachments: Arc<RwLock<HashMap<String, HashMap<String, KvAttachment>>>>,
+    revision_limit: Arc<RwLock<u64>>,
+}
+
+/// Return the current wall-clock time in epoch millis.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// True when a document has a TTL that has already lapsed.
+fn is_expired(doc: &KvDocument, now: i64) -> bool {
+    matches!(doc.expires_at, Some(expires) if expires <= now)
 }
 
 impl KeyValueEngine {
+    /// Create a new key-value engine instance.
+    ///
+    /// Opens the sled database at `{data_dir}/keyvalue` and loads all existing
+    /// databases (documents, change sequences, and indexes) into memory.
+    ///
+    /// # Errors
+    /// Returns an error if the sled database cannot be opened or a stored
+    /// document cannot be deserialized.
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let path = format!("{}/keyvalue", config.storage.data_dir);
         let db = sled::open(&path)?;
 
         let engine = KeyValueEngine {
-            config: config.clone(),
             db,
             databases: Arc::new(RwLock::new(HashMap::new())),
             encrypted_databases: Arc::new(RwLock::new(HashMap::new())),
@@ -122,6 +220,7 @@ impl KeyValueEngine {
             let tree = self.db.open_tree(&name)?;
             let mut documents = HashMap::new();
             let mut sequence = 0u64;
+            let mut revision_limit = 1000u64;
 
             for result in tree.iter() {
                 let (key, value) = result?;
@@ -134,6 +233,12 @@ impl KeyValueEngine {
                     continue;
                 }
 
+                if key_str == "_meta:revision_limit" {
+                    let limit_val: serde_json::Value = serde_json::from_slice(&value)?;
+                    revision_limit = limit_val.as_u64().unwrap_or(1000).max(1);
+                    continue;
+                }
+
                 let doc: KvDocument = serde_json::from_slice(&value)?;
                 documents.insert(key_str, doc);
             }
@@ -141,11 +246,10 @@ impl KeyValueEngine {
             databases.insert(
                 name.clone(),
                 KvDatabase {
-                    name,
                     documents: Arc::new(RwLock::new(documents)),
                     indexes: Arc::new(RwLock::new(HashMap::new())),
                     sequence: Arc::new(RwLock::new(sequence)),
-                    attachments: Arc::new(RwLock::new(HashMap::new())),
+                    revision_limit: Arc::new(RwLock::new(revision_limit)),
                 },
             );
         }
@@ -153,6 +257,10 @@ impl KeyValueEngine {
         Ok(())
     }
 
+    /// Create a new empty key-value database.
+    ///
+    /// # Errors
+    /// Returns an error if a database with the same name already exists.
     pub fn create_database(&self, name: &str) -> Result<()> {
         let mut databases = self.databases.write().unwrap();
         if databases.contains_key(name) {
@@ -167,11 +275,10 @@ impl KeyValueEngine {
         databases.insert(
             name.to_string(),
             KvDatabase {
-                name: name.to_string(),
                 documents: Arc::new(RwLock::new(HashMap::new())),
                 indexes: Arc::new(RwLock::new(HashMap::new())),
                 sequence: Arc::new(RwLock::new(0)),
-                attachments: Arc::new(RwLock::new(HashMap::new())),
+                revision_limit: Arc::new(RwLock::new(1000)),
             },
         );
 
@@ -179,6 +286,10 @@ impl KeyValueEngine {
         Ok(())
     }
 
+    /// Delete a key-value database and all of its data.
+    ///
+    /// # Errors
+    /// Returns an error if the database does not exist.
     pub fn delete_database(&self, name: &str) -> Result<()> {
         let mut databases = self.databases.write().unwrap();
         if !databases.contains_key(name) {
@@ -195,11 +306,17 @@ impl KeyValueEngine {
         Ok(())
     }
 
+    /// List the names of all key-value databases.
     pub fn list_databases(&self) -> Result<Vec<String>> {
         let databases = self.databases.read().unwrap();
         Ok(databases.keys().cloned().collect())
     }
 
+    /// Fetch a document by its `_id`.
+    ///
+    /// # Errors
+    /// Returns an error if the database or document does not exist, or if the
+    /// document has been soft-deleted.
     pub fn get_document(&self, db_name: &str, doc_id: &str) -> Result<KvDocument> {
         let databases = self.databases.read().unwrap();
         let database = databases.get(db_name).ok_or_else(|| {
@@ -218,14 +335,77 @@ impl KeyValueEngine {
             )));
         }
 
+        if is_expired(doc, now_millis()) {
+            return Err(crate::Error::ValidationError(format!(
+                "Document {} has expired",
+                doc_id
+            )));
+        }
+
         Ok(doc.clone())
     }
 
+    /// Create or update a document.
+    ///
+    /// Generates a new `_rev` (incrementing the revision number on updates,
+    /// resurrecting tombstoned documents), updates the change sequence, and
+    /// persists both the document and the sequence to sled.
+    ///
+    /// # Returns
+    /// The stored document with its new revision.
     pub fn put_document(
         &self,
         db_name: &str,
         doc_id: &str,
         data: serde_json::Value,
+    ) -> Result<KvDocument> {
+        self.put_document_inner(db_name, doc_id, data, None, None)
+    }
+
+    /// Compare-and-set write: only succeeds when the current revision of the
+    /// document equals `expected_rev`.
+    ///
+    /// `expected_rev = None` behaves like [`Self::put_document`] (unconditional
+    /// create-or-update). A `Some` revision that does not match the stored
+    /// revision (including a missing or tombstoned document) fails with a
+    /// `ValidationError`.
+    pub fn put_document_cas(
+        &self,
+        db_name: &str,
+        doc_id: &str,
+        expected_rev: Option<&str>,
+        data: serde_json::Value,
+    ) -> Result<KvDocument> {
+        self.put_document_inner(db_name, doc_id, data, expected_rev, None)
+    }
+
+    /// Write a document that expires `ttl_secs` seconds from now.
+    ///
+    /// Expired documents are invisible to reads (and skipped by queries);
+    /// storage space is reclaimed on demand. `ttl_secs = 0` is rejected.
+    pub fn put_document_ttl(
+        &self,
+        db_name: &str,
+        doc_id: &str,
+        data: serde_json::Value,
+        ttl_secs: u64,
+    ) -> Result<KvDocument> {
+        if ttl_secs == 0 {
+            return Err(crate::Error::ValidationError(
+                "TTL must be greater than zero".to_string(),
+            ));
+        }
+        let expires_at = now_millis().checked_add((ttl_secs as i64) * 1000);
+        self.put_document_inner(db_name, doc_id, data, None, expires_at)
+    }
+
+    fn put_document_inner(
+        &self,
+        db_name: &str,
+        doc_id: &str,
+        data: serde_json::Value,
+        expected_rev: Option<&str>,
+        expires_at: Option<i64>,
     ) -> Result<KvDocument> {
         let mut databases = self.databases.write().unwrap();
         let database = databases.get_mut(db_name).ok_or_else(|| {
@@ -234,24 +414,28 @@ impl KeyValueEngine {
 
         let mut docs = database.documents.write().unwrap();
 
+        if let Some(expected) = expected_rev {
+            let current = docs
+                .get(doc_id)
+                .filter(|d| !d.deleted)
+                .and_then(|d| d._rev.clone());
+            if current.as_deref() != Some(expected) {
+                return Err(crate::Error::ValidationError(
+                    "Revision mismatch".to_string(),
+                ));
+            }
+        }
+
+        let limit = *database.revision_limit.read().unwrap();
+
         let (new_rev, is_new) = if let Some(existing) = docs.get(doc_id) {
             if existing.deleted {
-                (Self::generate_rev(), true)
+                (Self::next_rev(None, limit)?, true)
             } else {
-                let current_rev = existing._rev.as_ref().ok_or_else(|| {
-                    crate::Error::ValidationError("Document has no _rev".to_string())
-                })?;
-                let parts: Vec<&str> = current_rev.split('-').collect();
-                if parts.len() != 2 {
-                    return Err(crate::Error::ValidationError(
-                        "Invalid _rev format".to_string(),
-                    ));
-                }
-                let new_num: u64 = parts[0].parse().unwrap_or(0) + 1;
-                (format!("{}-{}", new_num, Self::generate_rev_hash()), false)
+                (Self::next_rev(existing._rev.as_deref(), limit)?, false)
             }
         } else {
-            (format!("1-{}", Self::generate_rev_hash()), true)
+            (Self::next_rev(None, limit)?, true)
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -262,6 +446,7 @@ impl KeyValueEngine {
             created_at: if is_new { Some(now.clone()) } else { None },
             updated_at: Some(now),
             deleted: false,
+            expires_at,
         };
 
         docs.insert(doc_id.to_string(), document.clone());
@@ -283,6 +468,14 @@ impl KeyValueEngine {
         Ok(document)
     }
 
+    /// Soft-delete a document (MVCC tombstone) given its current `_rev`.
+    ///
+    /// Marks the document as deleted and bumps its revision. The tombstone is
+    /// kept so that concurrent writers detect conflicts.
+    ///
+    /// # Errors
+    /// Returns an error if the document does not exist or the supplied
+    /// revision does not match the stored one.
     pub fn delete_document(&self, db_name: &str, doc_id: &str, rev: &str) -> Result<KvDocument> {
         let mut databases = self.databases.write().unwrap();
         let database = databases.get_mut(db_name).ok_or_else(|| {
@@ -301,14 +494,8 @@ impl KeyValueEngine {
             ));
         }
 
-        let parts: Vec<&str> = rev.split('-').collect();
-        if parts.len() != 2 {
-            return Err(crate::Error::ValidationError(
-                "Invalid _rev format".to_string(),
-            ));
-        }
-        let new_num: u64 = parts[0].parse().unwrap_or(0) + 1;
-        let new_rev = format!("{}-{}", new_num, Self::generate_rev_hash());
+        let limit = *database.revision_limit.read().unwrap();
+        let new_rev = Self::next_rev(existing._rev.as_deref(), limit)?;
 
         existing._rev = Some(new_rev);
         existing.deleted = true;
@@ -333,6 +520,13 @@ impl KeyValueEngine {
         Ok(result)
     }
 
+    /// Apply a batch of document writes (`_bulk_docs`).
+    ///
+    /// Each document is inserted or updated depending on its `_rev`. With
+    /// `all_or_nothing` set, conflicts fail the entire batch.
+    ///
+    /// # Returns
+    /// A per-document result list with new revisions or conflict errors.
     pub fn bulk_docs(
         &self,
         db_name: &str,
@@ -373,9 +567,8 @@ impl KeyValueEngine {
                 let doc_id = doc._id.clone();
                 let result = if let Some(existing) = docs_map.get(&doc_id) {
                     if existing._rev == doc._rev {
-                        let parts: Vec<&str> = doc._rev.as_ref().unwrap().split('-').collect();
-                        let new_num: u64 = parts[0].parse().unwrap_or(0) + 1;
-                        let new_rev = format!("{}-{}", new_num, Self::generate_rev_hash());
+                        let limit = *database.revision_limit.read().unwrap();
+                        let new_rev = Self::next_rev(doc._rev.as_deref(), limit)?;
                         doc._rev = Some(new_rev.clone());
                         doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
                         docs_map.insert(doc_id.clone(), doc.clone());
@@ -422,6 +615,11 @@ impl KeyValueEngine {
         Ok(results)
     }
 
+    /// Enumerate the documents of a database (`_all_docs`).
+    ///
+    /// Returns a JSON object with `total_rows`, `offset`, and `rows` (each
+    /// containing the doc revision, and optionally the full document when
+    /// `include_docs` is set). Tombstoned documents are omitted.
     pub fn all_docs(
         &self,
         db_name: &str,
@@ -439,31 +637,37 @@ impl KeyValueEngine {
 
         let skip = skip.unwrap_or(0);
         let limit = limit.unwrap_or(usize::MAX);
+        let now = now_millis();
+
+        let mut visible: Vec<&KvDocument> = docs
+            .values()
+            .filter(|doc| !doc.deleted && !is_expired(doc, now))
+            .collect();
+        visible.sort_by(|a, b| a._id.cmp(&b._id));
 
         let mut rows: Vec<serde_json::Value> = Vec::new();
 
-        for (id, doc) in docs.iter().skip(skip).take(limit) {
-            if !doc.deleted {
-                let row = if include_docs {
-                    serde_json::json!({
-                        "id": id,
-                        "key": id,
-                        "value": {
-                            "rev": doc._rev
-                        },
-                        "doc": doc
-                    })
-                } else {
-                    serde_json::json!({
-                        "id": id,
-                        "key": id,
-                        "value": {
-                            "rev": doc._rev
-                        }
-                    })
-                };
-                rows.push(row);
-            }
+        for doc in visible.into_iter().skip(skip).take(limit) {
+            let id = &doc._id;
+            let row = if include_docs {
+                serde_json::json!({
+                    "id": id,
+                    "key": id,
+                    "value": {
+                        "rev": doc._rev
+                    },
+                    "doc": doc
+                })
+            } else {
+                serde_json::json!({
+                    "id": id,
+                    "key": id,
+                    "value": {
+                        "rev": doc._rev
+                    }
+                })
+            };
+            rows.push(row);
         }
 
         Ok(serde_json::json!({
@@ -473,6 +677,13 @@ impl KeyValueEngine {
         }))
     }
 
+    /// Create a secondary index on a database.
+    ///
+    /// The index is currently descriptive; it is not built eagerly, but its
+    /// definition is stored so it can be reported by `list_indexes`.
+    ///
+    /// # Returns
+    /// The created index definition.
     pub fn create_index(
         &self,
         db_name: &str,
@@ -505,6 +716,7 @@ impl KeyValueEngine {
         Ok(index)
     }
 
+    /// List all secondary index definitions on a database.
     pub fn list_indexes(&self, db_name: &str) -> Result<Vec<KvIndex>> {
         let databases = self.databases.read().unwrap();
         let database = databases.get(db_name).ok_or_else(|| {
@@ -516,6 +728,14 @@ impl KeyValueEngine {
         Ok(result)
     }
 
+    /// Run a Mango-style `find` query over a database.
+    ///
+    /// Matches documents against the selector using operators such as `$eq`,
+    /// `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, and
+    /// `$type`. Results can be sorted, limited, and skipped.
+    ///
+    /// # Returns
+    /// A JSON object with the matched `docs` and `execution_stats`.
     pub fn find(&self, db_name: &str, request: KvFindRequest) -> Result<serde_json::Value> {
         let databases = self.databases.read().unwrap();
         let database = databases.get(db_name).ok_or_else(|| {
@@ -525,12 +745,13 @@ impl KeyValueEngine {
         let docs = database.documents.read().unwrap();
         let limit = request.limit.unwrap_or(100);
         let skip = request.skip.unwrap_or(0);
+        let now = now_millis();
 
         let selector = &request.selector;
         let mut results: Vec<&KvDocument> = Vec::new();
 
         for doc in docs.values() {
-            if doc.deleted {
+            if doc.deleted || is_expired(doc, now) {
                 continue;
             }
             if Self::matches_selector(&doc.value, selector) {
@@ -554,6 +775,8 @@ impl KeyValueEngine {
         }))
     }
 
+    /// Return CouchDB-style database metadata (document counts, update
+    /// sequence, index count, and reported cluster settings).
     pub fn get_db_info(&self, db_name: &str) -> Result<serde_json::Value> {
         let databases = self.databases.read().unwrap();
         let database = databases.get(db_name).ok_or_else(|| {
@@ -591,15 +814,41 @@ impl KeyValueEngine {
         }))
     }
 
-    pub fn get_revision_limit(&self, _db_name: &str) -> Result<u64> {
-        Ok(1000)
+    /// Return the maximum number of document revisions retained for a database.
+    pub fn get_revision_limit(&self, db_name: &str) -> Result<u64> {
+        let databases = self.databases.read().unwrap();
+        let database = databases.get(db_name).ok_or_else(|| {
+            crate::Error::ValidationError(format!("Database {} not found", db_name))
+        })?;
+        let limit = *database.revision_limit.read().unwrap();
+        Ok(limit)
     }
 
+    /// Set the maximum number of document revisions retained for a database.
+    ///
+    /// The numeric prefix of generated revisions is capped at this limit (a
+    /// value below 1 is treated as 1). The limit is persisted to sled so it
+    /// survives restarts.
     pub fn set_revision_limit(&self, db_name: &str, limit: u64) -> Result<()> {
+        let limit = limit.max(1);
+        {
+            let databases = self.databases.read().unwrap();
+            let database = databases.get(db_name).ok_or_else(|| {
+                crate::Error::ValidationError(format!("Database {} not found", db_name))
+            })?;
+            *database.revision_limit.write().unwrap() = limit;
+        }
+
+        let tree = self.db.open_tree(db_name)?;
+        let limit_bytes = serde_json::to_vec(&serde_json::json!(limit))?;
+        tree.insert("_meta:revision_limit".as_bytes(), limit_bytes)?;
+        tree.flush()?;
+
         info!("Revision limit set to {} for database {}", limit, db_name);
         Ok(())
     }
 
+    /// Flush a database's sled tree to disk and acknowledge a full commit.
     pub fn ensure_full_commit(&self, db_name: &str) -> Result<serde_json::Value> {
         if let Ok(tree) = self.db.open_tree(db_name) {
             let _ = tree.flush();
@@ -611,6 +860,7 @@ impl KeyValueEngine {
         }))
     }
 
+    /// Request compaction of a database (currently a no-op acknowledgement).
     pub fn compact(&self, db_name: &str) -> Result<serde_json::Value> {
         info!("Compacting database: {}", db_name);
         Ok(serde_json::json!({
@@ -618,6 +868,10 @@ impl KeyValueEngine {
         }))
     }
 
+    /// Mark a database as encrypted.
+    ///
+    /// Sets the in-memory encryption flag. This is a flag-only operation;
+    /// the read/write paths do not currently transform the stored data.
     pub fn enable_database_encryption(&self, database: &str) -> Result<()> {
         let mut encrypted = self.encrypted_databases.write().unwrap();
         encrypted.insert(database.to_string(), true);
@@ -625,6 +879,7 @@ impl KeyValueEngine {
         Ok(())
     }
 
+    /// Clear the encryption flag for a database.
     pub fn disable_database_encryption(&self, database: &str) -> Result<()> {
         let mut encrypted = self.encrypted_databases.write().unwrap();
         encrypted.insert(database.to_string(), false);
@@ -632,6 +887,7 @@ impl KeyValueEngine {
         Ok(())
     }
 
+    /// Return whether a database is currently flagged as encrypted.
     pub fn is_database_encrypted(&self, database: &str) -> Result<bool> {
         let encrypted = self.encrypted_databases.read().unwrap();
         Ok(*encrypted.get(database).unwrap_or(&false))
@@ -639,6 +895,25 @@ impl KeyValueEngine {
 
     fn generate_rev() -> String {
         format!("1-{}", Self::generate_rev_hash())
+    }
+
+    /// Compute the next revision for a document, capping the numeric prefix at
+    /// the configured revision limit (CouchDB-style overflow protection).
+    fn next_rev(current: Option<&str>, limit: u64) -> Result<String> {
+        let Some(cur) = current else {
+            return Ok(Self::generate_rev());
+        };
+        let parts: Vec<&str> = cur.split('-').collect();
+        if parts.len() != 2 {
+            return Err(crate::Error::ValidationError(
+                "Invalid _rev format".to_string(),
+            ));
+        }
+        let next_num: u64 = parts[0].parse::<u64>().map_err(|e| {
+            crate::Error::ValidationError(format!("invalid revision number: {}", e))
+        })? + 1;
+        let capped = if next_num > limit { limit } else { next_num };
+        Ok(format!("{}-{}", capped, Self::generate_rev_hash()))
     }
 
     fn generate_rev_hash() -> String {
@@ -777,6 +1052,13 @@ impl StorageEngine for KeyValueEngine {
         self
     }
 
+    /// Insert a document into a database.
+    ///
+    /// Uses the document's `_id` if present, otherwise generates a random
+    /// hexadecimal ID.
+    ///
+    /// # Returns
+    /// `1` on success.
     async fn insert(
         &self,
         table: &str,
@@ -793,6 +1075,11 @@ impl StorageEngine for KeyValueEngine {
         }
     }
 
+    /// Query documents from a database with optional selector conditions.
+    ///
+    /// Matching documents are collected first, ordered by `_id` for stable
+    /// pagination, then `limit`/`offset` are applied. Tombstoned and expired
+    /// documents are skipped.
     async fn select(
         &self,
         table: &str,
@@ -801,39 +1088,46 @@ impl StorageEngine for KeyValueEngine {
         offset: u64,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<Vec<Record>> {
-        let limit = limit as usize;
-        let offset = offset as usize;
+        let now = now_millis();
 
         let databases = self.databases.read().unwrap();
         if let Some(database) = databases.get(table) {
             let docs = database.documents.read().unwrap();
-            let mut records = Vec::new();
-
-            for (_, doc) in docs.iter().skip(offset).take(limit) {
-                if !doc.deleted {
+            let mut matches: Vec<&KvDocument> = docs
+                .values()
+                .filter(|doc| !doc.deleted && !is_expired(doc, now))
+                .filter(|doc| {
                     if let Some(cond) = conditions {
-                        if Self::matches_selector(&doc.value, cond) {
-                            records.push(Record {
-                                id: doc._id.clone(),
-                                data: doc.value.clone(),
-                                metadata: std::collections::HashMap::new(),
-                            });
-                        }
+                        Self::matches_selector(&doc.value, cond)
                     } else {
-                        records.push(Record {
-                            id: doc._id.clone(),
-                            data: doc.value.clone(),
-                            metadata: std::collections::HashMap::new(),
-                        });
+                        true
                     }
-                }
-            }
+                })
+                .collect();
+            matches.sort_by(|a, b| a._id.cmp(&b._id));
+
+            let records = matches
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|doc| Record {
+                    id: doc._id.clone(),
+                    data: doc.value.clone(),
+                    metadata: std::collections::HashMap::new(),
+                })
+                .collect();
             Ok(records)
         } else {
             Ok(vec![])
         }
     }
 
+    /// Update documents matching the given selector conditions.
+    ///
+    /// Replaces each matching document's value with `data` (generating a new
+    /// revision) and returns the number of documents updated. A `_rev` key in
+    /// `conditions` acts as a compare-and-set guard: the document is only
+    /// updated when its stored revision matches.
     async fn update(
         &self,
         table: &str,
@@ -841,20 +1135,48 @@ impl StorageEngine for KeyValueEngine {
         data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
+        let cas_rev = conditions
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get("_rev"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let selector = conditions.and_then(|c| {
+            c.as_object().map(|o| {
+                let filtered: serde_json::Map<String, serde_json::Value> = o
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "_rev")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                serde_json::Value::Object(filtered)
+            })
+        });
+
         let databases = self.databases.read().unwrap();
         if let Some(database) = databases.get(table) {
             let docs = database.documents.read().unwrap();
             let mut count = 0;
 
             for (id, doc) in docs.iter() {
-                if !doc.deleted {
-                    if let Some(cond) = conditions {
-                        if Self::matches_selector(&doc.value, cond) {
-                            let _ = self.put_document(table, id, data.clone())?;
-                            count += 1;
-                        }
-                    }
+                if doc.deleted {
+                    continue;
                 }
+                let matches = if let Some(cond) = &selector {
+                    Self::matches_selector(&doc.value, cond)
+                } else {
+                    true
+                };
+                if !matches {
+                    continue;
+                }
+                if let Some(expected) = &cas_rev {
+                    if doc._rev.as_deref() != Some(expected.as_str()) {
+                        continue;
+                    }
+                    let _ = self.put_document_cas(table, id, Some(expected), data.clone())?;
+                } else {
+                    let _ = self.put_document(table, id, data.clone())?;
+                }
+                count += 1;
             }
             Ok(count)
         } else {
@@ -862,6 +1184,10 @@ impl StorageEngine for KeyValueEngine {
         }
     }
 
+    /// Soft-delete documents matching the given selector conditions.
+    ///
+    /// Marks matching documents as deleted (tombs) with a bumped revision and
+    /// persists the tombstones.
     async fn delete(
         &self,
         table: &str,
@@ -887,12 +1213,12 @@ impl StorageEngine for KeyValueEngine {
                 .map(|(id, _)| id.clone())
                 .collect();
 
+            let limit = *database.revision_limit.read().unwrap();
+
             for id in &to_delete {
                 if let Some(doc) = docs.get_mut(id) {
-                    let rev = doc._rev.clone().unwrap_or_default();
-                    let parts: Vec<&str> = rev.split('-').collect();
-                    let new_num: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0) + 1;
-                    doc._rev = Some(format!("{}-{:016x}", new_num, rand_u32()));
+                    let new_rev = Self::next_rev(doc._rev.as_deref(), limit)?;
+                    doc._rev = Some(new_rev);
                     doc.deleted = true;
                     doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
                     count += 1;
@@ -920,19 +1246,29 @@ impl StorageEngine for KeyValueEngine {
         }
     }
 
+    /// Create a database (mapped from a table creation).
     async fn create_table(&self, table: &str, _schema: &Schema) -> Result<()> {
         self.create_database(table)
     }
 
+    /// Drop a database (mapped from a table drop).
     async fn drop_table(&self, table: &str) -> Result<()> {
         self.delete_database(table)
     }
 
+    /// Truncate a database by dropping and recreating it.
     async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
         self.delete_database(table)?;
         self.create_database(table)
     }
 
+    /// Enumerate the names of all key-value databases.
+    fn list_tables(&self) -> Result<Vec<String>> {
+        self.list_databases()
+    }
+
+    /// Return database metadata as a [`TableInfo`] with inferred field types
+    /// and secondary index definitions.
     async fn table_info(&self, table: &str) -> Result<TableInfo> {
         let info = self.get_db_info(table)?;
         let databases = self.databases.read().unwrap();
@@ -990,6 +1326,8 @@ impl StorageEngine for KeyValueEngine {
         })
     }
 
+    /// Produce database statistics (active/deleted document counts, average
+    /// fields per document, index count, update sequence) as a JSON string.
     async fn analyze(
         &self,
         table: &str,
@@ -1032,5 +1370,127 @@ impl StorageEngine for KeyValueEngine {
             })
         };
         Ok(serde_json::to_string_pretty(&stats)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(dir: &tempfile::TempDir) -> KeyValueEngine {
+        let mut config = PrimusDBConfig::default();
+        config.storage.data_dir = dir.path().to_string_lossy().into_owned();
+        KeyValueEngine::new(&config).unwrap()
+    }
+
+    #[test]
+    fn test_cas_put_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        engine.create_database("casdb").unwrap();
+
+        let doc = engine
+            .put_document("casdb", "doc1", serde_json::json!({"v": 1}))
+            .unwrap();
+        let rev = doc._rev.clone().unwrap();
+
+        let err = engine
+            .put_document_cas(
+                "casdb",
+                "doc1",
+                Some("1-aaaaaaaa"),
+                serde_json::json!({"v": 2}),
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+
+        let updated = engine
+            .put_document_cas("casdb", "doc1", Some(&rev), serde_json::json!({"v": 2}))
+            .unwrap();
+        assert_ne!(updated._rev.as_deref(), Some(rev.as_str()));
+    }
+
+    #[test]
+    fn test_ttl_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        engine.create_database("ttldb").unwrap();
+
+        engine
+            .put_document_ttl("ttldb", "short", serde_json::json!({"v": 1}), 1)
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let err = engine.get_document("ttldb", "short").unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+    }
+
+    #[test]
+    fn test_revision_limit_caps_rev_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        engine.create_database("limdb").unwrap();
+        engine.set_revision_limit("limdb", 2).unwrap();
+
+        let mut rev = engine
+            .put_document("limdb", "k", serde_json::json!({"n": 0}))
+            .unwrap()
+            ._rev
+            .unwrap();
+        for n in 1..5u64 {
+            rev = engine
+                .put_document_cas("limdb", "k", Some(&rev), serde_json::json!({"n": n}))
+                .unwrap()
+                ._rev
+                .unwrap();
+            let num: u64 = rev.split('-').next().unwrap().parse().unwrap();
+            assert!(num <= 2, "rev number {} exceeds limit 2", num);
+        }
+
+        let stored = engine.get_revision_limit("limdb").unwrap();
+        assert_eq!(stored, 2);
+    }
+
+    #[test]
+    fn test_select_applies_conditions_and_pagination_after_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        engine.create_database("seldb").unwrap();
+
+        for i in 0..5u64 {
+            engine
+                .put_document(
+                    "seldb",
+                    &format!("doc{}", i),
+                    serde_json::json!({"group": i % 2}),
+                )
+                .unwrap();
+        }
+
+        let records = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(engine.select(
+                "seldb",
+                Some(&serde_json::json!({"group": 0})),
+                10,
+                0,
+                &crate::transaction::Transaction {
+                    id: "t".to_string(),
+                    operations: vec![],
+                    status: crate::transaction::TransactionStatus::Prepared,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    isolation_level: crate::transaction::IsolationLevel::ReadCommitted,
+                    timeout_ms: 0,
+                },
+            ))
+            .unwrap();
+
+        let groups: Vec<u64> = records
+            .iter()
+            .map(|r| r.data["group"].as_u64().unwrap())
+            .collect();
+        assert_eq!(groups, vec![0, 0, 0]);
     }
 }

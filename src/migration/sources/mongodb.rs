@@ -1,3 +1,10 @@
+//! MongoDB source implementation for the migration framework.
+//!
+//! Connects via the `mongodb` crate, listing databases and collections and
+//! streaming documents as rows with a unified field set. Enabled by the
+//! `mongo-source` feature; a fallback implementation reports
+//! [`crate::Error::Unsupported`] when the feature is disabled.
+
 #[allow(unused_imports)]
 use super::super::source::{
     MigrationSource, RowStream, SourceColumn, SourceDatabase, SourceObject, SourceSchema,
@@ -14,6 +21,8 @@ pub struct MongoSource {
 }
 
 impl MongoSource {
+    /// Creates a source from a MongoDB URL, keeping a masked copy of the URL
+    /// for display.
     pub fn new(url: &str) -> Result<Self> {
         let masked = crate::migration::report::MigrationReport::mask_url(url);
         Ok(Self {

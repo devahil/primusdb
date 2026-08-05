@@ -1,30 +1,37 @@
-use crate::namespace::NamespaceController;
+//! # NamespacedStorageEngine — Namespace-Scoped Storage Adapter
+//!
+//! Wraps any [`StorageEngine`] and transparently rewrites every table name to
+//! its namespace-scoped physical name before delegating, so a single
+//! underlying engine can serve many isolated namespaces.
+//!
+//! ```text
+//! NamespacedStorageEngine { inner, namespace_path }
+//!   |   logical "users"
+//!   v
+//! physical_name = compute_physical_name(namespace_path, "users")
+//!                 -> "ns_<hash6>__users"
+//!   v
+//! inner.insert(physical_name, ...)   (all trait methods)
+//! ```
+
 use crate::storage::{Schema, StorageEngine, TableInfo};
-use crate::{Record, StorageType};
+use crate::Record;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
 
-#[allow(dead_code)]
+/// Wraps a `StorageEngine` to transparently prefix table names with a namespace path.
 pub struct NamespacedStorageEngine {
     inner: Arc<dyn StorageEngine>,
-    controller: Arc<NamespaceController>,
     namespace_path: String,
-    storage_type: StorageType,
 }
 
 impl NamespacedStorageEngine {
-    pub fn new(
-        inner: Arc<dyn StorageEngine>,
-        controller: Arc<NamespaceController>,
-        namespace_path: String,
-        storage_type: StorageType,
-    ) -> Self {
+    /// Wraps `inner` so all operations on `namespace_path` are scoped to it.
+    pub fn new(inner: Arc<dyn StorageEngine>, namespace_path: String) -> Self {
         Self {
             inner,
-            controller,
             namespace_path,
-            storage_type,
         }
     }
 
@@ -32,6 +39,7 @@ impl NamespacedStorageEngine {
         super::compute_physical_name(&self.namespace_path, table)
     }
 
+    /// Returns the namespace path this adapter is scoped to.
     pub fn namespace_path(&self) -> &str {
         &self.namespace_path
     }

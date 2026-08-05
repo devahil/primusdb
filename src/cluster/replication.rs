@@ -1,3 +1,43 @@
+//! Replica write/read fan-out
+//!
+//! Copies committed writes to replica nodes so data survives node loss.
+//! [`ReplicationEngine`] sends each operation to the target replica set and
+//! classifies the outcome according to the configured [`ReplicationMode`]:
+//! `Sync` (all targets must ack), `Quorum` (a majority must ack, the default)
+//! or `Async` (fire-and-forget). It also streams shard migrations to new hosts
+//! and reports per-replica health.
+//!
+//! # Placement in the architecture
+//!
+//! `ReplicationEngine` sits below the Raft commit point: once an operation is
+//! ordered by [`crate::cluster::raft::RaftNode`], the engine durably fans it
+//! out to the replica nodes chosen by the
+//! [`crate::cluster::shard::ShardManager`].
+//!
+//! ```text
+//!   committed write (Raft log)
+//!             │
+//!             ▼
+//!   ┌─────────────────────┐
+//!   │  ReplicationEngine  │  fans out ReplicaWrite to target_nodes
+//!   └─────────────────────┘
+//!             │
+//!    ┌────────┼────────────┐
+//!    ▼        ▼            ▼
+//!  replica   replica     replica
+//!    1        2            N
+//!    │        │            │
+//!    └────────┴─── ReplicaWriteAck ──┘
+//!             │
+//!             ▼
+//!   mode decides status:
+//!     Sync    = all acks        ──► Committed
+//!     Quorum  = majority acks   ──► Committed (default)
+//!     Async   = any success     ──► Accepted
+//!
+//!   migrate_shard streams chunks to a new owner during rebalancing.
+//! ```
+
 use crate::cluster::rpc::{
     ReplicaReadRequest, ReplicaReadResponse, ReplicaWriteAck, ReplicaWriteRequest, RpcClient,
     RpcMessage, ShardTransferChunk, ShardTransferRequest,
@@ -10,20 +50,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::info;
 
+/// How aggressively writes are replicated to replicas.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum ReplicationMode {
+    /// All targets must acknowledge before the write is committed
     Sync,
+    /// Writes are acknowledged immediately and replicated in the background
     Async,
+    /// A quorum (majority) of targets must acknowledge (default)
     #[default]
     Quorum,
 }
 
+/// Tuning parameters for the replication engine.
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
+    /// Replication mode (sync / async / quorum)
     pub mode: ReplicationMode,
+    /// Number of replicas each write is fanned out to
     pub replication_factor: usize,
+    /// Timeout for replica writes (ms)
     pub write_timeout_ms: u64,
+    /// Timeout for replica reads (ms)
     pub read_timeout_ms: u64,
+    /// Maximum entries per batch operation
     pub max_batch_size: usize,
 }
 
@@ -39,15 +89,21 @@ impl Default for ReplicationConfig {
     }
 }
 
+/// Fans committed writes out to replica nodes and reads them back on demand.
 #[derive(Debug)]
 pub struct ReplicationEngine {
+    /// ID of the local node
     pub node_id: String,
+    /// Replication tuning parameters
     pub config: ReplicationConfig,
+    /// RPC clients to peer nodes, keyed by node ID
     pub clients: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
+    /// Pending replica acknowledgements keyed by operation ID
     pub pending_acks: Arc<RwLock<HashMap<String, Vec<ReplicaWriteAck>>>>,
 }
 
 impl ReplicationEngine {
+    /// Create a replication engine sharing the given RPC client map.
     pub fn new(
         node_id: String,
         config: ReplicationConfig,
@@ -62,6 +118,8 @@ impl ReplicationEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Send a write to every node in `target_nodes` and classify the outcome
+    /// according to the configured replication mode.
     pub async fn replicate_write(
         &self,
         operation_id: &str,
@@ -154,6 +212,7 @@ impl ReplicationEngine {
         })
     }
 
+    /// Read a key from the given nodes, returning the first positive response.
     pub async fn replicate_read(
         &self,
         storage_type: &str,
@@ -191,6 +250,7 @@ impl ReplicationEngine {
         }
     }
 
+    /// Stream a shard's data chunks to a target node to migrate the shard.
     pub async fn migrate_shard(
         &self,
         shard_id: &str,
@@ -231,6 +291,7 @@ impl ReplicationEngine {
         Ok(())
     }
 
+    /// Report connection health for every replica client.
     pub async fn check_replication_health(&self) -> Vec<ReplicaHealthStatus> {
         let clients = self.clients.read().await;
         let mut statuses = Vec::new();
@@ -250,26 +311,41 @@ impl ReplicationEngine {
     }
 }
 
+/// Outcome of a replicated write operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationResult {
+    /// ID of the replicated operation
     pub operation_id: String,
+    /// Final replication status
     pub status: ReplicationStatus,
+    /// Number of successful replica acknowledgements
     pub successes: usize,
+    /// Nodes that failed to acknowledge
     pub failures: Vec<String>,
+    /// Total number of target nodes
     pub total_targets: usize,
+    /// Timestamp (ms) of the replication attempt
     pub timestamp: u64,
 }
 
+/// Final state of a replicated write.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ReplicationStatus {
+    /// Write reached the required number of replicas
     Committed,
+    /// Write accepted but not yet durable on replicas
     Accepted,
+    /// Write could not be replicated
     Failed,
 }
 
+/// Health of a single replica node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaHealthStatus {
+    /// Node ID of the replica
     pub node_id: String,
+    /// Whether the replica is currently reachable
     pub healthy: bool,
+    /// Timestamp (ms) of the last health check
     pub last_check: u64,
 }

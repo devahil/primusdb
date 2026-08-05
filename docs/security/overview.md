@@ -12,6 +12,10 @@ This document provides comprehensive security documentation for PrimusDB, includ
 6. [Session Management](#session-management)
 7. [Rate Limiting](#rate-limiting)
 8. [Security Best Practices](#security-best-practices)
+9. [Security Configuration Reference](#security-configuration-reference)
+10. [Security Checklist](#security-checklist)
+11. [Alpha Limitations](#alpha-limitations)
+12. [Incident Response](#incident-response)
 
 ---
 
@@ -76,6 +80,48 @@ POST /api/v1/auth/logout
 Authorization: Bearer ACCESS_TOKEN
 ```
 
+### CLI Authentication
+
+```bash
+# Login with username (password prompted)
+primusdb auth login admin
+
+# Login with inline password
+primusdb auth login admin --password SecurePass123!
+
+# Login with custom realm
+primusdb auth login admin --realm internal
+
+# Login with custom session TTL
+primusdb auth login admin --ttl 3600
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-p, --password <PASSWORD>` | Password (prompted if omitted) | — |
+| `-r, --realm <REALM>` | Authentication realm | `default` |
+| `--ttl <SECONDS>` | Session time-to-live | `86400` |
+
+### CLI Logout
+
+```bash
+# Invalidate current session
+primusdb auth logout
+
+# Invalidate all sessions
+primusdb auth logout --all
+```
+
+### Whoami
+
+```bash
+# Show current user identity
+primusdb auth whoami
+
+# Verbose identity information
+primusdb auth whoami --verbose
+```
+
 ### Using Authentication in Requests
 
 All API requests require authentication when `auth_required = true`:
@@ -94,24 +140,107 @@ curl -X GET http://localhost:8080/api/v1/crud/document/users \
 
 ## Authorization & RBAC
 
-PrimusDB implements Role-Based Access Control (RBAC) with three predefined roles:
+PrimusDB implements Role-Based Access Control (RBAC) with fine-grained permission management.
+
+### Built-in Roles
 
 | Role | Permissions |
 |------|-------------|
 | **Admin** | Full access to all operations, user management, system configuration |
+| **Developer** | Full data access (Read, Write, Create, Delete) |
 | **ReadWrite** | Read and write data, cannot modify system settings |
 | **ReadOnly** | Read-only access to data |
+| **Analyst** | Read-only access |
+| **ClusterNode** | Cluster operations |
 
 ### Default Role Assignment
 
 New users are assigned the `ReadOnly` role by default. Administrators can upgrade roles:
 
 ```bash
-# Promote user to ReadWrite
+# Promote user to ReadWrite via API
 curl -X POST http://localhost:8080/api/v1/auth/users/USER_ID/roles \
   -H "Authorization: Bearer ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"role": "ReadWrite"}'
+```
+
+### CLI Role Management
+
+```bash
+# Create a role
+primusdb role create analyst --description "Data analyst role"
+
+# Create a role that inherits from another
+primusdb role create senior-analyst --inherits analyst
+
+# List all roles
+primusdb role list
+
+# List roles with permissions
+primusdb role list --permissions
+
+# Grant a permission to a role
+primusdb role grant analyst "read"
+
+# Grant a namespace-scoped permission
+primusdb role grant analyst "read" --namespace tenant1
+
+# Revoke a permission from a role
+primusdb role revoke analyst "write"
+```
+
+### CLI User Management
+
+```bash
+# Create a user with a role
+primusdb user create alice --role analyst --email alice@example.com
+
+# Create a user with a password
+primusdb user create bob --password SecurePass123! --role developer
+
+# List users
+primusdb user list
+
+# Filter users by role
+primusdb user list --role admin
+
+# Disable a user
+primusdb user disable alice --reason "Account inactive"
+
+# Re-enable a user
+primusdb user disable alice --reenable
+
+# Grant a role to a user
+primusdb user roles alice --grant analyst
+
+# Revoke a role from a user
+primusdb user roles alice --revoke viewer
+
+# List user's roles
+primusdb user roles alice --list
+```
+
+### REST API User Management
+
+```bash
+# Register a new user via API
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ADMIN_TOKEN" \
+  -d '{
+    "username": "charlie",
+    "password": "SecurePass123!",
+    "email": "charlie@example.com",
+    "roles": ["readonly"]
+  }'
+
+# List all users (admin only)
+curl -X GET http://localhost:8080/api/v1/auth/users \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+
+# List all roles
+curl -X GET http://localhost:8080/api/v1/auth/roles
 ```
 
 ---
@@ -123,14 +252,14 @@ API keys provide programmatic access without session tokens.
 ### Create API Key
 
 ```bash
-POST /api/v1/auth/api-keys
+POST /api/v1/auth/token/create
 Authorization: Bearer ACCESS_TOKEN
 Content-Type: application/json
 
 {
   "name": "Production Service",
   "scopes": ["read", "write"],
-  "expires_in_days": 90,
+  "expires_in_hours": 2160,
   "rate_limit": 1000
 }
 ```
@@ -154,15 +283,46 @@ Content-Type: application/json
 ### List API Keys
 
 ```bash
-GET /api/v1/auth/api-keys
+GET /api/v1/auth/tokens
 Authorization: Bearer ACCESS_TOKEN
 ```
 
 ### Revoke API Key
 
 ```bash
-DELETE /api/v1/auth/api-keys/KEY_ID
+DELETE /api/v1/auth/token/revoke/KEY_ID
 Authorization: Bearer ACCESS_TOKEN
+```
+
+### Token Scopes
+
+API keys can be scoped to specific resource types and actions:
+
+| Resource | Description |
+|----------|-------------|
+| `All` | All resource types |
+| `Columnar` | Columnar storage engine |
+| `Vector` | Vector storage engine |
+| `Document` | Document storage engine |
+| `Relational` | Relational storage engine |
+| `Cluster` | Cluster management operations |
+| `Admin` | Administrative operations |
+
+| Action | Description |
+|--------|-------------|
+| `Read` | Query and read data |
+| `Write` | Insert and update data |
+| `Delete` | Delete data |
+| `Create` | Create tables and databases |
+| `Admin` | All operations including user management |
+
+```json
+{
+  "scopes": [
+    {"resource": "Document", "actions": ["Read", "Write"]},
+    {"resource": "Columnar", "actions": ["Read"]}
+  ]
+}
 ```
 
 ---
@@ -182,28 +342,104 @@ algorithm = "aes-256-gcm"
 key_rotation_interval = 86400  # 24 hours in seconds
 ```
 
-### TLS/SSL
+### Collection-Level Encryption
 
-Enable TLS for encrypted network communication:
-
-```toml
-[network.tls]
-enabled = true
-certificate_path = "/etc/ssl/primusdb.crt"
-key_path = "/etc/ssl/private/primusdb.key"
-min_version = "1.2"
-```
-
-### Certificate Setup
+Encryption can be toggled per document collection:
 
 ```bash
-# Generate self-signed certificate for testing
-openssl req -x509 -newkey rsa:4096 \
-  -keyout /etc/ssl/private/primusdb.key \
-  -out /etc/ssl/primusdb.crt \
-  -days 365 \
-  -nodes \
-  -subj "/CN=primusdb"
+# Enable encryption for a document collection
+curl -X POST http://localhost:8080/api/v1/collection/my_collection/encrypt \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Disable encryption for a document collection
+curl -X POST http://localhost:8080/api/v1/collection/my_collection/decrypt \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Encryption Details
+
+- **Algorithm**: AES-256-GCM (authenticated encryption)
+- **Key derivation**: Per-file keys derived from a master key using HKDF
+- **Integrity**: SHA-256 checksums detect tampering
+- **File header**: Encrypted files are identified by the `PREN` magic bytes
+- **Performance**: Encryption is transparent to queries; decryption happens on read
+
+### TLS/SSL
+
+PrimusDB supports native TLS for HTTPS serving and mutual TLS (mTLS) for
+inter-node federation communication.
+
+#### Quick Start (Self-Signed Cert)
+
+```bash
+# Generate a self-signed certificate
+primusdb certs create-selfsigned --out-dir ./tls --hosts localhost 127.0.0.1
+
+# Start the server with TLS enabled
+primusdb server start --tls-enabled --tls-cert ./tls/selfsigned.pem --tls-key ./tls/selfsigned.key
+```
+
+#### Production Setup (CA-Signed)
+
+```bash
+# 1. Create a Certificate Authority
+primusdb certs create-ca --out-dir ./ca --name "MyOrg CA"
+
+# 2. Generate a server certificate signed by the CA
+primusdb certs create-cert \
+  --ca-dir ./ca \
+  --out-dir ./tls \
+  --hosts primusdb.example.com 10.0.1.5 \
+  --server
+
+# 3. Start the server with TLS + mTLS enabled
+primusdb server start \
+  --tls-enabled \
+  --tls-cert ./tls/cert.pem \
+  --tls-key ./tls/key.pem \
+  --tls-ca ./ca/ca.crt \
+  --mtls-enabled
+```
+
+#### Configuration
+
+```toml
+[network]
+tls_enabled = true
+tls_cert_path = "/etc/ssl/primusdb.crt"
+tls_key_path = "/etc/ssl/private/primusdb.key"
+tls_ca_path = "/etc/ssl/ca.crt"      # Required for mTLS
+mtls_enabled = false                  # Require client certs
+```
+
+When `mtls_enabled` is `true`, all clients must present a valid certificate
+signed by the configured CA. This provides the strongest authentication and
+is recommended for federation peer communication.
+
+#### Federation mTLS
+
+Federation peers can authenticate each other using mTLS:
+
+```bash
+# Generate client certs for each federation node
+primusdb certs create-cert \
+  --ca-dir ./ca \
+  --out-dir ./node1 \
+  --name "node-1" \
+  --client
+
+primusdb certs create-cert \
+  --ca-dir ./ca \
+  --out-dir ./node2 \
+  --name "node-2" \
+  --client
+
+# Start node 1 with federation and mTLS
+primusdb server start \
+  --tls-enabled --tls-cert ./node1/cert.pem --tls-key ./node1/key.pem \
+  --tls-ca ./ca/ca.crt --mtls-enabled \
+  --federation-discovery node2:8081 \
+  --cluster-id cluster-1
 ```
 
 ---
@@ -304,49 +540,42 @@ X-RateLimit-Reset: 1699900000
 ### 1. Production Deployment
 
 ```bash
-# Enable authentication (default)
-./target/release/primusdb-server --auth-required
+# Start the server (authentication is enabled by default)
+./target/release/primusdb server start --bind 0.0.0.0:8080
 
-# Use strong JWT secret
-./target/release/primusdb-server --jwt-secret "your-64-character-secret-key"
-
-# Enable encryption
-./target/release/primusdb-server --encryption-enabled
+# Use a long-lived token expiry via configuration (AuthConfig)
 
 # Enable TLS
-./target/release/primusdb-server --tls-enabled --tls-cert /path/to/cert --tls-key /path/to/key
+./target/release/primusdb server start --bind 0.0.0.0:8080 \
+  --tls-enabled --tls-cert /path/to/cert --tls-key /path/to/key
 ```
 
 ### 2. User Management
 
 ```bash
 # Create admin user during setup
-./target/release/primusdb-cli admin create \
-  --username admin \
-  --email admin@company.com \
-  --role admin
+./target/release/primusdb user create admin \
+  --role admin \
+  --email admin@company.com
 
 # Create read-only application user
-./target/release/primusdb-cli user create \
-  --username app_service \
-  --email app@company.com \
-  --role readwrite
+./target/release/primusdb user create app_service \
+  --role readwrite \
+  --email app@company.com
 ```
 
-### 3. API Key Rotation
+### 3. API Token Rotation
 
-Rotate API keys regularly:
+Rotate API tokens regularly:
 
 ```bash
-# Create new key
-./target/release/primusdb-cli api-key create \
-  --name "Rotation 2024-01" \
-  --expires-in 90days
+# Create new token
+./target/release/primusdb auth token --create
 
-# Update applications to use new key
+# Update applications to use new token
 
-# Revoke old key after transition
-./target/release/primusdb-cli api-key revoke --id OLD_KEY_ID
+# Revoke old token after transition
+./target/release/primusdb auth token --revoke OLD_TOKEN_ID
 ```
 
 ### 4. Monitoring & Auditing
@@ -366,10 +595,10 @@ retention_days = 90
 
 ```bash
 # Bind to localhost only (development)
-./target/release/primusdb-server --bind 127.0.0.1
+./target/release/primusdb server start --bind 127.0.0.1:8080
 
 # Bind to specific interface (production)
-./target/release/primusdb-server --bind 10.0.0.5
+./target/release/primusdb server start --bind 10.0.0.5:8080
 
 # Use firewall to restrict access
 sudo ufw allow from 10.0.0.0/24 to any port 8080
@@ -383,6 +612,27 @@ Never commit credentials to version control:
 # Set secure environment variables
 export PRIMUSDB_JWT_SECRET="your-secure-secret"
 export PRIMUSDB_DB_ENCRYPTION_KEY="your-encryption-key"
+```
+
+---
+
+## Security Configuration Reference
+
+```toml
+[security]
+encryption_enabled = true
+key_rotation_interval = 43200    # Rotate encryption keys every 12 hours
+auth_required = true             # Require authentication for all requests
+
+[security.auth]
+enabled = true
+min_password_length = 8
+password_expiry_days = 90
+max_login_attempts = 5
+lockout_duration_minutes = 30
+token_expiry_hours = 8760        # 1 year
+session_timeout_minutes = 60
+rate_limit_requests_per_minute = 1000
 ```
 
 ---
@@ -404,6 +654,20 @@ export PRIMUSDB_DB_ENCRYPTION_KEY="your-encryption-key"
 - [ ] User roles properly assigned
 - [ ] Session limits configured
 - [ ] Monitored authentication failures
+
+---
+
+## Alpha Limitations
+
+As of v1.3.2-alpha:
+
+- **Authentication** accepts credentials but is not enforced by default in all paths.
+- **User and role CLI commands** print placeholders — users and roles are not persisted across restarts.
+- **API tokens** are stored in memory only and do not persist across restarts.
+- **RBAC enforcement** in the HTTP API is not fully wired — some operations may succeed without token validation.
+- **Encryption at rest** is implemented for document collections but may not be active for all storage engines.
+- **Rate limiting** headers are declared but not enforced in this release.
+- **Multi-tenancy segments** API is present but segment isolation is not enforced.
 
 ---
 
@@ -430,6 +694,6 @@ Monitor these events:
 
 ## References
 
-- [API Reference](API_REFERENCE.md) - Complete API documentation
-- [ADMIN.md](ADMIN.md) - Administration guide
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Security architecture
+- [API Reference](../reference/api.md) - Complete API documentation
+- [ADMIN.md](../user-guide/admin.md) - Administration guide
+- [ARCHITECTURE.md](../architecture/overview.md) - Security architecture

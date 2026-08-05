@@ -128,8 +128,8 @@ cargo test --test e2e_backup_restore
 
 **Current test suite** (`tests/integration_tests.rs` covers):
 
-- CRUD operations across all 5 storage engines (columnar, vector,
-  document, relational, key-value)
+- CRUD operations across all 6 storage engines (columnar, vector,
+  document, relational, key-value, time-series)
 - Namespace isolation (CRUD within namespaces, DDL operations)
 - Sequence operations (create, nextval, currval, setval, drop)
 - DDL/ER operations (alter table, views, triggers)
@@ -198,7 +198,7 @@ use assert_cmd::Command;
 fn test_cli_version() {
     let mut cmd = Command::cargo_bin("primusdb").unwrap();
     let assert = cmd.arg("version").assert();
-    assert.success().stdout(predicates::str::contains("1.3.1-alpha"));
+    assert.success().stdout(predicates::str::contains("1.3.2-alpha"));
 }
 ```
 

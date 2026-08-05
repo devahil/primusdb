@@ -1,22 +1,24 @@
 /*!
 # Compression Engine - LZ4-Based Memory Optimization
 
-This module provides high-performance compression using the LZ4 algorithm, optimized for in-memory caching with minimal CPU overhead.
+This module provides compression for in-memory caching using the LZ4 algorithm,
+with three speed/ratio levels and a CRC32 checksum appended to every payload.
 
 ## Features
 
-- **LZ4 Compression**: Industry-standard fast compression
+- **LZ4 Compression**: Fast general-purpose lossless compression
 - **Adaptive Levels**: Fast/Balanced/High compression modes
-- **Dictionary Support**: Improved compression for repetitive data
-- **SIMD Acceleration**: Hardware-accelerated operations where available
-- **Memory Pool**: Pre-allocated buffers to reduce allocation overhead
+- **CRC32 Integrity**: A checksum appended to every payload catches corruption
+- **Buffer Pool**: A retained-buffer pool is allocated on the engine; note that
+  buffers are currently taken from it but never returned, so reuse is not yet
+  effective
 
 ## Usage
 
 ```ignore
 use primusdb::cache::compression::{CompressionEngine, CompressionLevel};
 
-let engine = CompressionEngine::new(CompressionLevel::Balanced);
+let mut engine = CompressionEngine::new(CompressionLevel::Balanced);
 
 // Compress data
 let compressed = engine.compress(b"large dataset...")?;
@@ -27,10 +29,11 @@ let original = engine.decompress(&compressed)?;
 
 ## Performance
 
-- **Compression Speed**: 400-600 MB/s
-- **Decompression Speed**: 1.5-2.5 GB/s
-- **Compression Ratio**: 60-80% depending on level
-- **Memory Overhead**: ~1KB per compression context
+- **Speed**: LZ4 is designed for high throughput; exact numbers depend on data
+  and hardware
+- **Ratio**: Data-dependent — repetitive payloads compress far better than
+  small or dense ones
+- **Overhead**: A 4-byte CRC32 checksum is appended to every compressed payload
 */
 
 use crc32fast::Hasher as Crc32;
@@ -39,15 +42,20 @@ use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionLevel {
-    /// Fast compression with ~60% ratio
+    /// Fast compression, lowest ratio
     Fast = 1,
-    /// Balanced speed/ratio with ~70% ratio
+    /// Balanced speed/ratio trade-off
     #[default]
     Balanced = 6,
-    /// High compression with ~80% ratio
+    /// High compression, slowest speed
     High = 12,
 }
 
+/// LZ4-based compression engine with CRC32 integrity verification.
+///
+/// Reuses a small buffer pool to reduce allocation overhead and appends a
+/// 4-byte CRC32 checksum to every compressed payload so that corruption can
+/// be detected before decompression.
 pub struct CompressionEngine {
     level: CompressionLevel,
     buffer_pool: Vec<Vec<u8>>,
@@ -188,33 +196,31 @@ impl CompressionEngine {
         // Create new buffer
         Vec::with_capacity(min_size)
     }
-
-    /// Return buffer to pool
-    #[allow(dead_code)]
-    fn return_buffer(&mut self, mut buffer: Vec<u8>) {
-        buffer.clear();
-        // Keep only buffers that are reasonably sized
-        if buffer.capacity() <= 1024 * 1024 {
-            // 1MB max
-            self.buffer_pool.push(buffer);
-        }
-    }
 }
 
+/// Statistics describing the result of compressing a buffer.
 #[derive(Debug, Clone)]
 pub struct CompressionStats {
+    /// Size of the input data in bytes
     pub original_size: usize,
+    /// Size of the compressed output in bytes
     pub compressed_size: usize,
+    /// Compressed size as a percentage of the original size
     pub compression_ratio: f64,
+    /// Percentage of space saved by compression
     pub space_savings: f64,
 }
 
+/// Errors that can occur during compression or decompression.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressionError {
+    /// An underlying I/O operation failed
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// The payload is not valid LZ4 compressed data
     #[error("Invalid compressed data")]
     InvalidData,
+    /// The CRC32 checksum did not match the data
     #[error("Data corruption detected")]
     CorruptionDetected,
 }

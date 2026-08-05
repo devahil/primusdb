@@ -17,9 +17,11 @@ curl http://localhost:8080/health
   "success": true,
   "data": {
     "status": "healthy",
-    "version": "1.3.1-alpha",
+    "node_id": "node-abc123",
+    "instance_id": "instance-xyz789",
+    "version": "1.3.2-alpha",
     "uptime_seconds": 3600,
-    "timestamp": "2026-01-15T12:00:00Z"
+    "architecture": "centralized"
   }
 }
 ```
@@ -29,9 +31,11 @@ curl http://localhost:8080/health
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | string | `"healthy"` or `"unhealthy"` |
+| `node_id` | string | Unique node identifier |
+| `instance_id` | string | Unique instance identifier |
 | `version` | string | PrimusDB version string |
-| `uptime_seconds` | number | Seconds since server start |
-| `timestamp` | string | ISO 8601 timestamp |
+| `uptime_seconds` | number | Process uptime |
+| `architecture` | string | Deployment architecture (`"centralized"` for a single-node install) |
 
 **HTTP Status Codes:**
 
@@ -52,24 +56,19 @@ curl http://localhost:8080/status
 {
   "success": true,
   "data": {
-    "status": "healthy",
-    "version": "1.3.1-alpha",
+    "status": "running",
+    "version": "1.3.2-alpha",
     "uptime_seconds": 3600,
-    "engines": {
+    "storage_engines": {
       "columnar": "available",
       "vector": "available",
       "document": "available",
-      "relational": "available"
-    },
-    "cluster": {
-      "enabled": false,
-      "nodes": 1,
-      "health": "healthy"
+      "relational": "available",
+      "keyvalue": "available"
     },
     "ai_enabled": true,
     "cache_enabled": true,
-    "transactions_enabled": true,
-    "timestamp": "2026-01-15T12:00:00Z"
+    "transactions_enabled": true
   }
 }
 ```
@@ -78,11 +77,10 @@ curl http://localhost:8080/status
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | string | Overall server health |
+| `status` | string | Overall server status (`"running"`) |
 | `version` | string | Server version |
-| `uptime_seconds` | number | Uptime in seconds |
-| `engines` | object | Per-engine availability status |
-| `cluster` | object | Cluster configuration and health |
+| `uptime_seconds` | number | Process uptime |
+| `storage_engines` | object | Per-engine availability status |
 | `ai_enabled` | boolean | Whether the AI/ML subsystem is active |
 | `cache_enabled` | boolean | Whether caching is active |
 | `transactions_enabled` | boolean | Whether transaction support is active |

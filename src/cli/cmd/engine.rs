@@ -1,7 +1,14 @@
+//! Storage engine subcommands (`engine list`, `status`, `inspect`,
+//! `metrics`, `add`, `remove`, `upgrade`).
+//!
+//! Reads are client-mode HTTP calls; `add`/`remove`/`upgrade` offer REST
+//! hot operations and fall back to configuration guidance.
+
 use crate::cli::command::{EngineSubcommands, GlobalArgs};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch an `engine` subcommand to its handler.
 pub async fn handle_engine(
     cmd: EngineSubcommands,
     global: &GlobalArgs,
@@ -39,6 +46,10 @@ async fn cmd_list(verbose: bool, _global: &GlobalArgs, fmt: &OutputFormat) -> Re
         ("vector".into(), "Vector similarity search".into()),
         ("document".into(), "JSON document store".into()),
         ("relational".into(), "Relational SQL engine".into()),
+        (
+            "timeseries".into(),
+            "Time series engine for IoT, metrics, logs".into(),
+        ),
     ];
 
     if verbose {

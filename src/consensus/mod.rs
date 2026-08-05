@@ -1,303 +1,59 @@
 /*!
 # PrimusDB Consensus Engine - Distributed Agreement Protocol
 
-The consensus engine implements distributed agreement protocols to ensure consistency
-across multiple PrimusDB nodes. It provides Hyperledger-inspired consensus with
-configurable validator networks and cryptographic verification.
+The consensus engine implements a Hyperledger-inspired, ledger-based agreement
+protocol for PrimusDB. Validators sign transactions with ED25519 keys, signed
+transactions accumulate in a mempool, and blocks (batches of transactions with a
+SHA-256 Merkle root over their contents) are built, signed and appended to a
+sled-backed chain. The [`ConsensusEngine`] trait defines the public interface;
+[`HyperledgerStyleConsensus`] is the reference implementation.
 
-## Consensus Architecture Overview
+Note that consensus here orders operations locally or standalone; cluster-wide
+ordering and replication across nodes is handled by the Raft layer in
+[`crate::cluster`].
 
 ```text
-Consensus Engine Architecture
-═══════════════════════════════════════════════════════════════
+Consensus Engine Flow
+====================================================
 
-┌─────────────────────────────────────────────────────────┐
-│            Consensus Protocol Flow                      │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Transaction Proposal                           │    │
-│  │  • Client submits transaction                   │    │
-│  │  • Leader validates and broadcasts              │    │
-│  │  • Validators verify signatures                 │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Consensus Voting                               │    │
-│  │  • PBFT-style validation                        │    │
-│  │  • Quorum requirements                          │    │
-│  │  • Byzantine fault tolerance                    │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Block Formation & Commit                      │    │
-│  │  • Transactions batched into blocks           │    │
-│  │  • Merkle tree construction                    │    │
-│  │  • Final commitment to ledger                  │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│            Consensus Properties                        │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Safety: Correct nodes never disagree           │    │
-│  │  Liveness: System makes progress                │    │
-│  │  Fault Tolerance: Tolerates f failures          │    │
-│  │  Finality: Committed blocks are immutable       │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+propose_transaction (ED25519 signature)
+        |
+        v
+validate_transaction_signature --> add_to_mempool
+        |
+        v
+build_block --> Merkle root of txs --> block hash (SHA-256)
+        |              |
+        v              v
+validate_block (merkle + block/tx signatures)
+        |
+        v
+commit_block --> persist_block (sled "blocks" tree)
+        |              |
+        v              v
+ConsensusStateMachine.apply_block --> storage engines
+        |
+        v
+blockchain::* Prometheus metrics (height, appends, tamper)
 ```
 
-## Supported Consensus Algorithms
+## Main Types
 
-### Hyperledger-inspired PBFT (Practical Byzantine Fault Tolerance)
-```text
-PBFT Protocol Phases:
-1. Request   - Client sends request to leader
-2. Pre-Prepare - Leader assigns sequence number
-3. Prepare    - Validators agree on sequence
-4. Commit     - Validators confirm preparation
-5. Reply      - Leader sends response to client
+- [`ConsensusEngine`] - trait defining propose/validate/commit/chain-state/fork operations.
+- [`HyperledgerStyleConsensus`] - the sled-backed reference implementation.
+- [`Transaction`] / [`Operation`] / [`OperationType`] - proposal payloads.
+- [`Block`] / [`Hash`] - committed chain records and SHA-256 content hashes.
+- [`Validator`] / [`ConsensusParameters`] / [`ChainState`] - network and chain status.
+- [`ConsensusResult`] / [`ForkResolution`] - proposal outcome and fork handling results.
+- [`state_machine::ConsensusStateMachine`] - applies committed blocks to storage engines.
+- [`blockchain`] - Prometheus metrics helpers for chain height/appends.
 
-Fault Tolerance: Can tolerate f failures with 3f+1 nodes
-```
+## Consensus Details
 
-### Simplified Proof-of-Work (Development)
-```text
-PoW Characteristics:
-• CPU-based mining for block validation
-• Adjustable difficulty for performance tuning
-• Not suitable for production use
-• Good for development and testing
-```
-
-## Key Components
-
-### Consensus Engine Trait
-The core interface that all consensus implementations must provide:
-- **Transaction Proposal**: Submit transactions for consensus
-- **Block Validation**: Verify block integrity and signatures
-- **Block Commitment**: Finalize blocks in the ledger
-- **Chain State**: Query current blockchain state
-- **Fork Resolution**: Handle blockchain forks
-
-### Transaction Structure
-```ignore
-Transaction {
-    id: "unique-transaction-id",
-    operations: [Operation, Operation, ...],
-    timestamp: "2024-01-10T12:00:00Z",
-    signature: "cryptographic-signature",
-    proposer: "node-id"
-}
-```
-
-### Block Structure
-```ignore
-Block {
-    header: BlockHeader {
-        version: 1,
-        previous_hash: "parent-block-hash",
-        merkle_root: "transactions-merkle-root",
-        timestamp: "2024-01-10T12:00:00Z",
-        difficulty: 1000,
-        nonce: 12345
-    },
-    transactions: [Transaction, Transaction, ...],
-    signatures: ["validator-sig-1", "validator-sig-2", ...]
-}
-```
-
-## Usage Examples
-
-### Basic Transaction Consensus
-```ignore
-use primusdb::consensus::{ConsensusEngine, Transaction, OperationType};
-
-let transaction = Transaction {
-    id: "tx-123".to_string(),
-    operations: vec![
-        Operation {
-            op_type: OperationType::Insert,
-            table: "users".to_string(),
-            data: serde_json::json!({"name": "Alice"}),
-            conditions: None,
-            storage_type: "Document".to_string(),
-        }
-    ],
-    timestamp: chrono::Utc::now(),
-    signature: "signature-here".to_string(),
-    proposer: "node-1".to_string(),
-};
-
-// Propose transaction for consensus
-let result = consensus_engine.propose_transaction(&transaction).await?;
-if result.accepted {
-    println!("Transaction accepted in round {}", result.consensus_round);
-} else {
-    println!("Transaction rejected");
-}
-```
-
-### Block Validation and Commitment
-```ignore
-// Validate incoming block
-let is_valid = consensus_engine.validate_block(&received_block).await?;
-if is_valid {
-    // Commit block to local chain
-    consensus_engine.commit_block(&received_block).await?;
-    println!("Block {} committed successfully", received_block.hash());
-} else {
-    println!("Block validation failed");
-}
-```
-
-### Chain State Monitoring
-```ignore
-// Get current blockchain state
-let chain_state = consensus_engine.get_chain_state().await?;
-println!("Current height: {}", chain_state.height);
-println!("Latest block hash: {}", chain_state.latest_block_hash);
-println!("Active validators: {}", chain_state.validator_count);
-
-// Check for forks
-if let Some(fork_point) = chain_state.detect_fork() {
-    let resolution = consensus_engine.handle_fork(&fork_point).await?;
-    match resolution {
-        ForkResolution::Resolved => println!("Fork resolved"),
-        ForkResolution::Unresolved => println!("Manual intervention required"),
-    }
-}
-```
-
-## Validator Network
-
-### Validator Selection
-- **Permissioned**: Fixed set of known validators
-- **Reputation-based**: Validators earn trust over time
-- **Stake-based**: Validators commit resources to network
-
-### Validator Duties
-1. **Transaction Validation**: Verify transaction signatures and semantics
-2. **Block Proposal**: Create new blocks with valid transactions
-3. **Block Validation**: Confirm block integrity and ordering
-4. **Network Security**: Detect and report malicious behavior
-
-### Network Configuration
-```toml
-[consensus]
-algorithm = "pbft"
-validators = ["node1", "node2", "node3", "node4"]
-quorum_size = 3  # 2f+1 for f=1 fault tolerance
-block_time = 1000  # milliseconds
-max_block_size = 1000  # transactions per block
-```
-
-## Security Features
-
-### Cryptographic Verification
-- **Digital Signatures**: ECDSA signatures for transaction authenticity
-- **Hash Functions**: SHA-256 for block and transaction hashing
-- **Merkle Trees**: Efficient verification of transaction inclusion
-- **Public Key Infrastructure**: Validator identity management
-
-### Attack Prevention
-- **Sybil Attacks**: Permissioned validator network
-- **Double Spending**: Transaction deduplication and ordering
-- **Long Range Attacks**: Chain history verification
-- **Eclipse Attacks**: Multiple peer connections required
-
-## Performance Characteristics
-
-### Throughput
-- **PBFT Consensus**: 1000-5000 TPS depending on network size
-- **Block Time**: 1-10 seconds configurable
-- **Latency**: 3-5 round trips for consensus
-- **Scalability**: Linear with validator count (up to 100 nodes)
-
-### Resource Usage
-- **CPU**: Moderate for signature verification
-- **Memory**: Block cache and validator state
-- **Network**: Broadcast communication between validators
-- **Storage**: Complete blockchain history
-
-## Implementation Details
-
-### Block Structure
-```text
-Block Format:
-┌─────────────────────────────────────┐
-│ Header                              │
-│ • Version: u32                      │
-│ • Previous Hash: [u8; 32]           │
-│ • Merkle Root: [u8; 32]             │
-│ • Timestamp: u64                    │
-│ • Difficulty: u32                   │
-│ • Nonce: u32                        │
-└─────────────────────────────────────┘
-│ Transactions                        │
-│ • Transaction 1                     │
-│ • Transaction 2                     │
-│ • ...                               │
-└─────────────────────────────────────┘
-│ Validator Signatures                │
-│ • Signature 1                       │
-│ • Signature 2                       │
-│ • ...                               │
-└─────────────────────────────────────┘
-```
-
-### Merkle Tree Construction
-```text
-Merkle Tree for Transactions:
-        Root
-       /    \
-     H12    H34
-    /  \   /  \
-  H1  H2 H3  H4
- / \ / \/ \ / \/ \
-T1 T2 T3 T4 T5 T6 T7 T8
-```
-
-### Fork Resolution Algorithm
-```text
-Fork Resolution Process:
-1. Detect fork at common ancestor
-2. Calculate chain work (PoW) or validator votes (PBFT)
-3. Choose longest/heaviest valid chain
-4. Rollback conflicting transactions
-5. Replay valid transactions on correct chain
-```
-
-## Monitoring & Observability
-
-### Consensus Metrics
-- **Block Production Rate**: Blocks per minute
-- **Transaction Throughput**: TPS across network
-- **Consensus Latency**: Time to reach agreement
-- **Validator Participation**: Percentage of active validators
-- **Fork Frequency**: Rate of blockchain forks
-
-### Health Checks
-```ignore
-let health = consensus_engine.health_check()?;
-assert!(health.validator_count >= health.minimum_quorum);
-assert!(health.last_block_age < Duration::from_secs(300)); // 5 minutes
-assert!(health.network_connectivity > 0.8); // 80% connected
-```
-
-## Future Enhancements
-
-### Planned Features
-- **Proof-of-Stake**: Energy-efficient consensus
-- **Sharding**: Horizontal scaling across validator groups
-- **Cross-Chain**: Interoperability with other blockchains
-- **Zero-Knowledge**: Privacy-preserving transactions
-- **Layer 2**: Off-chain transaction processing
-
-### Research Areas
-- **DAG-based Consensus**: Faster finality than traditional blockchains
-- **Verifiable Delay Functions**: Unbiased leader selection
-- **Threshold Cryptography**: Reduced signature overhead
-- **Post-Quantum Security**: Quantum-resistant cryptographic algorithms
+- Signatures are ED25519 via the `ring` crate; node keypairs persist in sled.
+- Block production is deterministic round-robin over the registered validator set.
+- `handle_fork` resolves forks by preferring the locally kept chain or flagging
+  manual intervention when the fork point is unknown.
 */
 
 use crate::{PrimusDBConfig, Result};
@@ -491,78 +247,131 @@ pub enum OperationType {
     Drop,
 }
 
+/// Outcome of proposing a transaction to the consensus network.
+///
+/// Indicates whether the transaction was accepted, which block (if any) is
+/// expected to contain it, the validator signatures collected and the consensus
+/// round in which the proposal was processed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusResult {
+    /// Whether the transaction was accepted for consensus
     pub accepted: bool,
+    /// Hash of the block expected to include the transaction
     pub block_hash: Option<Hash>,
+    /// Signatures collected from participating validators
     pub validator_signatures: Vec<String>,
+    /// Consensus round in which the proposal was processed
     pub consensus_round: u64,
 }
 
+/// A committed batch of transactions in the ledger.
+///
+/// Links to the previous block via `previous_hash`, commits the Merkle root of
+/// its transactions, and is signed by the validator that produced it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
+    /// Hash of this block
     pub hash: Hash,
+    /// Hash of the parent block (`"genesis"` for the first block)
     pub previous_hash: Hash,
+    /// Height of this block in the chain (1-based)
     pub height: u64,
+    /// Transactions included in this block
     pub transactions: Vec<Transaction>,
+    /// Timestamp when the block was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Merkle root over the block's transactions
     pub merkle_root: Hash,
+    /// ID of the validator that produced the block
     pub validator: String,
+    /// Base64-encoded signature of the block by its validator
     pub signature: String,
 }
 
+/// A SHA-256 content hash used across the ledger (blocks, transactions, roots).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Hash(String);
 
 impl Hash {
+    /// Borrow the hash as a `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// Consume the hash and return its inner `String`.
     pub fn into_inner(self) -> String {
         self.0
     }
 }
 
+/// Snapshot of the local blockchain state reported by the consensus engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainState {
+    /// Height of the highest committed block
     pub current_height: u64,
+    /// Total number of transactions committed across the chain
     pub total_transactions: u64,
+    /// Validators currently participating in consensus
     pub validators: Vec<Validator>,
+    /// Hash of the most recently committed block
     pub last_block_hash: Hash,
+    /// Live consensus parameters (block time, quorum sizing, ...)
     pub consensus_parameters: ConsensusParameters,
 }
 
+/// A validator authorized to propose, validate and sign blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Validator {
+    /// Unique validator ID (node ID)
     pub id: String,
+    /// Base64-encoded ED25519 public key used to verify signatures
     pub public_key: String,
+    /// Stake committed by the validator
     pub stake: u64,
+    /// Reputation score (0.0-1.0) earned over time
     pub reputation: f64,
+    /// Timestamp of the last observed activity
     pub last_seen: chrono::DateTime<chrono::Utc>,
 }
 
+/// Tunable parameters governing block production and validator requirements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusParameters {
+    /// Target time between blocks (ms)
     pub block_time_ms: u64,
+    /// Maximum number of transactions per block
     pub max_block_size: u64,
+    /// Number of active validators
     pub validator_count: usize,
+    /// Minimum stake a validator must commit
     pub min_stake: u64,
+    /// Reputation threshold below which a validator is slashed
     pub slash_threshold: f64,
 }
 
+/// Result of resolving a detected fork in the chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ForkResolution {
+    /// Keep the current chain; the fork is stale
     KeepCurrent,
+    /// Switch to the fork, which extends to the given height
     SwitchToFork { new_height: u64 },
+    /// The fork cannot be resolved automatically
     ManualIntervention,
 }
 
 pub mod blockchain;
 pub mod state_machine;
 
+/// Hyperledger-inspired consensus engine implementing [`ConsensusEngine`].
+///
+/// Maintains a sled-backed ledger, a configurable validator set and a mempool.
+/// Transactions are signed with the node's persistent ED25519 keypair, batched
+/// into blocks with Merkle roots, validated against validator signatures, and
+/// applied to the storage engines through the [`state_machine`] submodule.
+///
+/// Note: this engine drives local/standalone agreement; cluster-wide ordering
+/// is handled by the Raft layer in [`crate::cluster`].
 pub struct HyperledgerStyleConsensus {
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
     current_state: Mutex<ChainState>,
     validators: Mutex<HashMap<String, Validator>>,
     pending_transactions: Mutex<Vec<Transaction>>,
@@ -573,12 +382,10 @@ pub struct HyperledgerStyleConsensus {
     keypair_bytes: Mutex<Vec<u8>>,
     /// Base64-encoded ED25519 public key of this node
     node_public_key: String,
-    /// CSPRNG for key generation
-    #[allow(dead_code)]
-    rng: SystemRandom,
 }
 
 impl HyperledgerStyleConsensus {
+    /// Open (or create) the sled ledger and initialize the consensus state machine.
     pub fn new(
         config: &PrimusDBConfig,
         engines: std::collections::HashMap<
@@ -624,10 +431,9 @@ impl HyperledgerStyleConsensus {
 
         // Generate or load the node's ED25519 keypair
         let rng = SystemRandom::new();
-        let (keypair_bytes, public_key) = Self::load_or_generate_keypair(&db, &rng);
+        let (keypair_bytes, public_key) = Self::load_or_generate_keypair(&db, &rng)?;
 
         Ok(HyperledgerStyleConsensus {
-            config: config.clone(),
             current_state: Mutex::new(initial_state),
             validators: Mutex::new(HashMap::new()),
             pending_transactions: Mutex::new(vec![]),
@@ -635,19 +441,21 @@ impl HyperledgerStyleConsensus {
             state_machine,
             keypair_bytes: Mutex::new(keypair_bytes),
             node_public_key: public_key.clone(),
-            rng,
         })
     }
 
     /// Load the node's ED25519 keypair from sled, or generate a new one.
-    fn load_or_generate_keypair(db: &sled::Db, rng: &SystemRandom) -> (Vec<u8>, String) {
+    fn load_or_generate_keypair(
+        db: &sled::Db,
+        rng: &SystemRandom,
+    ) -> crate::Result<(Vec<u8>, String)> {
         // Try to load existing keypair
-        if let Some(bytes) = db.get("node_keypair").ok().flatten() {
+        if let Some(bytes) = db.get("node_keypair")? {
             let bytes = bytes.to_vec();
             if let Ok(kp) = Ed25519KeyPair::from_pkcs8(&bytes) {
                 let pub_key_bytes = kp.public_key().as_ref().to_vec();
                 let pub_key = base64::engine::general_purpose::STANDARD.encode(&pub_key_bytes);
-                return (bytes, pub_key);
+                return Ok((bytes, pub_key));
             }
         }
 
@@ -660,11 +468,19 @@ impl HyperledgerStyleConsensus {
         let pub_key = base64::engine::general_purpose::STANDARD.encode(&pub_key_bytes);
 
         // Persist to sled for future restarts
-        let _ = db.insert("node_keypair", keypair_bytes.clone());
-        let _ = db.insert("node_public_key", pub_key.as_bytes());
-        let _ = db.flush();
+        db.insert("node_keypair", keypair_bytes.clone())
+            .map_err(|e| {
+                crate::Error::ConsensusError(format!("failed to persist node keypair: {}", e))
+            })?;
+        db.insert("node_public_key", pub_key.as_bytes())
+            .map_err(|e| {
+                crate::Error::ConsensusError(format!("failed to persist node public key: {}", e))
+            })?;
+        db.flush().map_err(|e| {
+            crate::Error::ConsensusError(format!("failed to flush node keypair: {}", e))
+        })?;
 
-        (keypair_bytes, pub_key)
+        Ok((keypair_bytes, pub_key))
     }
 
     /// Sign a message (transaction hash bytes) with the node's private key.
@@ -830,7 +646,7 @@ impl HyperledgerStyleConsensus {
     pub fn list_blocks(&self) -> Result<Vec<Block>> {
         let blocks_tree = self.db.open_tree("blocks")?;
         let mut blocks = Vec::new();
-        for result in blocks_tree.iter() {
+        for result in &blocks_tree {
             let (_, value) = result?;
             if let Ok(block) = serde_json::from_slice::<Block>(&value) {
                 blocks.push(block);
@@ -907,6 +723,8 @@ impl HyperledgerStyleConsensus {
         Self::verify_signature(&pub_key_bytes, &message, &signature_bytes)
     }
 
+    /// Pick the validator responsible for `round` by round-robin over the
+    /// current validator set, returning `None` when no validators are known.
     #[allow(dead_code)]
     fn select_validator(&self, round: u64) -> Option<Validator> {
         let validators = self.validators.lock().unwrap();

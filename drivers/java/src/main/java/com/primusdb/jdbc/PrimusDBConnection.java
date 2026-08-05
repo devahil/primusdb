@@ -20,6 +20,7 @@ public class PrimusDBConnection implements java.sql.Connection {
     private final Gson gson;
     private boolean closed = false;
     private boolean autoCommit = true;
+    private String token = null;
 
     public PrimusDBConnection(String host, int port, String database, String username, String password) {
         this.host = host;
@@ -31,12 +32,137 @@ public class PrimusDBConnection implements java.sql.Connection {
         this.gson = new Gson();
     }
 
+    public String getHost() {
+        return host;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
     public String getBaseUrl() {
         return "http://" + host + ":" + port;
     }
 
     public OkHttpClient getHttpClient() {
         return httpClient;
+    }
+
+    public String getToken() {
+        if (token == null) {
+            token = java.util.Base64.getEncoder().encodeToString(
+                (username + ":" + password).getBytes()
+            );
+        }
+        return token;
+    }
+
+    /**
+     * Fetch the server capabilities snapshot (capability negotiation).
+     *
+     * @return ServerCapabilities describing the connected node
+     * @throws SQLException if the request fails or the response cannot be parsed
+     */
+    public ServerCapabilities capabilities() throws SQLException {
+        checkClosed();
+        try {
+            Request request = new Request.Builder()
+                    .url(getBaseUrl() + "/api/v1/capabilities")
+                    .get()
+                    .build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                JsonObject json = gson.fromJson(response.body().string(), JsonObject.class);
+                if (json.get("success").getAsBoolean()) {
+                    return parseServerCapabilities(json.getAsJsonObject("data"));
+                }
+                throw new SQLException(json.get("error").getAsString());
+            }
+        } catch (IOException e) {
+            throw new SQLException("Capabilities fetch failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Negotiate with the server: fetch capabilities and validate that the node
+     * supports all required features and storage engines. Unknown features and
+     * engines are ignored (additive contract).
+     *
+     * @param requiredFeatures feature flags the server must advertise
+     * @param requiredEngines  storage engines the server must advertise
+     * @return ServerCapabilities describing the connected node
+     * @throws SQLException if a required feature or engine is missing
+     */
+    public ServerCapabilities negotiate(String[] requiredFeatures, String[] requiredEngines) throws SQLException {
+        ServerCapabilities caps = capabilities();
+        if (requiredFeatures != null) {
+            StringBuilder missing = new StringBuilder();
+            for (String feature : requiredFeatures) {
+                boolean found = false;
+                for (String available : caps.features) {
+                    if (available.equals(feature)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    missing.append(missing.length() == 0 ? feature : ", " + feature);
+                }
+            }
+            if (missing.length() > 0) {
+                throw new SQLException("Missing required features: " + missing);
+            }
+        }
+        if (requiredEngines != null) {
+            StringBuilder missing = new StringBuilder();
+            for (String engine : requiredEngines) {
+                boolean found = false;
+                for (EngineCapabilities available : caps.engines) {
+                    if (available.storageType.equals(engine)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    missing.append(missing.length() == 0 ? engine : ", " + engine);
+                }
+            }
+            if (missing.length() > 0) {
+                throw new SQLException("Missing required engines: " + missing);
+            }
+        }
+        return caps;
+    }
+
+    private ServerCapabilities parseServerCapabilities(JsonObject data) {
+        JsonObject serverJson = data.getAsJsonObject("server");
+        ServerInfo server = new ServerInfo(
+                serverJson.get("version").getAsString(),
+                serverJson.get("node_id").getAsString(),
+                serverJson.get("instance_id").getAsString(),
+                serverJson.get("uptime_seconds").getAsLong()
+        );
+        JsonArray enginesJson = data.getAsJsonArray("engines");
+        EngineCapabilities[] engines = new EngineCapabilities[enginesJson.size()];
+        for (int i = 0; i < enginesJson.size(); i++) {
+            JsonObject engineJson = enginesJson.get(i).getAsJsonObject();
+            JsonArray tablesJson = engineJson.getAsJsonArray("tables");
+            String[] tables = new String[tablesJson.size()];
+            for (int j = 0; j < tablesJson.size(); j++) {
+                tables[j] = tablesJson.get(j).getAsString();
+            }
+            engines[i] = new EngineCapabilities(engineJson.get("storage_type").getAsString(), tables);
+        }
+        JsonArray featuresJson = data.getAsJsonArray("features");
+        String[] features = new String[featuresJson.size()];
+        for (int i = 0; i < featuresJson.size(); i++) {
+            features[i] = featuresJson.get(i).getAsString();
+        }
+        return new ServerCapabilities(
+                data.get("protocol_version").getAsInt(),
+                server,
+                engines,
+                features
+        );
     }
 
     @Override
@@ -173,4 +299,51 @@ public class PrimusDBConnection implements java.sql.Connection {
     @Override public boolean isWrapperFor(Class<?> iface) throws SQLException { return false; }
     @Override public String getSchema() throws SQLException { return this.database; }
     @Override public void setSchema(String schema) throws SQLException { /* no-op */ }
+
+    /**
+     * Server info snapshot.
+     */
+    public static class ServerInfo {
+        public final String version;
+        public final String nodeId;
+        public final String instanceId;
+        public final long uptimeSeconds;
+
+        public ServerInfo(String version, String nodeId, String instanceId, long uptimeSeconds) {
+            this.version = version;
+            this.nodeId = nodeId;
+            this.instanceId = instanceId;
+            this.uptimeSeconds = uptimeSeconds;
+        }
+    }
+
+    /**
+     * Storage engine capabilities snapshot.
+     */
+    public static class EngineCapabilities {
+        public final String storageType;
+        public final String[] tables;
+
+        public EngineCapabilities(String storageType, String[] tables) {
+            this.storageType = storageType;
+            this.tables = tables;
+        }
+    }
+
+    /**
+     * Server capabilities snapshot.
+     */
+    public static class ServerCapabilities {
+        public final int protocolVersion;
+        public final ServerInfo server;
+        public final EngineCapabilities[] engines;
+        public final String[] features;
+
+        public ServerCapabilities(int protocolVersion, ServerInfo server, EngineCapabilities[] engines, String[] features) {
+            this.protocolVersion = protocolVersion;
+            this.server = server;
+            this.engines = engines;
+            this.features = features;
+        }
+    }
 }

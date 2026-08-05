@@ -1,3 +1,60 @@
+//! Cluster & distributed coordination layer
+//!
+//! Implements the distributed control plane for PrimusDB: how nodes discover
+//! each other, elect a leader, replicate writes, partition data into shards,
+//! and federate across independent clusters.
+//!
+//! # Topology concepts
+//!
+//! - **Membership discovery** - [`membership::MembershipManager`] uses SWIM-style
+//!   gossip (ping / ping-req) and seed-server joins to maintain a liveness view
+//!   (`Alive` / `Suspect` / `Dead`) of the cluster.
+//! - **Raft leader election** - [`raft::RaftNode`] implements a simplified Raft
+//!   state machine (follower / candidate / leader). Only the elected leader may
+//!   replicate log entries, which it does with append-entries RPCs.
+//! - **Replication** - [`replication::ReplicationEngine`] fans writes out to
+//!   replica nodes synchronously, asynchronously, or until a quorum acks.
+//! - **Sharding** - [`shard::ShardManager`] keeps a consistent-hash ring that
+//!   maps keys to shards; each shard has one primary and several replicas.
+//! - **Federation** - [`federation::FederationManager`] links independent
+//!   clusters into a federation so data domains and namespaces can span clusters.
+//! - **Cross-domain gateway** - [`gateway::ClusterGateway`] routes requests to
+//!   the best node (round-robin, least-loaded, lowest-latency, shard-aware or
+//!   domain-aware) and enforces circuit breaking per node.
+//!
+//! # Data flow
+//!
+//! ```text
+//! Client ──► ClusterGateway ──► node routing (least-loaded / shard-aware)
+//!                                 │
+//!                                 ▼
+//!   ┌──────────────────────────────────────────────────────────┐
+//!   │ Node                                                      │
+//!   │  MembershipManager ── gossip / join ──► peer nodes        │ discovery
+//!   │  RaftNode ── vote + append-entries ──► peer RaftNodes     │ election
+//!   │  ReplicationEngine ── replica writes ──► replica nodes    │ fan-out
+//!   │  ShardManager ── consistent-hash ring ──► shard owners    │ partition
+//!   │  FederationManager ── announce / domain ──► other clusters│ federation
+//!   └──────────────────────────────────────────────────────────┘
+//!                                 │
+//!                                 ▼
+//!                             sled storage
+//! ```
+//!
+//! # Public types
+//!
+//! - [`ClusterManager`] - top-level coordinator owning membership, sharding,
+//!   replication, Raft, the RPC server and the sync coordinator.
+//! - [`ClusterStatusInfo`] - health snapshot reported by `get_cluster_status`.
+//! - [`NodeResources`], [`NodeRole`] - per-node resource and role descriptors.
+//! - [`ShardMigration`] - planned shard move between two nodes.
+//! - [`FailoverAction`], [`FailoverActionType`], [`ActionPriority`] - failover
+//!   planning structures.
+//!
+//! RPC message wire types, federation messages and reconciliation types are
+//! re-exported from [`rpc`], [`federation`], [`domain`], [`gateway`] and
+//! [`sync`].
+
 use crate::cluster::membership::{ClusterMember, MemberStatus, MembershipManager};
 use crate::cluster::raft::RaftNode;
 use crate::cluster::replication::ReplicationEngine;
@@ -27,27 +84,53 @@ pub use federation::*;
 pub use gateway::*;
 pub use sync::*;
 
+/// Top-level cluster coordinator for a PrimusDB node.
+///
+/// Owns the distributed control-plane components: membership discovery, the
+/// Raft replication state machine, the replication engine, shard management,
+/// the inter-node RPC server, and the sync coordinator.
+///
+/// A `ClusterManager` runs standalone unless `ClusterConfig::enabled` is set;
+/// when enabled it opens a sled-backed cluster state database, registers itself
+/// with membership, connects to seed servers, runs the gossip loop, and starts
+/// Raft leader election.
 pub struct ClusterManager {
+    /// Cluster configuration this manager was created with
     pub config: ClusterConfig,
+    /// Unique identifier of this node within the cluster
     pub node_id: String,
+    /// IP address this node binds for cluster RPC
     pub address: String,
+    /// TCP port this node's RPC server listens on
     pub port: u16,
+    /// Gossip-based membership manager tracking peer liveness
     pub membership: Arc<MembershipManager>,
+    /// Consistent-hash shard manager partitioning data across nodes
     pub shard_manager: Arc<ShardManager>,
+    /// Replication engine fanning writes out to replicas
     pub replication: Arc<ReplicationEngine>,
+    /// Raft consensus node; `None` until [`ClusterManager::start`] runs
     pub raft_node: Option<Arc<RaftNode>>,
+    /// Handle of the background RPC server task, if running
     pub rpc_server: Option<Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>>,
+    /// sled database used to persist cluster state (peers, terms, shards)
     pub db: Option<sled::Db>,
+    /// Whether the cluster manager finished initialization
     pub initialized: Arc<RwLock<bool>>,
-    #[allow(dead_code)]
+    /// Channel used by Raft to deliver committed log entries for applying
     pub apply_tx: mpsc::UnboundedSender<Vec<u8>>,
-    #[allow(dead_code)]
-    pub apply_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    /// Whether the peer set has been discovered and wired up
     pub peers_initialized: Arc<RwLock<bool>>,
+    /// Optional coordinator for cross-node sync and reconciliation
     pub sync_coordinator: Option<Arc<SyncCoordinator>>,
 }
 
 impl ClusterManager {
+    /// Create a new cluster manager for `bind_addr`.
+    ///
+    /// Constructs the membership manager, shard manager, replication engine and
+    /// the Raft apply channel. No network activity happens until
+    /// [`start`](Self::start) is called.
     pub fn new(config: &ClusterConfig, bind_addr: SocketAddr) -> Result<Self> {
         let node_id = config.node_id.clone();
         let address = bind_addr.ip().to_string();
@@ -72,7 +155,7 @@ impl ClusterManager {
             clients.clone(),
         ));
 
-        let (apply_tx, apply_rx) = mpsc::unbounded_channel();
+        let (apply_tx, _apply_rx) = mpsc::unbounded_channel();
 
         let mgr = Self {
             config: config.clone(),
@@ -87,7 +170,6 @@ impl ClusterManager {
             db: None,
             initialized: Arc::new(RwLock::new(false)),
             apply_tx,
-            apply_rx: Arc::new(tokio::sync::Mutex::new(apply_rx)),
             peers_initialized: Arc::new(RwLock::new(false)),
             sync_coordinator: None,
         };
@@ -95,6 +177,8 @@ impl ClusterManager {
         Ok(mgr)
     }
 
+    /// Open (or create) the sled-backed cluster state database and restore any
+    /// persisted peers into the membership table.
     pub async fn init_db(&mut self, config: &PrimusDBConfig) -> Result<()> {
         let data_dir = format!("{}/cluster", config.storage.data_dir);
         std::fs::create_dir_all(&data_dir)
@@ -161,6 +245,11 @@ impl ClusterManager {
         Ok(())
     }
 
+    /// Boot the cluster: initialize state, register this node, start the RPC
+    /// server, connect to seed servers, run the gossip loop, and initialize Raft.
+    ///
+    /// When `ClusterConfig::enabled` is `false` the node stays standalone and
+    /// this method returns immediately.
     pub async fn start(&mut self, config: &PrimusDBConfig) -> Result<()> {
         if !self.config.enabled {
             info!("Cluster mode disabled, running as standalone node");
@@ -429,6 +518,11 @@ impl ClusterManager {
         Ok(())
     }
 
+    /// Submit an operation to the Raft log for cluster-wide ordering.
+    ///
+    /// # Errors
+    /// Returns an error if Raft is uninitialized, this node is not the leader,
+    /// or the entry cannot be replicated to a quorum.
     pub async fn propose(&self, op_type: &str, data: serde_json::Value) -> Result<bool> {
         if let Some(ref raft) = self.raft_node {
             if !raft.is_leader().await {
@@ -447,6 +541,7 @@ impl ClusterManager {
         }
     }
 
+    /// Add a node to membership and shard management and persist the peer set.
     pub async fn register_node(
         &self,
         node_id: &str,
@@ -472,6 +567,7 @@ impl ClusterManager {
         Ok(())
     }
 
+    /// Mark a node dead, remove it from shard management, and persist the peer set.
     pub async fn remove_node(&self, node_id: &str) -> Result<()> {
         self.membership.mark_dead(node_id).await;
         self.shard_manager.remove_node(node_id).await;
@@ -479,6 +575,7 @@ impl ClusterManager {
         Ok(())
     }
 
+    /// Report the current cluster health snapshot (size, leader, health status).
     pub async fn get_cluster_status(&self) -> ClusterStatusInfo {
         let members = self.membership.alive_members().await;
         let alive_count = members.len() + 1;
@@ -515,6 +612,8 @@ impl ClusterManager {
 }
 
 impl ClusterManager {
+    /// Deterministically pick a node for an operation type by hashing it across
+    /// the current member set.
     pub async fn get_node_for_operation(&self, operation_type: &str) -> Option<String> {
         let members = self.membership.members.read().await;
         if members.is_empty() {
@@ -528,70 +627,113 @@ impl ClusterManager {
         Some(node_id)
     }
 
+    /// Ask the shard manager whether shards need to be moved to balance load.
     pub async fn check_rebalance_needed(&self) -> Vec<ShardMigrationPlan> {
         self.shard_manager.check_rebalance_needed().await
     }
 }
 
+/// Snapshot of cluster health and leadership reported by
+/// [`ClusterManager::get_cluster_status`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStatusInfo {
+    /// ID of the reporting node
     pub node_id: String,
+    /// Total number of nodes in the cluster (including this node)
     pub cluster_size: usize,
+    /// Number of nodes currently considered alive
     pub alive_count: usize,
+    /// Whether this node is the current Raft leader
     pub is_leader: bool,
+    /// ID of the current leader, if known
     pub leader_id: Option<String>,
+    /// Human-readable health classification
     pub health_status: &'static str,
+    /// Configured replication factor
     pub replication_factor: u32,
+    /// Uptime of the cluster manager in milliseconds
     pub uptime_ms: u64,
 }
 
+/// Resource snapshot for a node (capacities and current usage).
 #[derive(Debug, Clone)]
 pub struct NodeResources {
+    /// Number of CPU cores available
     pub cpu_cores: u32,
+    /// Total memory in GB
     pub memory_gb: u64,
+    /// Total storage in GB
     pub storage_gb: u64,
+    /// Current CPU usage as a fraction (0.0-1.0)
     pub cpu_usage: f64,
+    /// Current memory usage as a fraction (0.0-1.0)
     pub memory_usage: f64,
+    /// Current storage usage as a fraction (0.0-1.0)
     pub storage_usage: f64,
 }
 
+/// Role a node can play in the cluster.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeRole {
+    /// Coordinates cluster-wide operations
     Coordinator,
+    /// Executes work on behalf of the cluster
     Worker,
+    /// Stores data shards
     Storage,
+    /// Serves the external API
     Api,
 }
 
+/// A planned shard movement from a source node to a target node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardMigration {
+    /// ID of the shard being moved
     pub shard_id: String,
+    /// Node currently hosting the shard
     pub source_node: String,
+    /// Node that should host the shard
     pub target_node: String,
+    /// Estimated time for the migration in milliseconds
     pub estimated_time_ms: u64,
 }
 
+/// A concrete action to take when a node or role fails.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailoverAction {
+    /// Kind of failover action to perform
     pub action_type: FailoverActionType,
+    /// Node the action applies to
     pub target_node: String,
+    /// Human-readable description of the action
     pub description: String,
+    /// How urgent the action is
     pub priority: ActionPriority,
 }
 
+/// Kind of failover action to perform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FailoverActionType {
+    /// Promote a replica to primary
     PromoteReplica,
+    /// Elect a new coordinator
     ElectNewCoordinator,
+    /// Redistribute data across nodes
     RedistributeData,
+    /// Restart a failed service
     RestartService,
 }
 
+/// Priority of a failover action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionPriority {
+    /// Must be handled immediately
     Critical,
+    /// Should be handled soon
     High,
+    /// Best-effort handling
     Medium,
+    /// Handle when convenient
     Low,
 }
 
@@ -603,6 +745,10 @@ fn now_ms() -> u64 {
 }
 
 // Helper for Raft's apply channel
+/// Create a channel used to deliver committed Raft log entries for applying.
+///
+/// The sender is held by the [`ClusterManager`] (and its [`RaftNode`]); the
+/// receiver is consumed by the caller that applies committed entries to storage.
 pub fn create_apply_channel() -> (
     mpsc::UnboundedSender<Vec<u8>>,
     mpsc::UnboundedReceiver<Vec<u8>>,

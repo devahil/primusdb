@@ -1,9 +1,17 @@
+//! Server lifecycle subcommands (`server start`, `stop`, `restart`, ...).
+//!
+//! `server start` is the **server mode** entry point: it builds a
+//! [`crate::PrimusDB`] instance and an [`crate::api::APIServer`] in-process.
+//! The remaining subcommands operate on a running server via the local port
+//! or process list.
+
 use std::path::PathBuf;
 
 use crate::cli::command::ServerSubcommands;
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Locate the PID of the process listening on `port` (via `lsof`).
 fn find_process_on_port(port: u16) -> Option<u32> {
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -24,6 +32,7 @@ fn kill_process(pid: u32, force: bool) -> bool {
         .is_some_and(|s| s.success())
 }
 
+/// Dispatch a `server` subcommand to its handler.
 pub async fn handle_server(cmd: ServerSubcommands, fmt: &OutputFormat) -> Result<()> {
     match cmd {
         ServerSubcommands::Start {
@@ -32,7 +41,31 @@ pub async fn handle_server(cmd: ServerSubcommands, fmt: &OutputFormat) -> Result
             data_dir,
             daemon,
             log_level,
-        } => cmd_start(config, bind, data_dir, daemon, log_level, fmt).await,
+            federation_id,
+            cluster_id,
+            region,
+            federation_discovery,
+            tls_enabled,
+            tls_cert,
+            tls_key,
+        } => {
+            cmd_start(
+                config,
+                bind,
+                data_dir,
+                daemon,
+                log_level,
+                federation_id,
+                cluster_id,
+                region,
+                federation_discovery,
+                tls_enabled,
+                tls_cert,
+                tls_key,
+                fmt,
+            )
+            .await
+        }
         ServerSubcommands::Stop { timeout, force } => cmd_stop(timeout, force, fmt).await,
         ServerSubcommands::Restart { config, timeout } => cmd_restart(config, timeout, fmt).await,
         ServerSubcommands::Status { verbose } => cmd_status(verbose, fmt).await,
@@ -46,12 +79,21 @@ pub async fn handle_server(cmd: ServerSubcommands, fmt: &OutputFormat) -> Result
     }
 }
 
+// CLI command handler; each arg maps to an independent CLI flag.
+#[allow(clippy::too_many_arguments)]
 async fn cmd_start(
     config: Option<PathBuf>,
     bind: Option<String>,
     data_dir: Option<PathBuf>,
     _daemon: bool,
     log_level: String,
+    federation_id: String,
+    cluster_id: Option<String>,
+    region: Option<String>,
+    federation_discovery: Vec<String>,
+    tls_enabled: bool,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
     _fmt: &OutputFormat,
 ) -> Result<()> {
     let bind = bind.unwrap_or_else(|| "127.0.0.1:8080".to_string());
@@ -67,7 +109,38 @@ async fn cmd_start(
     let mut primus_config = crate::PrimusDBConfig::default();
     primus_config.network.bind_address = host.clone();
     primus_config.network.port = port;
-    primus_config.cluster.enabled = false;
+    primus_config.network.tls_enabled = tls_enabled;
+    if let Some(ref cert) = tls_cert {
+        primus_config.network.tls_cert_path = cert.clone();
+    }
+    if let Some(ref key) = tls_key {
+        primus_config.network.tls_key_path = key.clone();
+    }
+
+    // Federation config
+    let federation = if !federation_discovery.is_empty() {
+        let net = &primus_config.network;
+        Some(crate::cluster::FederationConfig {
+            federation_id,
+            cluster_id: cluster_id.unwrap_or_else(|| host.clone()),
+            region: region.clone(),
+            announce_interval_ms: 10_000,
+            heartbeat_interval_ms: 5_000,
+            heartbeat_timeout_ms: 3_000,
+            suspect_timeout_ms: 30_000,
+            max_clusters: 64,
+            enable_cross_cluster_replication: true,
+            enable_federated_namespaces: true,
+            tls_cert_path: net.tls_cert_path.clone(),
+            tls_key_path: net.tls_key_path.clone(),
+            tls_ca_path: net.tls_ca_path.clone(),
+            mtls_enabled: net.mtls_enabled,
+        })
+    } else {
+        None
+    };
+    primus_config.federation = federation;
+    primus_config.cluster.enabled = !federation_discovery.is_empty();
 
     if let Some(ref dir) = data_dir {
         primus_config.storage.data_dir = dir.clone();
@@ -76,7 +149,14 @@ async fn cmd_start(
         // Future: load config.toml
     }
 
+    let network_config = primus_config.network.clone();
+    let federation_enabled = primus_config.federation.is_some();
     let db = std::sync::Arc::new(crate::PrimusDB::new(primus_config)?);
+
+    // Federation background tasks (announce + heartbeat loops) when enabled.
+    if federation_enabled {
+        db.start_federation().await;
+    }
 
     let auth_config = crate::auth::AuthConfig {
         require_auth: true,
@@ -90,7 +170,8 @@ async fn cmd_start(
     };
     let auth_service = std::sync::Arc::new(crate::auth::AuthService::new(auth_config)?);
 
-    let api_server = crate::api::APIServer::new(db, auth_service, None);
+    let api_server =
+        crate::api::APIServer::with_network_config(db, auth_service, None, network_config);
 
     println!("Starting PrimusDB server on {}...", bind);
     api_server.run(&bind).await?;

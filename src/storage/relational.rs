@@ -5,6 +5,49 @@
  * Version: 1.2.0-alpha - Added: as_any() method for engine-specific features
  */
 
+/*!
+# PrimusDB Relational Storage Engine
+
+The relational engine implements traditional SQL-like table storage over an
+embedded sled database. It manages typed schemas, rows, foreign keys,
+auto-increment sequences, views, triggers, joins, grouped queries, and
+Hyperledger-style reconciliation (vector clocks, checksums, Merkle roots).
+Use it for applications that need fixed schemas, referential integrity, and
+relational operations (JOIN, GROUP BY, constraints) on top of a lightweight
+embedded store.
+
+```text
+Relational Engine Data Flow
+═══════════════════════════════════════════════════
+
+RelationalQuery ──► execute_query ──► query executor
+                        ├─► SELECT / INSERT / UPDATE / DELETE (+ RETURNING)
+                        ├─► JOIN (inner / left / right / full / cross)
+                        ├─► GROUP BY / HAVING / ORDER BY
+                        └─► TRUNCATE
+
+Tables (schema + rows) ──► sled trees
+  table:{name}   row data            _sequences   SERIAL sequences
+  _schemas       schema JSON         _views       materialized views
+  _next_ids      auto-increment IDs  _triggers    event triggers
+  _created_at / _updated_at          metadata timestamps
+```
+
+## Main Types & Functions
+
+- [`RelationalEngine`]: the SQL-like relational engine implementing [`StorageEngine`].
+- [`RelationalQuery`]: typed query variants executable via `execute_query`.
+- [`QueryResult`]: either a set of records or an affected-row count.
+- [`ForeignKey`], [`RelationalSequence`], [`RelationalView`], [`Trigger`]: database objects.
+- `create_index` / `drop_index` / `analyze_table`: table analysis and indexing.
+- `create_sequence` / `nextval` / `currval` / `setval`: sequence management.
+- `create_view` / `refresh_view` / `query_view`: view management.
+- `create_trigger` / `fire_triggers`: trigger management.
+- `alter_table_*` / `rename_table`: DDL operations.
+- `cascade_delete` / `cascade_update` / `set_null_foreign_keys` / `set_default_foreign_keys`: referential actions.
+- `get_rows_for_reconciliation` / `compute_table_merkle_root` / `apply_reconciled_rows`: cluster reconciliation.
+*/
+
 #[allow(unused_imports)]
 use crate::{
     storage::{
@@ -23,8 +66,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
+/// Variants of relational queries that can be executed against the engine.
 #[allow(dead_code)]
 pub enum RelationalQuery<'a> {
+    /// Select rows from a table with optional field projection, conditions,
+    /// pagination, and `DISTINCT` handling. `order_by` is accepted but
+    /// currently ignored by the executor.
     Select {
         table: &'a str,
         fields: Option<Vec<String>>,
@@ -34,35 +81,42 @@ pub enum RelationalQuery<'a> {
         offset: u64,
         distinct: bool,
     },
+    /// Insert a single row into a table.
     Insert {
         table: &'a str,
         data: &'a serde_json::Map<String, serde_json::Value>,
     },
+    /// Insert a row and return the selected columns of the inserted row.
     InsertReturning {
         table: &'a str,
         data: &'a serde_json::Map<String, serde_json::Value>,
         returning: Vec<String>,
     },
+    /// Update rows matching the given conditions.
     Update {
         table: &'a str,
         data: &'a serde_json::Map<String, serde_json::Value>,
         conditions: Option<&'a serde_json::Value>,
     },
+    /// Update rows matching the conditions and return the updated rows.
     UpdateReturning {
         table: &'a str,
         data: &'a serde_json::Map<String, serde_json::Value>,
         conditions: Option<&'a serde_json::Value>,
         returning: Vec<String>,
     },
+    /// Delete rows matching the given conditions.
     Delete {
         table: &'a str,
         conditions: Option<&'a serde_json::Value>,
     },
+    /// Delete rows matching the conditions and return the deleted rows.
     DeleteReturning {
         table: &'a str,
         conditions: Option<&'a serde_json::Value>,
         returning: Vec<String>,
     },
+    /// Join two tables on an equality condition.
     Join {
         join_type: JoinType,
         left_table: &'a str,
@@ -70,6 +124,8 @@ pub enum RelationalQuery<'a> {
         condition: &'a JoinCondition,
         fields: Option<Vec<String>>,
     },
+    /// Select rows with grouping, `HAVING`, and pagination. `order_by` and
+    /// `distinct` are accepted but currently ignored by the executor.
     SelectGrouped {
         table: &'a str,
         fields: Option<Vec<String>>,
@@ -81,17 +137,19 @@ pub enum RelationalQuery<'a> {
         offset: u64,
         distinct: bool,
     },
-    Truncate {
-        table: &'a str,
-        cascade: bool,
-    },
+    /// Remove all rows from a table, optionally cascading to child tables.
+    Truncate { table: &'a str, cascade: bool },
 }
 
+/// Result of a relational query, either a set of records or an affected-row count.
 pub enum QueryResult {
+    /// Rows returned by a read query.
     Records(Vec<Record>),
+    /// Number of rows affected by a write query.
     AffectedRows(u64),
 }
 
+/// Statistics about a relational table produced by the analyzer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableAnalysis {
     table_name: String,
@@ -101,8 +159,11 @@ pub struct TableAnalysis {
     total_size_bytes: u64,
 }
 
+/// Relational storage engine with full SQL-like query support.
+///
+/// Manages schemas, rows, foreign keys, sequences (auto-increment), views,
+/// and triggers. Persists all data through sled trees.
 pub struct RelationalEngine {
-    #[allow(dead_code)]
     config: PrimusDBConfig,
     db: sled::Db,
     tables: Arc<RwLock<HashMap<String, RelationalTable>>>,
@@ -166,6 +227,8 @@ impl Row {
     }
 }
 
+/// In-memory secondary index over one or more columns, mapping each indexed
+/// value to the row ids that contain it.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Index {
@@ -175,71 +238,125 @@ pub struct Index {
     unique: bool,
 }
 
+/// Foreign key constraint linking a referencing (child) table to a referenced
+/// (parent) table, with cascading behaviour on delete and update.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ForeignKey {
+    /// Name of the foreign key constraint.
     pub name: String,
+    /// Table owning the referencing column.
     pub from_table: String,
+    /// Referencing column on the child side.
     pub from_column: String,
+    /// Referenced (parent) table.
     pub to_table: String,
+    /// Referenced (parent) column.
     pub to_column: String,
+    /// Action applied to child rows when the parent row is deleted.
     pub on_delete: CascadeAction,
+    /// Action applied to child rows when the parent row is updated.
     pub on_update: CascadeAction,
 }
 
+/// Monotonic numeric sequence used to generate auto-incrementing values,
+/// typically backing `SERIAL` columns and `nextval` calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationalSequence {
+    /// Sequence name.
     pub name: String,
+    /// Current value, i.e. the last value returned by `nextval`.
     pub current_value: i64,
+    /// Step added on every `nextval` call.
     pub increment: i64,
+    /// Minimum value the sequence may take.
     pub min_value: i64,
+    /// Maximum value the sequence may take.
     pub max_value: i64,
+    /// Whether the sequence wraps around to `min_value` at `max_value`.
     pub cycle: bool,
+    /// Number of values cached per allocation.
     pub cache_size: u64,
 }
 
+/// Virtual table materialized from a stored query definition over one or more
+/// underlying tables, with cached result rows refreshed by `refresh_view`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationalView {
+    /// View name.
     pub name: String,
+    /// Stored JSON query definition used to materialize the view.
     pub query_definition: serde_json::Value,
+    /// Column names exposed by the view.
     pub columns: Vec<String>,
+    /// Tables the view reads from.
     pub referenced_tables: Vec<String>,
+    /// Materialized rows, refreshed by `refresh_view`.
     pub cached_data: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
+/// Definition of a trigger attached to a table, firing an action when a
+/// matching statement executes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trigger {
+    /// Trigger name.
     pub name: String,
+    /// Table the trigger is attached to.
     pub table_name: String,
+    /// When the trigger fires relative to the triggering statement.
     pub timing: TriggerTiming,
+    /// Which statement type fires the trigger.
     pub event: TriggerEvent,
+    /// Action performed when the trigger fires.
     pub operation: TriggerOperation,
+    /// Whether the trigger is active.
     pub enabled: bool,
 }
 
+/// When a trigger fires relative to the triggering statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TriggerTiming {
+    /// Fire before the triggering statement runs.
     Before,
+    /// Fire after the triggering statement runs.
     After,
+    /// Fire in place of the triggering statement.
     InsteadOf,
 }
 
+/// Statement types that can fire a trigger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TriggerEvent {
+    /// Fire on `INSERT` statements.
     Insert,
+    /// Fire on `UPDATE` statements.
     Update,
+    /// Fire on `DELETE` statements.
     Delete,
+    /// Fire on any of the above statement types.
     All,
 }
 
+/// Action performed when a trigger fires.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TriggerOperation {
+    /// Invoke a stored function by name.
     Function(String),
+    /// Execute the given command string.
     Execute(String),
+    /// Emit the given message.
     Raise(String),
 }
 
 impl RelationalEngine {
+    /// Create a new relational engine instance.
+    ///
+    /// Opens the sled database at `{data_dir}/relational` and restores every
+    /// persisted table (rows, schemas, next ids, timestamps), sequence, view,
+    /// and trigger from the metadata trees.
+    ///
+    /// # Errors
+    /// Returns an error if the data directory cannot be created or the sled
+    /// database cannot be opened.
     pub fn new(config: &PrimusDBConfig) -> Result<Self> {
         let db_path = format!("{}/relational", config.storage.data_dir);
         std::fs::create_dir_all(&db_path)?;
@@ -253,7 +370,7 @@ impl RelationalEngine {
 
         let schemas_tree = db.open_tree("_schemas")?;
 
-        for result in schemas_tree.iter() {
+        for result in &schemas_tree {
             let (key, value) = result?;
             let table_name = String::from_utf8(key.to_vec())
                 .map_err(|e| crate::Error::DataCorruption(e.to_string()))?;
@@ -287,8 +404,8 @@ impl RelationalEngine {
                 updated_at,
             };
 
-            if let Ok(table_tree) = db.open_tree(format!("table:{}", table_name)) {
-                for row_result in table_tree.iter() {
+            if let Ok(table_tree) = db.open_tree(table_key(&table_name)) {
+                for row_result in &table_tree {
                     let (row_key_bytes, row_value) = row_result?;
                     let mut row: Row = serde_json::from_slice(&row_value)?;
                     let arr: [u8; 8] = row_key_bytes
@@ -304,7 +421,7 @@ impl RelationalEngine {
         }
 
         if let Ok(seq_tree) = db.open_tree("_sequences") {
-            for result in seq_tree.iter() {
+            for result in &seq_tree {
                 let (key, value) = result?;
                 let name = String::from_utf8(key.to_vec())
                     .map_err(|e| crate::Error::DataCorruption(e.to_string()))?;
@@ -315,7 +432,7 @@ impl RelationalEngine {
         }
 
         if let Ok(view_tree) = db.open_tree("_views") {
-            for result in view_tree.iter() {
+            for result in &view_tree {
                 let (key, value) = result?;
                 let name = String::from_utf8(key.to_vec())
                     .map_err(|e| crate::Error::DataCorruption(e.to_string()))?;
@@ -326,7 +443,7 @@ impl RelationalEngine {
         }
 
         if let Ok(trig_tree) = db.open_tree("_triggers") {
-            for result in trig_tree.iter() {
+            for result in &trig_tree {
                 let (key, value) = result?;
                 let table_name = String::from_utf8(key.to_vec())
                     .map_err(|e| crate::Error::DataCorruption(e.to_string()))?;
@@ -350,7 +467,8 @@ impl RelationalEngine {
     }
 
     fn persist_row(&self, table_name: &str, row: &Row) -> Result<()> {
-        let table_tree = self.db.open_tree(format!("table:{}", table_name))?;
+        let tk = table_key(table_name);
+        let table_tree = self.db.open_tree(&tk)?;
         let key = row.id.to_be_bytes();
         let value = serde_json::to_vec(row)?;
         table_tree.insert(key.as_ref(), value.as_slice())?;
@@ -358,7 +476,8 @@ impl RelationalEngine {
     }
 
     fn remove_row(&self, table_name: &str, row_id: u64) -> Result<()> {
-        let table_tree = self.db.open_tree(format!("table:{}", table_name))?;
+        let tk = table_key(table_name);
+        let table_tree = self.db.open_tree(&tk)?;
         table_tree.remove(row_id.to_be_bytes())?;
         Ok(())
     }
@@ -376,79 +495,6 @@ impl RelationalEngine {
     ) -> Result<()> {
         let tree = self.db.open_tree("_updated_at")?;
         tree.insert(table_name, serde_json::to_vec(ts)?)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn validate_constraints(&self, table_name: &str, row: &Row) -> Result<()> {
-        let tables = self.tables.read().unwrap();
-        if let Some(table) = tables.get(table_name) {
-            for constraint in &table.schema.constraints {
-                match &constraint.constraint_type {
-                    ConstraintType::NotNull => {
-                        for field_name in &constraint.fields {
-                            if row.data.get(field_name).is_none_or(|v| v.is_null()) {
-                                return Err(crate::Error::ValidationError(format!(
-                                    "Field {} cannot be null",
-                                    field_name
-                                )));
-                            }
-                        }
-                    }
-                    ConstraintType::Unique => {
-                        for field_name in &constraint.fields {
-                            if let Some(value) = row.data.get(field_name) {
-                                for other_row in table.rows.values() {
-                                    if other_row.id != row.id {
-                                        if let Some(other_value) = other_row.data.get(field_name) {
-                                            if value == other_value {
-                                                return Err(crate::Error::ValidationError(
-                                                    format!(
-                                                        "Unique constraint violated for field {}",
-                                                        field_name
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ConstraintType::Check { expression } => {
-                        info!("Evaluating check constraint: {}", expression);
-                    }
-                    ConstraintType::ForeignKey {
-                        references_table,
-                        references_field,
-                        ..
-                    } => {
-                        for field_name in &constraint.fields {
-                            if let Some(value) = row.data.get(field_name) {
-                                if let Some(ref_table) = tables.get(references_table) {
-                                    let mut found = false;
-                                    for ref_row in ref_table.rows.values() {
-                                        if let Some(ref_val) = ref_row.data.get(references_field) {
-                                            if value == ref_val {
-                                                found = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if !found {
-                                        return Err(crate::Error::ValidationError(format!(
-                                            "Foreign key constraint violated: {} references non-existent {} in table {}",
-                                            field_name, value, references_table
-                                        )));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
         Ok(())
     }
 
@@ -557,6 +603,9 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Register a foreign key and revalidate all existing rows against it.
+    ///
+    /// Returns a `ValidationError` if any current row violates the reference.
     pub fn add_foreign_key(&self, fk: ForeignKey) -> Result<()> {
         let mut foreign_keys = self.foreign_keys.write().unwrap();
         foreign_keys
@@ -566,6 +615,7 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Return all foreign keys defined on the given table (empty if none).
     pub fn get_foreign_keys(&self, table_name: &str) -> Result<Vec<ForeignKey>> {
         let foreign_keys = self.foreign_keys.read().unwrap();
         Ok(foreign_keys.get(table_name).cloned().unwrap_or_default())
@@ -705,6 +755,10 @@ impl RelationalEngine {
         Ok(joined_rows)
     }
 
+    /// Dispatch a typed [`RelationalQuery`] to its concrete executor.
+    ///
+    /// This is the main entry point for relational operations; the
+    /// [`StorageEngine`] implementation delegates its CRUD methods here.
     pub fn execute_query(&self, query: &RelationalQuery) -> Result<QueryResult> {
         match query {
             RelationalQuery::Select {
@@ -892,16 +946,16 @@ impl RelationalEngine {
         let mut affected = 0u64;
 
         if let Some(table_data) = tables.get_mut(table) {
-            let ids_to_update: Vec<u64> = table_data
-                .rows
-                .iter()
-                .filter(|(_, row)| {
-                    conditions.is_none_or(|cond| {
-                        self.evaluate_condition(cond, &row.data).unwrap_or(false)
-                    })
-                })
-                .map(|(id, _)| *id)
-                .collect();
+            let mut ids_to_update = Vec::new();
+            for (id, row) in table_data.rows.iter() {
+                let should_update = match conditions {
+                    Some(cond) => self.evaluate_condition(cond, &row.data)?,
+                    None => true,
+                };
+                if should_update {
+                    ids_to_update.push(*id);
+                }
+            }
 
             for id in ids_to_update {
                 if let Some(row) = table_data.rows.get_mut(&id) {
@@ -1101,6 +1155,7 @@ impl RelationalEngine {
         Ok(false)
     }
 
+    /// Create a secondary index on the given table (no-op if the table is missing).
     pub fn create_index(&self, table_name: &str, index: Index) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table) = tables.get_mut(table_name) {
@@ -1109,6 +1164,7 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Drop a secondary index by name (no-op if the table is missing).
     pub fn drop_index(&self, table_name: &str, index_name: &str) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table) = tables.get_mut(table_name) {
@@ -1117,6 +1173,9 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Gather statistics for the given table as a [`TableAnalysis`].
+    ///
+    /// Returns a `DatabaseError` if the table does not exist.
     pub fn analyze_table(&self, table_name: &str) -> Result<TableAnalysis> {
         let tables = self.tables.read().unwrap();
 
@@ -1140,6 +1199,9 @@ impl RelationalEngine {
     // Sequence Methods
     // ─────────────────────────────────────────────
 
+    /// Create a new sequence with the given stepping and bounds.
+    ///
+    /// Returns a `DatabaseError` if a sequence with the same name already exists.
     pub fn create_sequence(
         &self,
         name: &str,
@@ -1171,6 +1233,7 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Drop a sequence and remove it from persistent storage.
     pub fn drop_sequence(&self, name: &str) -> Result<()> {
         let mut sequences = self.sequences.write().unwrap();
         if sequences.remove(name).is_some() {
@@ -1181,6 +1244,9 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Advance the sequence by its increment and return the new value,
+    /// handling `cycle` wraparound. Returns a `DatabaseError` if the sequence
+    /// is unknown or overflows.
     pub fn nextval(&self, name: &str) -> Result<i64> {
         let mut sequences = self.sequences.write().unwrap();
         if let Some(seq) = sequences.get_mut(name) {
@@ -1211,6 +1277,7 @@ impl RelationalEngine {
         }
     }
 
+    /// Return the current sequence value without advancing it.
     pub fn currval(&self, name: &str) -> Result<i64> {
         let sequences = self.sequences.read().unwrap();
         if let Some(seq) = sequences.get(name) {
@@ -1223,6 +1290,7 @@ impl RelationalEngine {
         }
     }
 
+    /// Set the sequence to the given value and persist the change.
     pub fn setval(&self, name: &str, value: i64) -> Result<()> {
         let mut sequences = self.sequences.write().unwrap();
         if let Some(seq) = sequences.get_mut(name) {
@@ -1247,6 +1315,9 @@ impl RelationalEngine {
     // View Methods
     // ─────────────────────────────────────────────
 
+    /// Create a new materialized view from a query definition.
+    ///
+    /// Returns a `DatabaseError` if a view with the same name already exists.
     pub fn create_view(
         &self,
         name: &str,
@@ -1274,6 +1345,7 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Drop a view and remove it from persistent storage.
     pub fn drop_view(&self, name: &str) -> Result<()> {
         let mut views = self.views.write().unwrap();
         if views.remove(name).is_some() {
@@ -1284,6 +1356,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Recompute and cache the stored result of a materialized view from its
+    /// referenced tables.
     pub fn refresh_view(&self, name: &str) -> Result<()> {
         let views = self.views.read().unwrap();
         if let Some(view) = views.get(name) {
@@ -1314,6 +1388,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Query a materialized view's cached data with optional conditions and
+    /// pagination, returning matching rows as [`QueryResult::Records`].
     pub fn query_view(
         &self,
         name: &str,
@@ -1365,6 +1441,10 @@ impl RelationalEngine {
     // Trigger Methods
     // ─────────────────────────────────────────────
 
+    /// Create an enabled trigger on the given table.
+    ///
+    /// Returns a `DatabaseError` if a trigger with the same name already
+    /// exists on the table.
     pub fn create_trigger(
         &self,
         name: &str,
@@ -1394,6 +1474,7 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Drop a trigger from the given table.
     pub fn drop_trigger(&self, table_name: &str, name: &str) -> Result<()> {
         let mut triggers = self.triggers.write().unwrap();
         if let Some(table_triggers) = triggers.get_mut(table_name) {
@@ -1404,6 +1485,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Execute every enabled trigger registered for the given table and event,
+    /// running its stored operation. Invoked internally by write operations.
     pub fn fire_triggers(
         &self,
         table_name: &str,
@@ -1462,6 +1545,10 @@ impl RelationalEngine {
     // DDL Methods
     // ─────────────────────────────────────────────
 
+    /// Add a new column to a table's schema.
+    ///
+    /// Returns a `DatabaseError` if the table is missing or the column name
+    /// already exists.
     pub fn alter_table_add_column(&self, table: &str, field: Field) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table_data) = tables.get_mut(table) {
@@ -1491,6 +1578,7 @@ impl RelationalEngine {
         }
     }
 
+    /// Remove a column from a table's schema and from every row.
     pub fn alter_table_drop_column(&self, table: &str, column_name: &str) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table_data) = tables.get_mut(table) {
@@ -1512,6 +1600,7 @@ impl RelationalEngine {
         }
     }
 
+    /// Change the type, nullability or default value of an existing column.
     pub fn alter_table_modify_column(&self, table: &str, field: Field) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table_data) = tables.get_mut(table) {
@@ -1545,6 +1634,10 @@ impl RelationalEngine {
         }
     }
 
+    /// Add a constraint (e.g. unique, check) to a table's schema.
+    ///
+    /// Returns a `DatabaseError` if a constraint with the same name already
+    /// exists on the table.
     pub fn alter_table_add_constraint(&self, table: &str, constraint: Constraint) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table_data) = tables.get_mut(table) {
@@ -1574,6 +1667,7 @@ impl RelationalEngine {
         }
     }
 
+    /// Remove a constraint from a table's schema by name.
     pub fn alter_table_drop_constraint(&self, table: &str, constraint_name: &str) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if let Some(table_data) = tables.get_mut(table) {
@@ -1598,6 +1692,9 @@ impl RelationalEngine {
         }
     }
 
+    /// Rename a table and migrate all its persistent data (rows, schema, next
+    /// id, timestamps). Returns a `DatabaseError` if the target name is taken
+    /// or the source table does not exist.
     pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if tables.contains_key(new_name) {
@@ -1727,16 +1824,16 @@ impl RelationalEngine {
         let mut updated_records = Vec::new();
 
         if let Some(table_data) = tables.get_mut(table) {
-            let ids_to_update: Vec<u64> = table_data
-                .rows
-                .iter()
-                .filter(|(_, row)| {
-                    conditions.is_none_or(|cond| {
-                        self.evaluate_condition(cond, &row.data).unwrap_or(false)
-                    })
-                })
-                .map(|(id, _)| *id)
-                .collect();
+            let mut ids_to_update = Vec::new();
+            for (id, row) in table_data.rows.iter() {
+                let should_update = match conditions {
+                    Some(cond) => self.evaluate_condition(cond, &row.data)?,
+                    None => true,
+                };
+                if should_update {
+                    ids_to_update.push(*id);
+                }
+            }
 
             for id in ids_to_update {
                 if let Some(row) = table_data.rows.get_mut(&id) {
@@ -1918,12 +2015,18 @@ impl RelationalEngine {
             }
 
             if let Some(having_cond) = having {
-                records.retain(|r| {
-                    r.data
-                        .as_object()
-                        .map(|obj| self.evaluate_condition(having_cond, obj).unwrap_or(false))
-                        .unwrap_or(false)
-                });
+                let mut filtered = Vec::new();
+                for r in records {
+                    let should_retain = if let Some(obj) = r.data.as_object() {
+                        self.evaluate_condition(having_cond, obj)?
+                    } else {
+                        false
+                    };
+                    if should_retain {
+                        filtered.push(r);
+                    }
+                }
+                records = filtered;
             }
 
             let records: Vec<Record> = records
@@ -1960,7 +2063,8 @@ impl RelationalEngine {
             table_data.next_id = 1;
             table_data.updated_at = chrono::Utc::now();
 
-            let table_tree = self.db.open_tree(format!("table:{}", table))?;
+            let tk = table_key(table);
+            let table_tree = self.db.open_tree(&tk)?;
             table_tree.clear()?;
             self.persist_next_id(table, 1)?;
             self.persist_updated_at(table, &table_data.updated_at)?;
@@ -1982,6 +2086,8 @@ impl RelationalEngine {
     // Cascade Methods
     // ─────────────────────────────────────────────
 
+    /// Recursively delete the given row and every child row referencing it
+    /// through `ON DELETE CASCADE` foreign keys.
     pub fn cascade_delete(&self, table_name: &str, row_id: u64) -> Result<()> {
         let child_entries: Vec<(String, u64)> = {
             let foreign_keys = self.foreign_keys.read().unwrap();
@@ -2025,6 +2131,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Propagate a parent row update to every child row referencing it through
+    /// `ON UPDATE CASCADE` foreign keys, copying the changed column values.
     pub fn cascade_update(
         &self,
         table_name: &str,
@@ -2088,6 +2196,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Set referencing child columns to `NULL` for every `ON DELETE SET NULL`
+    /// foreign key pointing at the given parent row.
     pub fn set_null_foreign_keys(&self, table_name: &str, row_id: u64) -> Result<()> {
         let foreign_keys = self.foreign_keys.read().unwrap();
         let tables = self.tables.read().unwrap();
@@ -2127,6 +2237,8 @@ impl RelationalEngine {
         Ok(())
     }
 
+    /// Reset referencing child columns to their default values for every
+    /// `ON DELETE SET DEFAULT` foreign key pointing at the given parent row.
     pub fn set_default_foreign_keys(&self, table_name: &str, row_id: u64) -> Result<()> {
         let foreign_keys = self.foreign_keys.read().unwrap();
         let tables = self.tables.read().unwrap();
@@ -2177,6 +2289,8 @@ impl RelationalEngine {
     // Cluster Reconciliation Methods (Hyperledger-style)
     // ─────────────────────────────────────────────
 
+    /// Export every row of a table for cluster reconciliation as
+    /// `(id, vector_clock, version, checksum, data)` tuples.
     #[allow(clippy::type_complexity)]
     pub fn get_rows_for_reconciliation(
         &self,
@@ -2208,6 +2322,8 @@ impl RelationalEngine {
         }
     }
 
+    /// Compute the Merkle root of a table by hashing every row's checksum
+    /// into a single digest, used to detect divergence across cluster nodes.
     pub fn compute_table_merkle_root(&self, table: &str) -> Result<String> {
         use sha2::Digest;
         let tables = self.tables.read().unwrap();
@@ -2244,6 +2360,11 @@ impl RelationalEngine {
         }
     }
 
+    /// Merge rows received from another cluster node into the local table.
+    ///
+    /// A row is applied only if its vector clock is causally newer than the
+    /// local copy (or the row does not exist locally); concurrent writes are
+    /// skipped. Returns the number of rows applied.
     #[allow(clippy::type_complexity)]
     pub fn apply_reconciled_rows(
         &self,
@@ -2311,6 +2432,8 @@ impl RelationalEngine {
     // Information Schema Methods
     // ─────────────────────────────────────────────
 
+    /// List all tables and materialized views as an `information_schema.tables`
+    /// style result set.
     pub fn get_information_schema_tables(&self) -> Result<QueryResult> {
         let tables = self.tables.read().unwrap();
         let mut records = Vec::new();
@@ -2360,6 +2483,8 @@ impl RelationalEngine {
         Ok(QueryResult::Records(records))
     }
 
+    /// Describe the columns of a table as an `information_schema.columns`
+    /// style result set. Returns a `DatabaseError` if the table is missing.
     pub fn get_information_schema_columns(&self, table: &str) -> Result<QueryResult> {
         let tables = self.tables.read().unwrap();
         let mut records = Vec::new();
@@ -2392,6 +2517,8 @@ impl RelationalEngine {
         }
     }
 
+    /// List the constraints of a table as an `information_schema.table_constraints`
+    /// style result set.
     pub fn get_information_schema_constraints(&self, table: &str) -> Result<QueryResult> {
         let tables = self.tables.read().unwrap();
         let mut records = Vec::new();
@@ -2432,31 +2559,48 @@ impl RelationalEngine {
     }
 }
 
+/// Equality join condition pairing a left-hand column with a right-hand column.
 #[derive(Debug)]
 pub struct JoinCondition {
+    /// Column on the left-hand table to compare.
     left_field: String,
+    /// Column on the right-hand table to compare.
     right_field: String,
+    /// Join flavour applied by the executor.
     join_type: JoinType,
 }
 
+/// Flavour of a join between two tables.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub enum JoinType {
+    /// Keep only rows with matching join keys.
     Inner,
+    /// Keep all left rows, filling unmatched right columns with nulls.
     Left,
+    /// Keep all right rows, filling unmatched left columns with nulls.
     Right,
+    /// Keep all rows from both sides.
     Full,
+    /// Cartesian product of both tables.
     Cross,
 }
 
+/// Referential action applied to child rows when a parent row changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum CascadeAction {
+    /// Allow the parent operation without touching children.
     Allow,
+    /// Block the parent operation while children reference it.
     Restrict,
+    /// Propagate the parent operation to referencing children.
     Cascade,
+    /// Set referencing child columns to `NULL`.
     SetNull,
+    /// Reset referencing child columns to their defaults.
     SetDefault,
+    /// Do nothing (equivalent to `Allow`).
     NoAction,
 }
 
@@ -2472,6 +2616,10 @@ impl StorageEngine for RelationalEngine {
         self
     }
 
+    /// Insert a row into a table, creating the table implicitly if missing.
+    ///
+    /// Validates foreign keys, persists the row with a new id, and returns the
+    /// number of inserted rows.
     async fn insert(
         &self,
         table: &str,
@@ -2529,6 +2677,9 @@ impl StorageEngine for RelationalEngine {
         Ok(1)
     }
 
+    /// Query rows from a table applying the given conditions and pagination.
+    ///
+    /// Returns an empty vector if the table does not exist.
     async fn select(
         &self,
         table: &str,
@@ -2569,6 +2720,8 @@ impl StorageEngine for RelationalEngine {
         }
     }
 
+    /// Update rows matching the conditions, validating referential integrity,
+    /// and return the number of affected rows.
     async fn update(
         &self,
         table: &str,
@@ -2584,16 +2737,16 @@ impl StorageEngine for RelationalEngine {
         let mut affected = 0u64;
 
         if let Some(table_data) = tables.get_mut(table) {
-            let ids_to_update: Vec<u64> = table_data
-                .rows
-                .iter()
-                .filter(|(_, row)| {
-                    conditions.is_none_or(|cond| {
-                        self.evaluate_condition(cond, &row.data).unwrap_or(false)
-                    })
-                })
-                .map(|(id, _)| *id)
-                .collect();
+            let mut ids_to_update = Vec::new();
+            for (id, row) in table_data.rows.iter() {
+                let should_update = match conditions {
+                    Some(cond) => self.evaluate_condition(cond, &row.data)?,
+                    None => true,
+                };
+                if should_update {
+                    ids_to_update.push(*id);
+                }
+            }
 
             for id in ids_to_update {
                 if let Some(row) = table_data.rows.get_mut(&id) {
@@ -2617,6 +2770,9 @@ impl StorageEngine for RelationalEngine {
         Ok(affected)
     }
 
+    /// Delete rows matching the conditions, respecting foreign-key actions
+    /// (rows referenced by a restricting foreign key are skipped), and return
+    /// the number of deleted rows.
     async fn delete(
         &self,
         table: &str,
@@ -2667,6 +2823,8 @@ impl StorageEngine for RelationalEngine {
         Ok(affected)
     }
 
+    /// Produce a JSON analysis of a table (row/index counts and columns).
+    /// Returns a `DatabaseError` if the table does not exist.
     async fn analyze(
         &self,
         table: &str,
@@ -2702,6 +2860,9 @@ impl StorageEngine for RelationalEngine {
         }
     }
 
+    /// Create a relational table with the given schema.
+    ///
+    /// Returns a `DatabaseError` if a table with the same name already exists.
     async fn create_table(&self, table: &str, schema: &Schema) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
 
@@ -2736,7 +2897,8 @@ impl StorageEngine for RelationalEngine {
         let updated_at_tree = self.db.open_tree("_updated_at")?;
         updated_at_tree.insert(table, serde_json::to_vec(&now)?)?;
 
-        self.db.open_tree(format!("table:{}", table))?;
+        let tk = table_key(table);
+        self.db.open_tree(&tk)?;
 
         tables.insert(table.to_string(), relational_table);
 
@@ -2744,11 +2906,13 @@ impl StorageEngine for RelationalEngine {
         Ok(())
     }
 
+    /// Drop a table and all its persistent data (rows, schema, timestamps).
     async fn drop_table(&self, table: &str) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         tables.remove(table);
 
-        self.db.drop_tree(format!("table:{}", table))?;
+        let tk = table_key(table);
+        self.db.drop_tree(&tk)?;
 
         let schemas_tree = self.db.open_tree("_schemas")?;
         schemas_tree.remove(table)?;
@@ -2766,6 +2930,8 @@ impl StorageEngine for RelationalEngine {
         Ok(())
     }
 
+    /// Delete every row from a table; with `cascade`, also truncates child
+    /// tables referencing it.
     async fn truncate_table(&self, table: &str, cascade: bool) -> Result<()> {
         async fn do_truncate(engine: &RelationalEngine, tbl: &str) -> Result<()> {
             let mut tables = engine.tables.write().unwrap();
@@ -2773,7 +2939,8 @@ impl StorageEngine for RelationalEngine {
                 table_data.rows.clear();
                 table_data.next_id = 1;
                 table_data.updated_at = chrono::Utc::now();
-                let table_tree = engine.db.open_tree(format!("table:{}", tbl))?;
+                let tk = table_key(tbl);
+                let table_tree = engine.db.open_tree(&tk)?;
                 table_tree.clear()?;
                 engine.persist_next_id(tbl, 1)?;
                 engine.persist_updated_at(tbl, &table_data.updated_at)?;
@@ -2805,6 +2972,7 @@ impl StorageEngine for RelationalEngine {
         do_truncate(self, table).await
     }
 
+    /// Return [`TableInfo`] for a table, including size, row count, and schema.
     async fn table_info(&self, table: &str) -> Result<TableInfo> {
         let tables = self.tables.read().unwrap();
 
@@ -2831,6 +2999,20 @@ impl StorageEngine for RelationalEngine {
             )))
         }
     }
+
+    /// Enumerate the names of all tables and views in the relational engine.
+    fn list_tables(&self) -> Result<Vec<String>> {
+        let tables = self.tables.read().unwrap();
+        let mut names: Vec<String> = tables.keys().cloned().collect();
+        let views = self.views.read().unwrap();
+        names.extend(views.keys().cloned());
+        names.sort();
+        Ok(names)
+    }
+}
+
+fn table_key(table: &str) -> String {
+    format!("table:{}", table)
 }
 
 fn json_to_field_type(value: &serde_json::Value) -> FieldType {

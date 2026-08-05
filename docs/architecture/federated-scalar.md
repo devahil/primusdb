@@ -178,7 +178,7 @@ All distributed capabilities operate across **all storage types**:
 
 ```bash
 # Cluster A (us-east)
-primusdb-server \
+primusdb server start \
   --cluster-enabled \
   --node-id "node-us-1" \
   --federation-id "prod-global" \
@@ -187,7 +187,7 @@ primusdb-server \
   --region "us-east-1"
 
 # Cluster B (eu-west)
-primusdb-server \
+primusdb server start \
   --cluster-enabled \
   --node-id "node-eu-1" \
   --federation-id "prod-global" \

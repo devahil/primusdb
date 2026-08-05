@@ -1,77 +1,31 @@
 /*!
 # Cache Consensus Engine - Distributed Cache Integrity & Validation
 
-This module implements a specialized consensus engine for distributed cache operations,
-providing blockchain-style validation, data poisoning prevention, and integrity guarantees
-for clustered cache environments.
+A local consensus simulation that validates cache operations before they are
+executed. Validator votes are collected against each operation proposal and a
+configurable quorum decides approval. Approved operations are appended to an
+in-memory audit trail that is later verified for integrity.
 
-## Architecture Overview
+> **Note**: this is a lightweight, in-process simulation — there is no network
+> transport, TLS or Merkle-tree ledger. Validator "votes" and "signatures" are
+> generated locally; the hashing backend is BLAKE3.
+
+## API surface
 
 ```text
-Cache Consensus Engine Architecture
-═══════════════════════════════════════════════════════════════════════════════
-
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     Cache Consensus Engine                             │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Operation Validator: Validate all cache operations             │    │
-│  │  • Pre-operation consensus voting                              │    │
-│  │  • Multi-signature validation                                  │    │
-│  │  • Poisoning attack prevention                                 │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Integrity Verifier: Continuous data validation                │    │
-│  │  • Merkle tree proofs for data authenticity                    │    │
-│  │  • Cross-node integrity checking                               │    │
-│  │  • Corruption detection and recovery                           │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Consensus Ledger: Immutable operation log                     │    │
-│  │  • Blockchain-style operation recording                        │    │
-│  │  • Consensus-based validation history                          │    │
-│  │  • Audit trail for compliance                                  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────┬─────────────┬─────────────┬─────────────┬─────────────┐
-│ Validator   │ Validator   │ Validator   │ Validator   │ Validator   │
-│ Node 1      │ Node 2      │ Node 3      │ Node 4      │ Node 5      │
-│ ┌─────────┐ │ ┌─────────┐ │ ┌─────────┐ │ ┌─────────┐ │ ┌─────────┐ │
-│ │Vote     │ │ │Vote     │ │ │Vote     │ │ │Vote     │ │ │Vote     │ │
-│ │Engine   │ │ │Engine   │ │ │Engine   │ │ │Engine   │ │ │Engine   │ │
-│ └─────────┘ │ └─────────┘ │ └─────────┘ │ └─────────┘ │ └─────────┘ │
-└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┘
+CacheConsensusEngine
+  ├─ validate_operation(op)       -> proposal -> votes -> quorum check
+  ├─ verify_cluster_integrity()   -> IntegrityReport (re-hash audit trail)
+  ├─ detect_data_poisoning()      -> PoisoningReport
+  └─ get_statistics()             -> ConsensusStatistics
 ```
 
-## Key Features
-
-### 🔐 Consensus Validation
-- **Operation Consensus**: All cache operations require validator consensus
-- **Multi-Signature**: Cryptographic validation of cache entries
-- **Poisoning Prevention**: Consensus-based validation prevents malicious data
-- **Integrity Proofs**: Merkle tree proofs for data authenticity
-
-### 🛡️ Security Features
-- **Data Poisoning Detection**: Advanced algorithms detect malicious cache entries
-- **Corruption Prevention**: Multi-level integrity checking
-- **Secure Communication**: TLS-encrypted validator communication
-- **Audit Trail**: Immutable operation history for compliance
-
-### ⚡ Performance Optimizations
-- **Parallel Validation**: Concurrent consensus operations
-- **Caching Consensus**: Cache frequently validated operations
-- **Batch Processing**: Group operations for efficiency
-- **Adaptive Quorum**: Dynamic consensus requirements based on operation type
-
-## Usage Examples
+## Usage
 
 ### Basic Consensus Setup
 ```ignore
 use primusdb::cache::consensus::{CacheConsensusEngine, ConsensusConfig};
 
-// Configure consensus engine
 let consensus_config = ConsensusConfig {
     validators: vec![
         "validator-1".to_string(),
@@ -83,12 +37,8 @@ let consensus_config = ConsensusConfig {
     enable_audit_trail: true,
 };
 
-// Create consensus engine
-let mut consensus = CacheConsensusEngine::new(consensus_config).await?;
-```
+let consensus = CacheConsensusEngine::new(consensus_config);
 
-### Consensus-Based Cache Operations
-```ignore
 // Validate cache operation with consensus
 let operation = CacheOperation::Put {
     key: "user:123".to_string(),
@@ -97,22 +47,14 @@ let operation = CacheOperation::Put {
 };
 
 let validation = consensus.validate_operation(operation).await?;
-assert!(validation.is_valid);
-
-// Execute validated operation
-if validation.is_valid {
-    cache.put(&operation.key, &operation.data)?;
-    consensus.record_operation(operation).await?;
-}
+assert!(validation.approved);
 ```
 
 ### Integrity Verification
 ```ignore
-// Verify cache cluster integrity
 let integrity_report = consensus.verify_cluster_integrity().await?;
 println!("Cluster integrity: {}%", integrity_report.integrity_score);
 
-// Check for data poisoning attempts
 let poisoning_report = consensus.detect_data_poisoning().await?;
 if poisoning_report.attacks_detected > 0 {
     println!("Warning: {} poisoning attempts detected!", poisoning_report.attacks_detected);
@@ -121,126 +63,9 @@ if poisoning_report.attacks_detected > 0 {
 
 ### Consensus Monitoring
 ```ignore
-// Get consensus statistics
-let stats = consensus.get_statistics().await?;
+let stats = consensus.get_statistics().await;
 println!("Consensus success rate: {:.2}%", stats.success_rate);
-println!("Average validation time: {}ms", stats.avg_validation_time_ms);
-println!("Active validators: {}", stats.active_validators);
 ```
-
-## Consensus Protocols
-
-### 1. Pre-Operation Validation
-```ignore
-// Before executing any cache operation
-let proposal = OperationProposal {
-    operation: cache_operation,
-    proposer: node_id,
-    timestamp: now(),
-};
-
-let consensus_result = consensus.propose_operation(proposal).await?;
-if consensus_result.approved {
-    execute_operation(cache_operation);
-}
-```
-
-### 2. Post-Operation Verification
-```ignore
-// After executing cache operation
-let verification = consensus.verify_execution(operation_id).await?;
-if !verification.integrity_maintained {
-    // Trigger integrity recovery
-    consensus.initiate_recovery(operation_id).await?;
-}
-```
-
-### 3. Continuous Integrity Monitoring
-```ignore
-// Background integrity checking
-consensus.start_integrity_monitoring().await?;
-
-loop {
-    let integrity_check = consensus.perform_integrity_check().await?;
-    if !integrity_check.all_valid {
-        consensus.handle_integrity_violation(integrity_check).await?;
-    }
-    sleep(Duration::from_secs(60)).await;
-}
-```
-
-## Security Model
-
-### Threat Prevention
-- **Data Poisoning**: Consensus validation prevents malicious data injection
-- **Manipulation Attacks**: Cryptographic proofs prevent operation tampering
-- **Sybil Attacks**: Validator reputation and stake-based consensus
-- **Eclipse Attacks**: Multi-path validation and cross-verification
-
-### Integrity Mechanisms
-- **Merkle Trees**: Hierarchical integrity verification
-- **Digital Signatures**: Cryptographic operation validation
-- **Hash Chains**: Immutable operation sequencing
-- **Cross-Validation**: Multi-node integrity verification
-
-## Performance Characteristics
-
-### Consensus Performance
-- **Validation Latency**: < 50ms for typical operations
-- **Throughput**: 1000+ operations/second with 3 validators
-- **Scalability**: Linear performance increase with validator count
-- **Network Overhead**: < 10% additional bandwidth for consensus
-
-### Security Performance
-- **Poisoning Detection**: < 1ms detection latency
-- **Integrity Verification**: < 10ms for 1GB cache validation
-- **Recovery Time**: < 100ms for single-node corruption recovery
-- **Audit Query**: < 5ms for operation history lookup
-
-## Configuration Options
-
-### ConsensusConfig
-```ignore
-pub struct ConsensusConfig {
-    pub validators: Vec<String>,              // Validator node addresses
-    pub quorum_size: usize,                   // Required consensus votes
-    pub timeout: Duration,                    // Operation timeout
-    pub enable_audit_trail: bool,             // Enable operation logging
-    pub poisoning_detection: bool,            // Enable poisoning detection
-    pub integrity_check_interval: Duration,   // Integrity check frequency
-    pub max_operation_batch: usize,           // Batch processing size
-}
-```
-
-## Integration Points
-
-### With Cache Cluster
-```ignore
-// Consensus validates all cluster operations
-let cluster_operation = ClusterCacheOperation {
-    operation: CacheOperation::Put { key, data },
-    target_nodes: vec!["node1", "node2", "node3"],
-};
-
-let consensus_validation = consensus.validate_cluster_operation(cluster_operation).await?;
-if consensus_validation.approved {
-    cluster.execute_operation(cluster_operation).await?;
-}
-```
-
-### With Node Manager
-```ignore
-// Node manager uses consensus for cluster decisions
-let scaling_decision = node_manager.propose_scaling(new_node_count).await?;
-let consensus_approval = consensus.validate_scaling_decision(scaling_decision).await?;
-if consensus_approval.approved {
-    node_manager.execute_scaling(scaling_decision).await?;
-}
-```
-
-This cache consensus engine provides military-grade security and integrity
-for distributed cache operations, preventing data poisoning and ensuring
-100% operational reliability in clustered environments.
 */
 
 use serde::{Deserialize, Serialize};

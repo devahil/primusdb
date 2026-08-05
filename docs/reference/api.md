@@ -1,7 +1,7 @@
 # PrimusDB API Reference
 =====================
 
-This document provides comprehensive reference for PrimusDB's REST API (v1.3.1-alpha), including all endpoints, request/response formats, error codes, and usage examples.
+This document provides comprehensive reference for PrimusDB's REST API (v1.3.2-alpha), including all endpoints, request/response formats, error codes, and usage examples.
 
 ## API Overview
 
@@ -126,9 +126,11 @@ Basic health check endpoint.
    "success": true,
    "data": {
      "status": "healthy",
-     "version": "1.1.0",
+     "node_id": "<node-id>",
+     "instance_id": "<instance-id>",
+     "version": "1.3.2-alpha",
      "uptime_seconds": 3600,
-     "timestamp": "2024-01-10T12:00:00Z"
+     "architecture": "centralized"
    }
 }
 ```
@@ -141,24 +143,19 @@ Detailed system status.
 {
    "success": true,
    "data": {
-     "status": "healthy",
-     "version": "1.1.0",
+     "status": "running",
      "uptime_seconds": 3600,
-     "engines": {
+     "version": "1.3.2-alpha",
+     "storage_engines": {
       "columnar": "available",
       "vector": "available",
       "document": "available",
-      "relational": "available"
-    },
-    "cluster": {
-      "enabled": false,
-      "nodes": 1,
-      "health": "healthy"
+      "relational": "available",
+      "keyvalue": "available"
     },
     "ai_enabled": true,
     "cache_enabled": true,
-    "transactions_enabled": true,
-    "timestamp": "2024-01-10T12:00:00Z"
+    "transactions_enabled": true
   }
 }
 ```
@@ -174,7 +171,7 @@ primusdb_up 1
 
 # HELP primusdb_version PrimusDB version
 # TYPE primusdb_version gauge
-primusdb_version{version="1.0.0"} 1
+primusdb_version{version="1.3.2-alpha"} 1
 
 # HELP primusdb_uptime_seconds Service uptime in seconds
 # TYPE primusdb_uptime_seconds counter
@@ -1707,6 +1704,127 @@ Create or update a resource policy.
 ```
 
 Workload type values: `sql`, `vector_search`, `ai_ml`, `graph_traversal`, `cdc_pipeline`, `backup`, `restore`, `migration`, `cluster_operation`, `protocol_processing`, `udf`, `stored_procedure`, `plugin`, `ffi`.
+
+## Capability Negotiation
+
+### GET /api/v1/capabilities
+
+Server capability snapshot used by drivers, the REPL, and tooling to negotiate
+features and engines before issuing commands. Built dynamically from the
+capability registry (engine `list_tables`), so newly registered engines appear
+here without server changes.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "protocol_version": 1,
+    "server": {
+      "version": "1.3.2-alpha",
+      "node_id": "node-a",
+      "instance_id": "00000000-0000-0000-0000-000000000000",
+      "cluster_enabled": false,
+      "uptime_seconds": 42
+    },
+    "engines": {
+      "relational": { "name": "relational", "tables": ["users"] },
+      "document": { "name": "document", "tables": ["articles", "notes"] }
+    },
+    "features": ["integrity", "search", "graphql"]
+  }
+}
+```
+
+## Unified Search
+
+### GET /api/v1/search
+
+Unified search across all storage engines. Full-text mode uses the persistent
+inverted index (rebuilding dirty segments lazily on write); vector mode routes
+by cosine similarity. Falls back to a live scan when the persistent index is
+disabled or unavailable.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `q` | string | Full-text query |
+| `query_vector` | string | JSON array, e.g. `[1.0, 0.0]` |
+| `mode` | string | `and` (default), `or`, `phrase` |
+| `storage_types` | string | Comma-separated engine names |
+| `tables` | string | Comma-separated table names |
+| `limit` | int | Max hits (default 20) |
+| `offset` | int | Pagination offset |
+
+**Response:** `SearchResponse` with `total`, `hits` (engine/table/id/score/record/similarity), `engines_searched`.
+
+```sh
+curl "$SERVER/api/v1/search?q=rust&storage_types=document,columnar"
+curl "$SERVER/api/v1/search?query_vector=%5B1.0,0.0%5D&storage_types=vector"
+```
+
+## Integrity Reconciliation
+
+### GET /api/v1/databases/{db}/integrity/reconcile/evidence
+
+Compact signed-chain evidence (sequence count, last hash, checkpoint root) a
+node offers to peers before a reconciliation. Nodes compare evidence first;
+full records are only exchanged when it differs.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "database_id": "default",
+    "sequence_count": 4,
+    "last_hash": "7c1a...",
+    "checkpoint_root": "d9f2...",
+    "node_id": "node-a",
+    "produced_at": 1720000000
+  }
+}
+```
+
+### POST /api/v1/databases/{db}/integrity/reconcile
+
+Compares the local integrity chain against the peer's full records. Read-only:
+produces a `ReconciliationReport` and a `RepairPlan`; nothing is applied
+automatically.
+
+**Request body:**
+```json
+{ "peer_records": [ { "seq": 1, "hash": "...", "prev_hash": "..." } ] }
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "report": {
+      "database_id": "default",
+      "verdict": "peer_behind",
+      "local_sequences": 4,
+      "peer_sequences": 2,
+      "missing_on_local": [],
+      "missing_on_peer": [3, 4],
+      "conflicts": [],
+      "conflicting_txns": [],
+      "peer_chain_valid": true,
+      "local_chain_valid": true,
+      "reconciled_at": "2026-08-04T00:00:00Z"
+    },
+    "repair_plan": {
+      "database_id": "default",
+      "fetch_from_peer": [],
+      "reject": [],
+      "requires_operator": false
+    }
+  }
+}
+```
 
 ## Error Codes
 

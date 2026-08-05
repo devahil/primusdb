@@ -1,3 +1,9 @@
+//! CouchDB source implementation for the migration framework.
+//!
+//! Uses CouchDB's REST API via the `reqwest` crate (always available): each
+//! database is exposed as a single object with `_id`/`_rev` columns and
+//! documents are streamed through `_all_docs?include_docs=true`.
+
 #[allow(unused_imports)]
 use super::super::source::{
     MigrationSource, RowStream, SourceColumn, SourceDatabase, SourceObject, SourceSchema,
@@ -14,6 +20,8 @@ pub struct CouchSource {
 }
 
 impl CouchSource {
+    /// Creates a source from a CouchDB URL, keeping a masked copy of the URL
+    /// for display.
     pub fn new(url: &str) -> Result<Self> {
         let masked = crate::migration::report::MigrationReport::mask_url(url);
         Ok(Self {

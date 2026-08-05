@@ -1,3 +1,39 @@
+//! Federated Raft consensus for cross-cluster operations
+//!
+//! A second Raft implementation used when multiple independent clusters must
+//! agree on shared state (for example federated data domains). Where
+//! [`crate::cluster::raft::RaftNode`] orders operations inside one cluster,
+//! `FederatedRaft` orders operations *between* clusters: the roles and log
+//! entries are replicated to peers in other clusters over federation RPCs.
+//!
+//! Elections and log replication follow the same majority-quorum rules as
+//! regular Raft, but the unit of membership is a cluster rather than a node.
+//!
+//! # Placement in the architecture
+//!
+//! The members of a federated Raft group are whole clusters. Each cluster runs
+//! one [`FederatedRaft`] instance; operations such as domain creation or a
+//! cluster joining the federation are appended to the federated log and
+//! replicated to peer clusters over federation RPCs. Once committed, the
+//! [`crate::cluster::domain::DataDomainManager`] and federation layers apply
+//! the agreed change locally.
+//!
+//! ```text
+//!   FedRaftOpType operations (DomainCreate, ClusterJoin, ...)
+//!                        │
+//!                        ▼
+//!   ┌─────────────┐  vote/append  ┌─────────────┐  vote/append  ┌─────────────┐
+//!   │ Cluster A   │◄────────────►│ Cluster B   │◄────────────►│ Cluster C   │
+//!   │ FederatedRaft│              │ FederatedRaft│              │ FederatedRaft│
+//!   │ role+log    │              │ role+log    │              │ role+log    │
+//!   └─────────────┘              └─────────────┘              └─────────────┘
+//!         │                              │                              │
+//!         └─────────── committed entries applied locally ──────────────┘
+//!                        │
+//!                        ▼
+//!          DataDomainManager / federation metadata
+//! ```
+
 use crate::cluster::rpc::{
     FedRaftAppendRequest, FedRaftAppendResponse, FedRaftLogEntry, FedRaftVoteRequest,
     FedRaftVoteResponse, RpcMessage,
@@ -8,29 +44,78 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Role of a cluster within the federated Raft group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FedRaftRole {
+    /// Follows the elected leader cluster
     Follower,
+    /// Seeking votes to become leader
     Candidate,
+    /// Current leader cluster
     Leader,
 }
 
+/// Consensus state for the federated Raft instance.
 #[derive(Debug, Clone)]
 pub struct FedRaftState {
+    /// Current role of this cluster
     pub role: FedRaftRole,
+    /// Current federated term
     pub current_term: u64,
+    /// Cluster ID voted for in the current term
     pub voted_for: Option<String>,
+    /// ID of the leader cluster, if known
     pub leader_id: Option<String>,
+    /// Highest index known to be committed
     pub commit_index: u64,
+    /// Highest committed index already applied
     pub last_applied: u64,
 }
 
+/// Tuning parameters for the federated Raft instance.
 #[derive(Debug, Clone)]
 pub struct FedRaftConfig {
+    /// ID of the local cluster participating in the group
     pub cluster_id: String,
+    /// How often the leader sends heartbeats (ms)
     pub heartbeat_interval_ms: u64,
+    /// How long followers wait before triggering an election (ms)
     pub election_timeout_ms: u64,
+    /// Maximum number of log entries kept in memory
     pub max_log_entries: usize,
+}
+
+/// Operation types ordered through the federated log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FedRaftOpType {
+    /// Create a new data domain across clusters
+    DomainCreate,
+    /// Update an existing data domain
+    DomainUpdate,
+    /// Delete a data domain
+    DomainDelete,
+    /// A cluster joins the federation
+    ClusterJoin,
+    /// A cluster leaves the federation
+    ClusterLeave,
+    /// Register a federated namespace
+    NamespaceRegister,
+    /// Update domain or namespace metadata
+    MetadataUpdate,
+}
+
+/// Federated Raft state machine replicating log entries across clusters.
+pub struct FederatedRaft {
+    /// Configuration (cluster ID and timing)
+    pub config: FedRaftConfig,
+    /// Consensus state (role, term, leader)
+    pub state: RwLock<FedRaftState>,
+    /// Replicated log of federated entries
+    pub log: RwLock<Vec<FedRaftLogEntry>>,
+    /// IDs of peer clusters in the group
+    pub cluster_peers: RwLock<Vec<String>>,
+    /// Timestamp (ms) of the last election reset
+    pub election_reset: RwLock<u64>,
 }
 
 impl Default for FedRaftConfig {
@@ -44,26 +129,8 @@ impl Default for FedRaftConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FedRaftOpType {
-    DomainCreate,
-    DomainUpdate,
-    DomainDelete,
-    ClusterJoin,
-    ClusterLeave,
-    NamespaceRegister,
-    MetadataUpdate,
-}
-
-pub struct FederatedRaft {
-    pub config: FedRaftConfig,
-    pub state: RwLock<FedRaftState>,
-    pub log: RwLock<Vec<FedRaftLogEntry>>,
-    pub cluster_peers: RwLock<Vec<String>>,
-    pub election_reset: RwLock<u64>,
-}
-
 impl FederatedRaft {
+    /// Create a new federated Raft instance for the given configuration.
     pub fn new(config: FedRaftConfig) -> Self {
         Self {
             state: RwLock::new(FedRaftState {
@@ -81,6 +148,7 @@ impl FederatedRaft {
         }
     }
 
+    /// Step down to follower for `term`, optionally recording the leader cluster.
     pub async fn become_follower(&self, term: u64, leader: Option<&str>) {
         let mut state = self.state.write().await;
         if term > state.current_term {
@@ -92,6 +160,7 @@ impl FederatedRaft {
         *self.election_reset.write().await = now_ms();
     }
 
+    /// Enter candidate state for a new federated election.
     pub async fn become_candidate(&self) {
         let mut state = self.state.write().await;
         state.current_term += 1;
@@ -105,6 +174,7 @@ impl FederatedRaft {
         );
     }
 
+    /// Promote this cluster to leader for the current federated term.
     pub async fn become_leader(&self) {
         let mut state = self.state.write().await;
         state.role = FedRaftRole::Leader;
@@ -115,6 +185,8 @@ impl FederatedRaft {
         );
     }
 
+    /// Start a federated election, requesting votes from the given peer clusters.
+    /// Becomes leader if a quorum of votes is received.
     pub async fn start_election(&self, peers: &[FedRaftPeer]) {
         self.become_candidate().await;
         let term = self.state.read().await.current_term;
@@ -168,6 +240,7 @@ impl FederatedRaft {
         }
     }
 
+    /// Send empty append-entries (heartbeats) to the given peer clusters.
     pub async fn send_heartbeats(&self, peers: &[FedRaftPeer]) {
         let state = self.state.read().await;
         let log = self.log.read().await;
@@ -198,6 +271,10 @@ impl FederatedRaft {
         }
     }
 
+    /// Append a federated operation to the log and replicate it to peer clusters.
+    ///
+    /// The entry is committed once a quorum of peers acknowledges it. Only the
+    /// leader may call this; otherwise an error is returned.
     pub async fn propose(
         &self,
         op_type: FedRaftOpType,
@@ -280,6 +357,7 @@ impl FederatedRaft {
         }
     }
 
+    /// Handle a federated `RequestVote` RPC from a candidate cluster.
     pub async fn handle_vote_request(&self, req: &FedRaftVoteRequest) -> FedRaftVoteResponse {
         let mut state = self.state.write().await;
 
@@ -317,6 +395,7 @@ impl FederatedRaft {
         }
     }
 
+    /// Handle a federated `AppendEntries` RPC (or heartbeat) from the leader cluster.
     pub async fn handle_append_entries(&self, req: &FedRaftAppendRequest) -> FedRaftAppendResponse {
         let mut state = self.state.write().await;
 
@@ -380,18 +459,22 @@ impl FederatedRaft {
         }
     }
 
+    /// Whether this cluster is currently the federated leader.
     pub async fn is_leader(&self) -> bool {
         self.state.read().await.role == FedRaftRole::Leader
     }
 
+    /// ID of the federated leader cluster, if known.
     pub async fn leader_id(&self) -> Option<String> {
         self.state.read().await.leader_id.clone()
     }
 
+    /// The current federated term.
     pub async fn current_term(&self) -> u64 {
         self.state.read().await.current_term
     }
 
+    /// Return the log entries that have been applied so far.
     pub async fn get_committed_entries(&self) -> Vec<FedRaftLogEntry> {
         let state = self.state.read().await;
         let log = self.log.read().await;
@@ -402,10 +485,14 @@ impl FederatedRaft {
     }
 }
 
+/// A peer cluster participating in the federated Raft group.
 #[derive(Debug, Clone)]
 pub struct FedRaftPeer {
+    /// ID of the peer cluster
     pub cluster_id: String,
+    /// Hostname/IP of the peer's federation endpoint
     pub address: String,
+    /// Port of the peer's federation endpoint
     pub port: u16,
 }
 

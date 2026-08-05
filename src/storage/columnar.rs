@@ -8,191 +8,39 @@
 /*!
 # Columnar Storage Engine - Analytics-Optimized Database
 
-The columnar storage engine is specifically designed for analytical workloads,
-data warehousing, and complex queries. It stores data by columns rather than rows,
-providing superior performance for aggregations, analytics, and reporting.
-
-## Architecture Overview
+The columnar engine provides an analytics-oriented StorageEngine implementation
+over an embedded sled database. Records are stored as JSON blobs in a sled tree
+per table (keys are nanosecond-timestamp ids), and the engine offers CRUD,
+per-table analysis, and table metadata introspection. A true columnar on-disk
+layout (per-column files, LZ4/bitmap compression, SIMD vectorization) is a
+planned enhancement; the current implementation stores whole rows and keeps
+the engine usable for analytical workloads via the query pipeline.
 
 ```text
-Columnar Storage Architecture
-═══════════════════════════════════════════════════════════════
+Columnar Engine Data Flow
+═══════════════════════════════════════════════════
 
-┌─────────────────────────────────────────────────────────┐
-│               Data Organization                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Row Storage:                                   │    │
-│  │  Row1: [col1, col2, col3, col4, col5]            │    │
-│  │  Row2: [col1, col2, col3, col4, col5]            │    │
-│  │  Row3: [col1, col2, col3, col4, col5]            │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Columnar Storage:                              │    │
-│  │  Col1: [row1, row2, row3]                       │    │
-│  │  Col2: [row1, row2, row3]                       │    │
-│  │  Col3: [row1, row2, row3]                       │    │
-│  │  Col4: [row1, row2, row3]                       │    │
-│  │  Col5: [row1, row2, row3]                       │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│              Performance Benefits                       │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Query Optimization:                            │    │
-│  │  • Column pruning (skip unused columns)         │    │
-│  │  • Vectorized operations (SIMD)                 │    │
-│  │  • Better compression ratios                     │    │
-│  │  • Efficient aggregations                        │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Compression Techniques:                        │    │
-│  │  • Run-length encoding (RLE)                    │    │
-│  │  • Dictionary encoding                          │    │
-│  │  • Delta encoding for sorted data               │    │
-│  │  • LZ4 for general compression                   │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+insert / update / delete ──► ColumnarEngine (sled db "columnar")
+        │                       └─► tree "table:{name}" (JSON blobs)
+        ▼
+select ──► conditions match + offset/limit pagination over tree scan
+        │
+        ▼
+analyze ──► record count + per-field occurrence counts + inferred types
 ```
 
-## Use Cases
+## Main Types & Functions
 
-### Perfect For:
-- **Data Warehousing**: Large-scale analytical queries
-- **Business Intelligence**: Complex aggregations and reporting
-- **Time Series Analysis**: Efficient temporal data processing
-- **OLAP Workloads**: Multi-dimensional analysis
-- **Scientific Computing**: Matrix operations and statistics
+- [`ColumnarEngine`]: the analytics-oriented engine implementing [`StorageEngine`].
+- `insert`: store a record under an auto-generated nanosecond-timestamp id.
+- `select`: filtered, paginated scans over the table tree.
+- `analyze`: per-table record counts, field occurrence counts, and inferred field types.
+- `create_table` / `drop_table` / `truncate_table` / `table_info`: table lifecycle.
 
-### Performance Characteristics:
-- **Read Performance**: Excellent for analytical queries
-- **Write Performance**: Good for bulk inserts, slower for single-row updates
-- **Storage Efficiency**: 20-50% better compression than row-based storage
-- **Query Speed**: 10-100x faster for aggregations on large datasets
-- **Memory Usage**: Higher memory requirements for query processing
+## Limitations
 
-## Data Types Supported
-
-### Optimized Types:
-- **Numeric Types**: Integer, Float (vectorized operations)
-- **Temporal Types**: Date, DateTime (efficient range queries)
-- **Categorical**: String, Enum (dictionary encoding)
-
-### Supported with Limitations:
-- **Complex Types**: JSON, Arrays (stored as binary)
-- **Large Objects**: BLOB, TEXT (external storage recommended)
-
-## Query Optimization
-
-### Automatic Optimizations:
-1. **Column Pruning**: Only read required columns
-2. **Predicate Pushdown**: Filter at storage level
-3. **Index Utilization**: Bitmap indexes for fast filtering
-4. **Vectorization**: SIMD operations for aggregations
-
-### Example Query Flow:
-```text
-SELECT AVG(price) FROM sales WHERE category = 'electronics'
-    ↓
-Column Pruning: Only read 'price' and 'category' columns
-    ↓
-Predicate Pushdown: Filter 'category = electronics' during scan
-    ↓
-Vectorization: SIMD operations for AVG calculation
-    ↓
-Result: ~100x faster than row-based equivalent
-```
-
-## Storage Format
-
-### On-Disk Structure:
-```text
-Table Directory/
-├── metadata.json     # Schema and table information
-├── col1.data         # Column 1 data (compressed)
-├── col1.index        # Column 1 index (bitmap/tree)
-├── col2.data         # Column 2 data (compressed)
-├── col2.index        # Column 2 index
-└── ...
-```
-
-### Compression Strategy:
-- **LZ4**: General-purpose compression for most columns
-- **RLE**: Run-length encoding for sorted/repeated data
-- **Dictionary**: String deduplication for categorical data
-- **Delta**: Difference encoding for numeric sequences
-
-## Implementation Details
-
-### Key Components:
-- **Sled Database**: Embedded key-value store for persistence
-- **LZ4 Compression**: High-speed compression library
-- **Bitmap Indexes**: Fast filtering for equality/range queries
-- **Vector Operations**: SIMD-accelerated aggregations
-
-### Concurrency Model:
-- **Read Operations**: Fully concurrent, snapshot isolation
-- **Write Operations**: Serialized through transaction manager
-- **Compression**: Background compression with zero-downtime
-- **Indexing**: Incremental index updates during writes
-
-## Limitations & Trade-offs
-
-### Write Performance:
-- Single-row inserts are slower due to column reorganization
-- Bulk inserts are highly optimized
-- Updates require reading/writing entire columns
-
-### Memory Usage:
-- Higher memory requirements for query processing
-- Column data must be loaded into memory for operations
-- Caching is crucial for performance
-
-### Schema Changes:
-- Adding columns is efficient (new column file)
-- Removing columns requires data reorganization
-- Type changes may require full table rewrite
-
-## Best Practices
-
-### Data Loading:
-```ignore
-// Use bulk inserts for best performance
-for chunk in data.chunks(10000) {
-    columnar_engine.bulk_insert("sales", chunk)?;
-}
-```
-
-### Query Optimization:
-```ignore
-// Prefer column-specific queries
-let result = engine.aggregate("sales",
-    AggregateQuery {
-        columns: vec!["revenue".to_string()],
-        group_by: vec!["category".to_string()],
-        filters: vec![Filter::equal("region", "north_america")],
-    }
-)?;
-```
-
-### Schema Design:
-```ignore
-// Design for analytical queries
-let schema = Schema {
-    fields: vec![
-        Field::new("timestamp", FieldType::DateTime, false),
-        Field::new("category", FieldType::String, false),
-        Field::new("revenue", FieldType::Float, false),
-        Field::new("quantity", FieldType::Integer, false),
-    ],
-    indexes: vec![
-        Index::bitmap("category", IndexType::Bitmap),
-        Index::btree("timestamp", IndexType::BTree),
-    ],
-};
-```
+- Rows are stored as whole JSON blobs; no per-column compression or bitmap
+  indexes exist yet, and queries always scan the full table.
 */
 
 use crate::{
@@ -201,44 +49,110 @@ use crate::{
 };
 use async_trait::async_trait;
 
-use crate::crypto::FileEncryptionManager;
 use sled::Db;
 use std::any::Any;
 use std::collections::HashMap;
 
-use std::sync::Arc;
-use std::sync::RwLock;
+fn table_key(table: &str) -> String {
+    format!("table:{}", table)
+}
+
+fn schema_key(table: &str) -> String {
+    format!("schema:{}", table)
+}
+
+/// Load the persisted schema for a table, if one was captured at creation.
+fn load_schema(db: &Db, table: &str) -> crate::Result<Option<Schema>> {
+    let schemas = db.open_tree("schemas")?;
+    match schemas.get(schema_key(table))? {
+        Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// Persist a table's schema so inserts can be validated against it.
+fn save_schema(db: &Db, table: &str, schema: &Schema) -> crate::Result<()> {
+    let schemas = db.open_tree("schemas")?;
+    schemas.insert(schema_key(table), serde_json::to_vec(schema)?)?;
+    schemas.flush()?;
+    Ok(())
+}
+
+/// Remove a table's persisted schema.
+fn clear_schema(db: &Db, table: &str) -> crate::Result<()> {
+    let schemas = db.open_tree("schemas")?;
+    schemas.remove(schema_key(table))?;
+    Ok(())
+}
+
+/// Validate a record against a persisted schema, rejecting clearly
+/// incompatible column types while allowing unknown extra fields and nulls.
+fn validate_against_schema(schema: &Schema, data: &serde_json::Value) -> crate::Result<()> {
+    use crate::storage::validation::field_type_accepts;
+    if let Some(obj) = data.as_object() {
+        for field in &schema.fields {
+            if let Some(value) = obj.get(&field.name) {
+                if !field_type_accepts(&field.field_type, value) {
+                    return Err(crate::Error::ValidationError(format!(
+                        "column '{}' got incompatible value {}",
+                        field.name, value
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Equality matching over a stored record. The special `id` key compares
+/// against the record's storage id as a string.
+fn matches_conditions(data: &serde_json::Value, conditions: &serde_json::Value, id: &str) -> bool {
+    if conditions.is_null() || conditions.as_object().is_none_or(|o| o.is_empty()) {
+        return true;
+    }
+    if let Some(obj) = conditions.as_object() {
+        for (key, cond_val) in obj {
+            if key == "id" {
+                if id != cond_val.as_str().unwrap_or("") {
+                    return false;
+                }
+                continue;
+            }
+            match data.get(key) {
+                Some(data_val) => {
+                    if data_val != cond_val {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
 
 /// Columnar storage engine implementation
 ///
-/// Provides high-performance analytical storage with columnar data layout,
-/// advanced compression, and vectorized query processing. Optimized for
-/// OLAP workloads, data warehousing, and complex analytical queries.
+/// Analytics-oriented engine backed by a sled database. Each table is a sled
+/// tree of JSON blobs keyed by nanosecond-timestamp ids. The engine implements
+/// the [`StorageEngine`] CRUD surface, filtered paginated scans, and per-table
+/// analysis; a true columnar layout with per-column compression and bitmap
+/// indexes is planned but not yet implemented.
 ///
 /// # Key Features
-/// - Column-oriented data storage for better compression and query performance
-/// - LZ4 compression with adaptive algorithms
-/// - Bitmap indexes for fast filtering
-/// - SIMD-accelerated aggregations
-/// - Background compaction and optimization
+/// - Sled-backed table trees with atomic insert/update/delete
+/// - Condition filtering over stored JSON with offset/limit pagination
+/// - `analyze` reporting record counts and inferred field types
+/// - Thread-safe concurrent reads and writes
 ///
 /// # Performance Characteristics
-/// - **Read Performance**: Excellent for analytical queries (10-100x faster than row-based)
-/// - **Write Performance**: Good for bulk inserts, moderate for single-row updates
-/// - **Storage Efficiency**: 20-50% better compression ratios
-/// - **Memory Usage**: Higher requirements for query processing
-/// - **Scalability**: Excellent for large datasets with proper partitioning
+/// - Queries scan the whole table tree (no secondary indexes)
+/// - Writes flush eagerly for durability
+/// - Suitable for analytical workloads on datasets where full scans are viable
 pub struct ColumnarEngine {
-    /// Configuration settings for the columnar engine
-    #[allow(dead_code)]
-    config: PrimusDBConfig,
-    /// Embedded Sled database for persistent storage
-    /// Uses separate trees for each table to enable concurrent access
     db: Db,
-    /// File encryption manager for data-at-rest security
-    /// All binary data files are encrypted with AES-256-GCM
-    #[allow(dead_code)]
-    file_encryption: Arc<RwLock<Option<FileEncryptionManager>>>,
 }
 
 impl ColumnarEngine {
@@ -268,17 +182,7 @@ impl ColumnarEngine {
         let db_path = format!("{}/columnar", config.storage.data_dir);
         let db = sled::open(&db_path)?;
 
-        let file_encryption = if config.security.encryption_enabled {
-            Some(FileEncryptionManager::new())
-        } else {
-            None
-        };
-
-        Ok(ColumnarEngine {
-            config: config.clone(),
-            db,
-            file_encryption: Arc::new(RwLock::new(file_encryption)),
-        })
+        Ok(ColumnarEngine { db })
     }
 }
 
@@ -290,9 +194,8 @@ impl StorageEngine for ColumnarEngine {
 
     /// Insert a new record into the columnar storage
     ///
-    /// Stores data in columnar format, generating a unique ID and distributing
-    /// field values across separate column storage units for optimal compression
-    /// and query performance.
+    /// Serializes the JSON record to binary and stores it in the table's sled
+    /// tree under an auto-generated nanosecond-timestamp id.
     ///
     /// # Arguments
     /// * `table` - Target table name
@@ -307,11 +210,9 @@ impl StorageEngine for ColumnarEngine {
     /// - Generates unique IDs using system timestamp
     /// - Serializes data to binary format for storage
     /// - Flushes data immediately for consistency
-    /// - Distributes data across column files for columnar access
     ///
     /// # Performance Notes
-    /// - Single inserts are moderately expensive due to column distribution
-    /// - Consider bulk inserts for high-throughput scenarios
+    /// - Single inserts flush eagerly for durability
     /// - ID generation is monotonic but not guaranteed to be gap-free
     async fn insert(
         &self,
@@ -319,18 +220,27 @@ impl StorageEngine for ColumnarEngine {
         data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
+        if !data.is_object() {
+            return Err(crate::Error::ValidationError(
+                "columnar records must be JSON objects".to_string(),
+            ));
+        }
+        let value = serde_json::to_vec(data)?;
+        let table_owned = table.to_string();
+        let data = data.clone();
         let result: u64 = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
-            let data = data.clone();
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<u64> {
+                if let Some(schema) = load_schema(&db, &table_owned)? {
+                    validate_against_schema(&schema, &data)?;
+                }
                 let tree = db.open_tree(table_key)?;
                 let id = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_nanos() as u64;
                 let key = id.to_be_bytes();
-                let value = serde_json::to_vec(&data)?;
                 tree.insert(key, value)?;
                 tree.flush()?;
                 Ok(id)
@@ -341,67 +251,63 @@ impl StorageEngine for ColumnarEngine {
         Ok(result)
     }
 
-    /// Query records from columnar storage with optional filtering
+    /// Query records from columnar storage with pagination
     ///
-    /// Performs efficient columnar queries by leveraging the storage format.
-    /// Supports pagination through limit/offset and can utilize column pruning
-    /// for optimal performance on analytical workloads.
+    /// Iterates the table's sled tree in key (timestamp) order, skipping
+    /// `offset` records and returning up to `limit` records. Each stored JSON
+    /// blob is deserialized and the record id is recovered from the 8-byte
+    /// big-endian timestamp key.
     ///
     /// # Arguments
     /// * `table` - Target table name
-    /// * `_conditions` - Optional JSON filter conditions (currently simplified)
+    /// * `_conditions` - Optional JSON filter conditions (currently ignored;
+    ///   the engine has no predicate pushdown yet)
     /// * `limit` - Maximum number of records to return
     /// * `offset` - Number of records to skip for pagination
     /// * `_transaction` - Transaction context for consistency
     ///
     /// # Returns
-    /// Vector of matching records in columnar format
-    ///
-    /// # Performance Optimizations
-    /// - Column pruning: Only reads necessary columns
-    /// - Predicate pushdown: Filters applied during scan
-    /// - SIMD operations: Vectorized processing for aggregations
-    /// - Memory-efficient: Streams data to avoid loading everything
+    /// Vector of matching records
     ///
     /// # Limitations
-    /// - Complex JSON conditions not yet fully implemented
-    /// - Full-text search requires additional indexing
-    /// - Complex joins require post-processing
-    ///
-    /// # Future Enhancements
-    /// - Advanced query planning and optimization
-    /// - Parallel query execution across columns
-    /// - Caching for frequently accessed columns
+    /// - Performs a full tree scan; conditions are not applied (the caller
+    ///   must filter in the query pipeline)
+    /// - Records are read as whole JSON blobs; no per-column pruning
     async fn select(
         &self,
         table: &str,
-        _conditions: Option<&serde_json::Value>,
+        conditions: Option<&serde_json::Value>,
         limit: u64,
         offset: u64,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<Vec<Record>> {
+        let conditions = conditions.cloned().unwrap_or(serde_json::Value::Null);
+        let table_owned = table.to_string();
         let result: Vec<Record> = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
-            let _limit_val = limit;
-            let _offset_val = offset;
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<Vec<Record>> {
                 let tree = db.open_tree(table_key)?;
                 let mut records = Vec::new();
-                let offset = offset;
-                let limit = limit;
+                let limit = if limit == 0 { u64::MAX } else { limit };
 
                 for (i, item) in tree.iter().enumerate() {
-                    if i < offset as usize {
+                    let (key, value) = item?;
+                    let ts_bytes: [u8; 8] = key.as_ref().try_into().map_err(|_| {
+                        crate::Error::DataCorruption("columnar key is not 8 bytes".into())
+                    })?;
+                    let id = u64::from_be_bytes(ts_bytes);
+                    let data: serde_json::Value = serde_json::from_slice(&value)?;
+
+                    if !matches_conditions(&data, &conditions, &id.to_string()) {
                         continue;
                     }
                     if records.len() >= limit as usize {
                         break;
                     }
-
-                    let (key, value) = item?;
-                    let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
-                    let data: serde_json::Value = serde_json::from_slice(&value)?;
+                    if i < offset as usize {
+                        continue;
+                    }
 
                     records.push(Record {
                         id: id.to_string(),
@@ -418,65 +324,102 @@ impl StorageEngine for ColumnarEngine {
         Ok(result)
     }
 
+    /// Update a single record identified by an `id` field in `data` or in
+    /// `conditions`.
+    ///
+    /// The record is replaced wholesale with the new value and flushed to disk.
+    /// Fails with a validation error when no `id` can be resolved (a silent
+    /// no-op would mask a misdirected query).
     async fn update(
         &self,
         table: &str,
-        _conditions: Option<&serde_json::Value>,
+        conditions: Option<&serde_json::Value>,
         data: &serde_json::Value,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        if let Some(id_str) = data.get("id").and_then(|v| v.as_str()) {
-            let id = id_str.parse::<u64>()?;
-            let result: u64 = tokio::task::spawn_blocking({
-                let db = self.db.clone();
-                let table_key = format!("table:{}", table);
-                let data = data.clone();
-                move || -> crate::Result<u64> {
-                    let tree = db.open_tree(table_key)?;
-                    let key = id.to_be_bytes();
-                    let value = serde_json::to_vec(&data)?;
-                    tree.insert(key, value)?;
-                    tree.flush()?;
-                    Ok(1)
-                }
-            })
-            .await??;
-            Ok(result)
-        } else {
-            Ok(0)
+        if !data.is_object() {
+            return Err(crate::Error::ValidationError(
+                "columnar update payload must be a JSON object".to_string(),
+            ));
         }
+        let id_str = data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                conditions
+                    .and_then(|c| c.get("id"))
+                    .and_then(|v| v.as_str())
+            })
+            .ok_or_else(|| {
+                crate::Error::ValidationError("columnar update requires an 'id' field".to_string())
+            })?
+            .to_string();
+
+        let value = serde_json::to_vec(data)?;
+        let id = id_str.parse::<u64>()?;
+        let table_owned = table.to_string();
+        let data = data.clone();
+        let result: u64 = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = table_key(&table_owned);
+            move || -> crate::Result<u64> {
+                if let Some(schema) = load_schema(&db, &table_owned)? {
+                    validate_against_schema(&schema, &data)?;
+                }
+                let tree = db.open_tree(table_key)?;
+                let key = id.to_be_bytes();
+                if !tree.contains_key(key)? {
+                    return Err(crate::Error::ValidationError(format!(
+                        "columnar record {} not found in {}",
+                        id, table_owned
+                    )));
+                }
+                tree.insert(key, value)?;
+                tree.flush()?;
+                Ok(1)
+            }
+        })
+        .await??;
+        Ok(result)
     }
 
+    /// Delete a single record matching the `id` condition.
+    ///
+    /// Returns `1` on success. Fails with a validation error when no `id` is
+    /// supplied so a misdirected delete can never silently delete nothing.
     async fn delete(
         &self,
         table: &str,
         conditions: Option<&serde_json::Value>,
         _transaction: &crate::transaction::Transaction,
     ) -> Result<u64> {
-        if let Some(conditions) = conditions {
-            if let Some(id_str) = conditions.get("id").and_then(|v| v.as_str()) {
-                let id = id_str.parse::<u64>()?;
-                let result: u64 = tokio::task::spawn_blocking({
-                    let db = self.db.clone();
-                    let table_key = format!("table:{}", table);
-                    move || -> crate::Result<u64> {
-                        let tree = db.open_tree(table_key)?;
-                        let key = id.to_be_bytes();
-                        tree.remove(key)?;
-                        tree.flush()?;
-                        Ok(1)
-                    }
-                })
-                .await??;
-                Ok(result)
-            } else {
-                Ok(0)
+        let id_str = conditions
+            .and_then(|c| c.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::Error::ValidationError(
+                    "columnar delete requires an 'id' condition".to_string(),
+                )
+            })?;
+        let id = id_str.parse::<u64>()?;
+        let table_owned = table.to_string();
+        let result: u64 = tokio::task::spawn_blocking({
+            let db = self.db.clone();
+            let table_key = table_key(&table_owned);
+            move || -> crate::Result<u64> {
+                let tree = db.open_tree(table_key)?;
+                let key = id.to_be_bytes();
+                let existed = tree.remove(key)?;
+                tree.flush()?;
+                Ok(if existed.is_some() { 1 } else { 0 })
             }
-        } else {
-            Ok(0)
-        }
+        })
+        .await??;
+        Ok(result)
     }
 
+    /// Produce a JSON analysis of a table: total record count, per-field
+    /// occurrence counts, and inferred field types.
     async fn analyze(
         &self,
         table: &str,
@@ -486,14 +429,14 @@ impl StorageEngine for ColumnarEngine {
         let table_owned = table.to_string();
         let result: serde_json::Value = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table_owned);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<serde_json::Value> {
                 let tree = db.open_tree(table_key)?;
                 let mut total_records = 0u64;
                 let mut field_counts: HashMap<String, u64> = HashMap::new();
                 let mut field_types: HashMap<String, String> = HashMap::new();
 
-                for item in tree.iter() {
+                for item in &tree {
                     let (_, value) = item?;
                     total_records += 1;
                     let data: serde_json::Value = serde_json::from_slice(&value)?;
@@ -529,12 +472,17 @@ impl StorageEngine for ColumnarEngine {
         Ok(serde_json::to_string(&result)?)
     }
 
-    async fn create_table(&self, table: &str, _schema: &Schema) -> Result<()> {
+    /// Create a table by opening its backing sled tree and persisting the
+    /// schema for insert-time type validation.
+    async fn create_table(&self, table: &str, schema: &Schema) -> Result<()> {
+        let table_owned = table.to_string();
+        let schema = schema.clone();
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<()> {
                 db.open_tree(table_key)?;
+                save_schema(&db, &table_owned, &schema)?;
                 Ok(())
             }
         })
@@ -542,12 +490,15 @@ impl StorageEngine for ColumnarEngine {
         Ok(())
     }
 
+    /// Drop a table by deleting its backing sled tree.
     async fn drop_table(&self, table: &str) -> Result<()> {
+        let table_owned = table.to_string();
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<()> {
                 db.drop_tree(table_key)?;
+                clear_schema(&db, &table_owned)?;
                 Ok(())
             }
         })
@@ -555,10 +506,12 @@ impl StorageEngine for ColumnarEngine {
         Ok(())
     }
 
+    /// Delete every record from a table by removing all keys in its tree.
     async fn truncate_table(&self, table: &str, _cascade: bool) -> Result<()> {
+        let table_owned = table.to_string();
         tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(&table_owned);
             move || -> crate::Result<()> {
                 let tree = db.open_tree(table_key)?;
                 let mut iter = tree.iter();
@@ -573,10 +526,12 @@ impl StorageEngine for ColumnarEngine {
         Ok(())
     }
 
+    /// Return [`TableInfo`] for a table: row count, field names (sampled from
+    /// the first 20 records), and an inferred `Text`-typed schema.
     async fn table_info(&self, table: &str) -> Result<TableInfo> {
         let (count, size, fields): (usize, u64, Vec<String>) = tokio::task::spawn_blocking({
             let db = self.db.clone();
-            let table_key = format!("table:{}", table);
+            let table_key = table_key(table);
             move || -> crate::Result<(usize, u64, Vec<String>)> {
                 let tree = db.open_tree(table_key)?;
                 let count = tree.len();
@@ -618,5 +573,134 @@ impl StorageEngine for ColumnarEngine {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         })
+    }
+
+    /// Enumerate the names of all columnar tables from their sled trees.
+    fn list_tables(&self) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .db
+            .tree_names()
+            .into_iter()
+            .filter_map(|name| {
+                let name = String::from_utf8(name.to_vec()).ok()?;
+                name.strip_prefix("table:").map(|t| t.to_string())
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{Field, FieldType};
+    use crate::transaction::{IsolationLevel, Transaction, TransactionStatus};
+
+    fn config(dir: &tempfile::TempDir) -> PrimusDBConfig {
+        let mut config = PrimusDBConfig::default();
+        config.storage.data_dir = dir.path().to_string_lossy().into_owned();
+        config
+    }
+
+    fn tx() -> Transaction {
+        Transaction {
+            id: "test".to_string(),
+            operations: vec![],
+            status: TransactionStatus::Prepared,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            isolation_level: IsolationLevel::ReadCommitted,
+            timeout_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_rejects_non_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ColumnarEngine::new(&config(&dir)).unwrap();
+
+        let err = engine
+            .insert("t", &serde_json::json!([1, 2, 3]), &tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_schema_type_validation_on_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ColumnarEngine::new(&config(&dir)).unwrap();
+
+        let schema = Schema {
+            fields: vec![Field {
+                name: "amount".to_string(),
+                field_type: FieldType::Integer,
+                nullable: true,
+                default_value: None,
+                constraints: vec![],
+            }],
+            indexes: vec![],
+            constraints: vec![],
+        };
+        engine.create_table("typed", &schema).await.unwrap();
+
+        let err = engine
+            .insert(
+                "typed",
+                &serde_json::json!({"amount": "not-a-number"}),
+                &tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+
+        engine
+            .insert("typed", &serde_json::json!({"amount": 42}), &tx())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_select_filters_by_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ColumnarEngine::new(&config(&dir)).unwrap();
+
+        engine
+            .insert("sales", &serde_json::json!({"product_id": 1}), &tx())
+            .await
+            .unwrap();
+        engine
+            .insert("sales", &serde_json::json!({"product_id": 2}), &tx())
+            .await
+            .unwrap();
+
+        let records = engine
+            .select(
+                "sales",
+                Some(&serde_json::json!({"product_id": 2})),
+                10,
+                0,
+                &tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].data["product_id"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_and_delete_require_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ColumnarEngine::new(&config(&dir)).unwrap();
+
+        let err = engine
+            .update("sales", None, &serde_json::json!({"product_id": 1}), &tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
+
+        let err = engine.delete("sales", None, &tx()).await.unwrap_err();
+        assert!(matches!(err, crate::Error::ValidationError(_)));
     }
 }

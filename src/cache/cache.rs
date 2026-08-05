@@ -8,7 +8,7 @@ The core memory cache implementation providing compressed storage, LRU eviction,
 - **LZ4 Compression**: Automatic data compression with minimal overhead
 - **LRU Eviction**: Intelligent cache management
 - **Corruption Prevention**: CRC32 checksums for data integrity
-- **Compressed Search**: Pattern matching without decompression
+- **Compressed Search**: Indexed pattern matching over cached values
 - **Bloom Filters**: Fast rejection for search queries
 - **Thread Safety**: Concurrent access with fine-grained locking
 
@@ -57,6 +57,10 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+/// Configuration for a [`MemoryCache`] instance.
+///
+/// Controls the memory budget, compression behaviour, search indexing,
+/// corruption checking and LRU eviction of the cache.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
     /// Maximum memory usage in bytes
@@ -89,6 +93,10 @@ impl Default for CacheConfig {
     }
 }
 
+/// A single cached value stored in compressed form.
+///
+/// Keeps both the original and compressed sizes together with a CRC32
+/// checksum so that corruption can be detected on read.
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
     /// Compressed data
@@ -107,6 +115,10 @@ pub struct CacheEntry {
     pub checksum: u32,
 }
 
+/// Snapshot of cache performance and memory statistics.
+///
+/// Derived on demand from the running counters maintained by
+/// [`MemoryCache`], including hit rate and compression ratio.
 #[derive(Debug, Clone)]
 pub struct CacheStatistics {
     /// Total entries in cache
@@ -131,6 +143,10 @@ pub struct CacheStatistics {
     pub corruptions_detected: u64,
 }
 
+/// The main compressed, searchable cache layer.
+///
+/// Stores entries in a map guarded by an LRU eviction policy, with optional
+/// compression and full-text search over cached values.
 pub struct MemoryCache {
     config: CacheConfig,
     storage: RwLock<HashMap<String, CacheEntry>>,
@@ -439,18 +455,25 @@ impl MemoryCache {
     }
 }
 
+/// Errors that can occur during cache operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
+    /// Compression or decompression failed
     #[error("Compression error: {0}")]
     Compression(#[from] CompressionError),
+    /// A search index operation failed
     #[error("Search error: {0}")]
     Search(#[from] SearchError),
+    /// Memory limit exceeded and LRU eviction could not free enough space
     #[error("Out of memory")]
     OutOfMemory,
+    /// A stored checksum did not match the data on read
     #[error("Data corruption detected")]
     CorruptionDetected,
+    /// Search was requested but not enabled in the configuration
     #[error("Search functionality not enabled")]
     SearchNotEnabled,
+    /// An underlying I/O operation failed
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

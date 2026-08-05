@@ -1,7 +1,13 @@
+//! Vector subcommands (`vector search`, `index`, `stats`, `compact`).
+//!
+//! `search` calls the server's vector-search endpoint; the remaining
+//! subcommands are not yet wired to the CLI.
+
 use crate::cli::command::{GlobalArgs, VectorSubcommands};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch a `vector` subcommand to its handler.
 pub async fn handle_vector(
     cmd: VectorSubcommands,
     global: &GlobalArgs,
@@ -9,10 +15,7 @@ pub async fn handle_vector(
 ) -> Result<()> {
     match cmd {
         VectorSubcommands::Search {
-            index,
-            vector,
-            k,
-            ..
+            index, vector, k, ..
         } => cmd_search(index, vector, k, global, fmt).await,
         VectorSubcommands::Index { .. }
         | VectorSubcommands::Stats { .. }
@@ -29,6 +32,7 @@ pub async fn handle_vector(
     }
 }
 
+/// Run a vector similarity search against `POST /api/v1/advanced/vector-search/:table`.
 async fn cmd_search(
     index: String,
     vector: String,
@@ -37,7 +41,10 @@ async fn cmd_search(
     fmt: &OutputFormat,
 ) -> Result<()> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/advanced/vector-search/{}", global.server_url, index);
+    let url = format!(
+        "{}/api/v1/advanced/vector-search/{}",
+        global.server_url, index
+    );
     let query_vector: Vec<f64> = vector
         .split(',')
         .filter_map(|s| s.trim().parse::<f64>().ok())

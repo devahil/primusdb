@@ -3,7 +3,7 @@
 
 This module provides the main implementation of distributed cache clustering,
 integrating consistent hashing, consensus validation, node management, and
-cross-node communication for enterprise-grade distributed caching.
+cross-node communication.
 */
 
 use super::cache::{CacheConfig, CacheError, CacheStatistics, MemoryCache};

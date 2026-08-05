@@ -216,6 +216,25 @@ export interface GovernorStartResult {
   action: string;
 }
 
+export interface ServerCapabilities {
+  protocol_version: number;
+  server: ServerInfo;
+  engines: EngineCapabilities[];
+  features: string[];
+}
+
+export interface ServerInfo {
+  version: string;
+  node_id: string;
+  instance_id: string;
+  uptime_seconds: number;
+}
+
+export interface EngineCapabilities {
+  storage_type: string;
+  tables: string[];
+}
+
 /**
  * PrimusDB Node.js Client
  */
@@ -589,6 +608,44 @@ export class PrimusDB {
     } catch (error) {
       throw new Error(`Status check failed: ${error}`);
     }
+  }
+
+  // ==================== Capability Negotiation ====================
+
+  /**
+   * Fetch the server capabilities snapshot
+   */
+  async capabilities(): Promise<ServerCapabilities> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/capabilities');
+    if (response.data.success) return response.data.data;
+    throw new Error(response.data.error || 'Capabilities fetch failed');
+  }
+
+  /**
+   * Negotiate with the server: fetch capabilities and validate that the node
+   * supports all required features and storage engines
+   *
+   * @param requiredFeatures - Feature flags the server must advertise
+   * @param requiredEngines - Storage engines the server must advertise
+   * @returns Server capabilities snapshot
+   */
+  async negotiate(requiredFeatures?: string[], requiredEngines?: string[]): Promise<ServerCapabilities> {
+    const caps = await this.capabilities();
+    if (requiredFeatures && requiredFeatures.length > 0) {
+      const missing = requiredFeatures.filter((f) => !caps.features.includes(f));
+      if (missing.length > 0) {
+        throw new Error(`Missing required features: ${missing.join(', ')}`);
+      }
+    }
+    if (requiredEngines && requiredEngines.length > 0) {
+      const available = caps.engines.map((e) => e.storage_type);
+      const missing = requiredEngines.filter((e) => !available.includes(e));
+      if (missing.length > 0) {
+        throw new Error(`Missing required engines: ${missing.join(', ')}`);
+      }
+    }
+    return caps;
   }
 
   /// Cache management methods
@@ -2121,6 +2178,138 @@ export class PrimusDB {
     this.checkConnection();
     const response = await this.httpClient.post('/api/v1/governor/policies/update', { name, limits, action, scope });
     if (!response.data.success) throw new Error(response.data.error || 'Governor update policy failed');
+  }
+
+  // ==================== TimeSeries Methods ====================
+
+  /**
+   * List all time-series metrics
+   */
+  async tsListMetrics(): Promise<any[]> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/timeseries/metrics');
+    return response.data;
+  }
+
+  /**
+   * Describe a time-series metric
+   * @param metric - Metric name
+   */
+  async tsDescribeMetric(metric: string): Promise<any> {
+    this.checkConnection();
+    const response = await this.httpClient.get(`/api/v1/timeseries/metrics/${metric}`);
+    return response.data;
+  }
+
+  /**
+   * Query time-series data points
+   * @param metric - Metric name
+   * @param params - Query parameters (start_time, end_time, resolution, tags, fields, limit)
+   */
+  async tsQuery(metric: string, params?: Record<string, any>): Promise<any[]> {
+    this.checkConnection();
+    const queryParams = new URLSearchParams();
+    if (params) {
+      for (const [key, val] of Object.entries(params)) {
+        const v = typeof val === 'object' ? JSON.stringify(val) : String(val);
+        queryParams.append(key, v);
+      }
+    }
+    const qs = queryParams.toString();
+    const response = await this.httpClient.get(`/api/v1/timeseries/${metric}/query${qs ? '?' + qs : ''}`);
+    return response.data;
+  }
+
+  /**
+   * Insert a single time-series data point
+   * @param metric - Metric name
+   * @param timestamp - Unix timestamp in milliseconds
+   * @param fields - Field values (e.g. {cpu: 50.5})
+   * @param tags - Optional tags (e.g. {host: "web1"})
+   */
+  async tsInsertPoint(metric: string, timestamp: number, fields: Record<string, number>, tags?: Record<string, string>): Promise<any> {
+    this.checkConnection();
+    const payload: Record<string, any> = { metric, timestamp, fields };
+    if (tags) payload.tags = tags;
+    const response = await this.httpClient.post('/api/v1/timeseries/insert', payload);
+    return response.data;
+  }
+
+  /**
+   * Aggregate time-series data
+   * @param metric - Metric name
+   * @param fn - Aggregation function (avg, min, max, sum, count, stddev, median, p50/p90/p95/p99, rate, delta, first, last)
+   * @param params - Aggregation parameters (resolution, start_time, end_time, tags, fill_policy)
+   */
+  async tsAggregate(metric: string, fn: string, params?: Record<string, any>): Promise<any[]> {
+    this.checkConnection();
+    const payload: Record<string, any> = { metric, fn };
+    if (params) {
+      if (params.resolution) payload.resolution = params.resolution;
+      if (params.start_time != null) payload.start_time = params.start_time;
+      if (params.end_time != null) payload.end_time = params.end_time;
+      if (params.tags) payload.tags = params.tags;
+      if (params.fill_policy) payload.fill_policy = params.fill_policy;
+    }
+    const response = await this.httpClient.post(`/api/v1/timeseries/${metric}/aggregate`, payload);
+    return response.data;
+  }
+
+  /**
+   * Downsample time-series data to a lower resolution
+   * @param metric - Metric name
+   * @param targetResolution - Target resolution (1m, 5m, 15m, 1h, 1d)
+   * @param sourceResolution - Source resolution (default: raw)
+   */
+  async tsDownsample(metric: string, targetResolution: string, sourceResolution: string = 'raw'): Promise<any> {
+    this.checkConnection();
+    const response = await this.httpClient.post(`/api/v1/timeseries/${metric}/downsample`, {
+      metric,
+      target_resolution: targetResolution,
+      source_resolution: sourceResolution,
+    });
+    return response.data;
+  }
+
+  /**
+   * Set retention policy for a time-series metric
+   * @param metric - Metric name
+   * @param retentionDays - Retention period in days
+   */
+  async tsSetRetention(metric: string, retentionDays: number): Promise<any> {
+    this.checkConnection();
+    const response = await this.httpClient.post(`/api/v1/timeseries/${metric}/retain`, {
+      metric,
+      retention_days: retentionDays,
+    });
+    return response.data;
+  }
+
+  /**
+   * Add a rollup resolution to a time-series metric
+   * @param metric - Metric name
+   * @param resolution - Resolution string (1m, 5m, 15m, 1h, 1d)
+   * @param retentionDays - Retention in days (0 = unlimited)
+   * @param aggregationFn - Aggregation function (default: avg)
+   */
+  async tsAddResolution(metric: string, resolution: string, retentionDays: number = 0, aggregationFn: string = 'avg'): Promise<any> {
+    this.checkConnection();
+    const response = await this.httpClient.post(`/api/v1/timeseries/${metric}/resolution`, {
+      metric,
+      resolution,
+      retention_days: retentionDays,
+      aggregation_fn: aggregationFn,
+    });
+    return response.data;
+  }
+
+  /**
+   * Get time-series engine statistics
+   */
+  async tsStats(): Promise<any> {
+    this.checkConnection();
+    const response = await this.httpClient.get('/api/v1/timeseries/stats');
+    return response.data;
   }
 
   /**

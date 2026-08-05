@@ -51,8 +51,6 @@ mkdir -p "${OUTPUT_DIR}/${PKG_NAME}"
 # Copy binaries
 echo "Copying binaries..."
 install -m 755 target/release/primusdb "${OUTPUT_DIR}/${PKG_NAME}/primusdb"
-install -m 755 target/release/primusdb-server "${OUTPUT_DIR}/${PKG_NAME}/primusdb-server" 2>/dev/null || true
-install -m 755 target/release/primusdb-cli "${OUTPUT_DIR}/${PKG_NAME}/primusdb-cli" 2>/dev/null || true
 
 # Copy docs and configs
 echo "Copying documentation..."

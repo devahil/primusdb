@@ -1,3 +1,9 @@
+//! Instance management subcommands (`instance list`, `discover`, `inspect`,
+//! `connect`, `stop`, `logs`).
+//!
+//! Lists/discovery probe local endpoints via the [`crate::cli::discovery`]
+//! module; `connect` hands off to the interactive REPL.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -6,6 +12,7 @@ use crate::cli::discovery::{self, DiscoveryConfig};
 use crate::cli::output::{format_output, OutputData, OutputFormat};
 use crate::Result;
 
+/// Dispatch an `instance` subcommand to its handler.
 pub async fn handle_instance(
     cmd: InstanceSubcommands,
     global: &GlobalArgs,
@@ -189,33 +196,8 @@ async fn cmd_inspect(
     Ok(())
 }
 
-async fn cmd_connect(endpoint: String, timeout: u64, fmt: &OutputFormat) -> Result<()> {
-    let url = if endpoint.starts_with("http") {
-        endpoint.clone()
-    } else {
-        format!("http://{}", endpoint)
-    };
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| crate::Error::NetworkError(e.to_string()))?;
-
-    match client.get(format!("{}/health", url)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data = OutputData::Message(format!("Connected to {}", url));
-            println!("{}", format_output(&data, *fmt));
-        }
-        Ok(resp) => {
-            let data = OutputData::Error(format!("Connection failed: HTTP {}", resp.status()));
-            println!("{}", format_output(&data, *fmt));
-        }
-        Err(e) => {
-            let data = OutputData::Error(format!("Connection failed: {}", e));
-            println!("{}", format_output(&data, *fmt));
-        }
-    }
-    Ok(())
+async fn cmd_connect(endpoint: String, _timeout: u64, _fmt: &OutputFormat) -> Result<()> {
+    crate::cli::repl::run(crate::cli::repl::ReplState::new(Some(endpoint)))
 }
 
 async fn cmd_stop(endpoint: String, force: bool, fmt: &OutputFormat) -> Result<()> {

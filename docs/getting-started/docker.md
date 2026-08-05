@@ -11,7 +11,7 @@ The `Dockerfile` at the project root performs these steps:
 3. Creates a `primusdb` user
 4. Copies the source code
 5. Builds the project with `cargo build --release`
-6. Installs `primusdb-server` and `primusdb-cli` to `/usr/local/bin/`
+6. Installs the unified `primusdb` binary to `/usr/local/bin/`
 7. Generates a default configuration at `/etc/primusdb/primusdb.toml`
 8. Installs helper scripts (`primusdb-init`, `primusdb-health`, `primusdb-backup`)
 9. Exposes ports `8080` (API) and `9090` (metrics)
@@ -24,7 +24,7 @@ The `Dockerfile` at the project root performs these steps:
 docker build -t primusdb:latest .
 
 # Build with a specific tag
-docker build -t primusdb:1.3.1-alpha .
+docker build -t primusdb:1.3.2-alpha .
 
 # Build without cache (for a clean build)
 docker build --no-cache -t primusdb:latest .

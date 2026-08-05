@@ -1,5 +1,11 @@
 # Graph Engine
 
+> **NOT AVAILABLE**: The graph engine described here lives in `src/graph.rs`,
+> which is not declared in `src/lib.rs` and is **not compiled** in the current
+> build. The `primusdb graph` CLI subcommand exists but responds that graph
+> operations are not yet available via the CLI. This page is kept as reference
+> for the intended design.
+
 ## Overview
 
 PrimusDB includes an in-memory property graph database engine that supports the

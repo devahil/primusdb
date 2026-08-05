@@ -52,10 +52,6 @@ if [[ "$NO_INSTALL" -eq 0 ]]; then
     install -m 755 target/release/primusdb "$PREFIX/primusdb"
     echo "Installed 'primusdb' to $PREFIX"
 
-    # Also install legacy compatibility wrappers
-    install -m 755 target/release/primusdb-server "$PREFIX/primusdb-server" 2>/dev/null || true
-    install -m 755 target/release/primusdb-cli "$PREFIX/primusdb-cli" 2>/dev/null || true
-
     echo ""
     echo "Installation complete."
     echo "Make sure $PREFIX is in your PATH."

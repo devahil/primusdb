@@ -5,22 +5,22 @@
  * Version: 1.0.0
  */
 
+//! Simple inverted-index full-text search engine.
+//!
+//! Tokenizes text fields, builds an inverted index, and supports
+//! boolean queries (AND, OR, Phrase) with TF-IDF scoring.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use primusdb::fulltext::{FullTextIndex, SearchMode};
+//!
+//! let mut idx = FullTextIndex::new();
+//! idx.index_document(1, "The quick brown fox");
+//! idx.index_document(2, "The lazy dog");
+//! let results = idx.search("quick fox", SearchMode::And);
+//! ```
 use serde::{Deserialize, Serialize};
-/// Simple inverted-index full-text search engine.
-///
-/// Tokenizes text fields, builds an inverted index, and supports
-/// boolean queries (AND, OR, Phrase) with TF-IDF scoring.
-///
-/// # Example
-///
-/// ```ignore
-/// use primusdb::fulltext::{FullTextIndex, SearchMode};
-///
-/// let mut idx = FullTextIndex::new();
-/// idx.index_document(1, "The quick brown fox");
-/// idx.index_document(2, "The lazy dog");
-/// let results = idx.search("quick fox", SearchMode::And);
-/// ```
 use std::collections::{HashMap, HashSet};
 
 /// Search mode for full-text queries

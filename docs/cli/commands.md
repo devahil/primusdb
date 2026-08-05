@@ -22,6 +22,15 @@ primusdb server start [OPTIONS]
 | `-d, --data-dir <PATH>` | Data storage directory | — |
 | `--daemon` | Run as a daemon process | `false` |
 | `--log-level <LEVEL>` | Log level (trace, debug, info, warn, error) | `info` |
+| `--federation-id <ID>` | Federation identifier | `default` |
+| `--cluster-id <ID>` | Cluster identifier | — |
+| `--region <REGION>` | Deployment region | — |
+| `--federation-discovery <HOST>` | Federation peer discovery addresses | — |
+| `--tls-enabled` | Enable TLS/HTTPS | `false` |
+| `--tls-cert <FILE>` | TLS certificate file (PEM) | — |
+| `--tls-key <FILE>` | TLS private key file (PEM) | — |
+| `--tls-ca <FILE>` | CA certificate file for mTLS (PEM) | — |
+| `--mtls-enabled` | Require mutual TLS (client certs) | `false` |
 
 **Examples:**
 ```bash
@@ -39,6 +48,15 @@ primusdb server start --daemon --log-level debug
 
 # Start with custom data directory
 primusdb server start --data-dir /var/lib/primusdb
+
+# Start with TLS
+primusdb server start --tls-enabled --tls-cert ./cert.pem --tls-key ./key.pem
+
+# Start with TLS + mTLS + federation
+primusdb server start \
+  --tls-enabled --tls-cert ./cert.pem --tls-key ./key.pem \
+  --tls-ca ./ca.crt --mtls-enabled \
+  --federation-discovery node2:8081 --cluster-id prod-1
 ```
 
 **Output format:**
@@ -121,7 +139,7 @@ primusdb server status --verbose
 Key        Value
 ---        -----
 Status     Running
-Version    1.3.1-alpha
+Version    1.3.2-alpha
 Verbose    true
 ```
 
@@ -182,7 +200,7 @@ primusdb server config --file prod.toml
 
 ## `primusdb connect`
 
-Connect to a running PrimusDB instance interactively.
+Connect to a running PrimusDB instance and drop into the interactive shell (console-over-console REPL).
 
 **Usage:**
 ```
@@ -199,11 +217,87 @@ primusdb connect [OPTIONS]
 **Examples:**
 ```bash
 # Connect to default server
-primusdb connect http://localhost:8080
+primusdb connect
+
+# Connect to a specific server
+primusdb connect --server http://localhost:8080
 
 # Connect with longer timeout
-primusdb connect http://192.168.1.100:8080 --timeout 30
+primusdb connect --server http://192.168.1.100:8080 --timeout 30
 ```
+
+> `primusdb connect` and `primusdb shell` both enter the interactive shell.
+> For a one-shot health check use `primusdb health --server <URL>`.
+
+---
+
+## `primusdb shell`
+
+Enter the interactive shell against a running PrimusDB instance.
+
+**Usage:**
+```
+primusdb shell [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-s, --server <URL>` | Server URL | `http://localhost:8080` |
+| `--timeout <SECONDS>` | Connection timeout | `10` |
+
+**Examples:**
+```bash
+# Open the shell against the default local server
+primusdb shell
+
+# Open the shell against a remote node
+primusdb shell --server http://192.168.1.100:8080
+```
+
+### Interactive Shell
+
+The shell is a REPL (console-over-console). The prompt shows the connected
+server and the active database context:
+
+```
+primusdb@localhost:8080 [mydb]> 
+```
+
+Every line you type is parsed as a normal `primusdb` command and executed
+against the connected server (the `--server` URL is injected automatically).
+Tab completion walks the command tree, and inline gray hints suggest the
+command being typed.
+
+**REPL-only commands:**
+
+| Command | Description |
+|---------|-------------|
+| `connect <url>` | Switch the connected server (e.g. `connect 192.168.1.5:8080`) |
+| `disconnect` | Leave the shell |
+| `use <db>` | Set the active database for `query`/`sql` (shown in the prompt) |
+| `use none` | Clear the active database |
+| `help` / `?` | Show the interactive help / cheat sheet |
+| `history` | Show command history |
+| `clear` | Clear the screen |
+| `exit` / `quit` | Leave the shell |
+
+**Example session:**
+```
+$ primusdb shell
+Connected to http://localhost:8080 (type 'help' for commands, 'exit' to quit)
+primusdb@localhost:8080> db list
+primusdb@localhost:8080> db create mydb --engine relational
+primusdb@localhost:8080> use mydb
+Switched to database 'mydb'
+primusdb@localhost:8080 [mydb]> query "SELECT * FROM users"
+primusdb@localhost:8080 [mydb]> ts query sensor_readings --tags sensor=a
+primusdb@localhost:8080 [mydb]> exit
+Bye.
+```
+
+History is persisted in `~/.config/primusdb/history`.
 
 ---
 
@@ -327,9 +421,12 @@ primusdb db create <NAME> [OPTIONS]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-e, --engine <ENGINE>` | Storage engine type | `document` |
-| `-n, --namespace <NS>` | Namespace to create the database under | — |
+| `-n, --namespace <NS>` | Parent namespace; the database is created as `NS.NAME` | — |
 
-**Engine types:** `columnar`, `vector`, `document`, `relational`, `graph`
+**Engine types:** `columnar`, `vector`, `document`, `relational`, `keyvalue`, `timeseries`
+
+Creation is idempotent: if the database (namespace) already exists, the
+existing database is returned instead of failing.
 
 **Examples:**
 ```bash
@@ -339,8 +436,11 @@ primusdb db create mydb
 # Create vector database
 primusdb db create embeddings --engine vector
 
-# Create under namespace
-primusdb db create mydb --namespace tenant1/project2
+# Create under a parent namespace (becomes tenant1.mydb)
+primusdb db create mydb --namespace tenant1
+
+# Idempotent: succeeds if the database already exists
+primusdb db create mydb --engine relational
 ```
 
 ### `primusdb db drop`
@@ -1934,8 +2034,8 @@ Found 2 PrimusDB instance(s):
 
 Endpoint                   Node ID              Version    Status
 ---------------------------------------------------------------------------
-http://127.0.0.1:8080      node_12345           1.3.1-alpha healthy
-http://127.0.0.1:8081      node_67890           1.3.1-alpha healthy
+http://127.0.0.1:8080      node_12345           1.3.2-alpha healthy
+http://127.0.0.1:8081      node_67890           1.3.2-alpha healthy
 ```
 
 ---
@@ -1979,10 +2079,10 @@ primusdb version [OPTIONS]
 **Examples:**
 ```bash
 primusdb version
-# → 1.3.1-alpha
+# → 1.3.2-alpha
 
 primusdb version --verbose
-# → PrimusDB v1.3.1-alpha (GPL-3.0)
+# → PrimusDB v1.3.2-alpha (GPL-3.0)
 # → Build: primusdb
 ```
 
@@ -2073,4 +2173,86 @@ primusdb protocol metrics <PROTOCOL> [OPTIONS]
 **Example:**
 ```bash
 primusdb protocol metrics raft --raw
+```
+
+---
+
+## `primusdb certs`
+
+Certificate management for TLS and mTLS. Generate Certificate Authorities,
+signed certificates, and self-signed certificates.
+
+### `primusdb certs create-ca`
+
+Create a new Certificate Authority.
+
+**Usage:**
+```
+primusdb certs create-ca [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--out-dir <DIR>` | Output directory | `.` |
+| `--name <NAME>` | CA common name | `PrimusDB CA` |
+| `--validity-days <DAYS>` | Certificate validity | `3650` |
+
+**Example:**
+```bash
+primusdb certs create-ca --out-dir ./ca --name "MyOrg CA"
+```
+
+### `primusdb certs create-cert`
+
+Create a certificate signed by a CA (for servers or clients).
+
+**Usage:**
+```
+primusdb certs create-cert [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--ca-dir <DIR>` | CA directory (must contain `ca.crt` and `ca.key`) | — |
+| `--out-dir <DIR>` | Output directory | `.` |
+| `--name <NAME>` | Certificate common name | `PrimusDB Node` |
+| `--hosts <HOSTS>` | Subject Alternative Names (SANs) | `localhost 127.0.0.1` |
+| `--validity-days <DAYS>` | Certificate validity | `365` |
+| `--server` | Enable ServerAuth extended key usage | `true` |
+| `--client` | Enable ClientAuth extended key usage | `false` |
+
+**Examples:**
+```bash
+# Create a server certificate
+primusdb certs create-cert --ca-dir ./ca --out-dir ./tls --hosts example.com --server
+
+# Create a client certificate for mTLS
+primusdb certs create-cert --ca-dir ./ca --out-dir ./node1 --name "node-1" --client
+```
+
+### `primusdb certs create-selfsigned`
+
+Create a self-signed certificate (for development/testing).
+
+**Usage:**
+```
+primusdb certs create-selfsigned [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--out-dir <DIR>` | Output directory | `.` |
+| `--name <NAME>` | Certificate common name | `PrimusDB Self-Signed` |
+| `--hosts <HOSTS>` | Subject Alternative Names (SANs) | `localhost 127.0.0.1` |
+| `--validity-days <DAYS>` | Certificate validity | `365` |
+
+**Example:**
+```bash
+primusdb certs create-selfsigned --out-dir ./tls --hosts localhost 127.0.0.1
 ```

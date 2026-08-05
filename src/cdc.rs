@@ -143,9 +143,6 @@ pub struct CdcEngine {
     /// Optional sled database for persisting the WAL to disk
     #[serde(skip)]
     db: Option<sled::Db>,
-    /// Persist path for re-opening the DB on load
-    #[allow(dead_code)]
-    persist_path: Option<PathBuf>,
 }
 
 impl CdcEngine {
@@ -166,7 +163,6 @@ impl CdcEngine {
             max_wal_size,
             active: true,
             db: None,
-            persist_path: None,
         }
     }
 
@@ -177,11 +173,14 @@ impl CdcEngine {
     ///
     /// If `config.persist_path` is set, the engine will open a sled database
     /// at that path and automatically restore any previously persisted events.
-    pub fn with_config(config: &CdcConfig) -> Self {
-        let db = config.persist_path.as_ref().and_then(|path| {
-            std::fs::create_dir_all(path).ok();
-            sled::open(path).ok()
-        });
+    pub fn with_config(config: &CdcConfig) -> crate::Result<Self> {
+        let db = match config.persist_path.as_ref() {
+            Some(path) => {
+                std::fs::create_dir_all(path)?;
+                Some(sled::open(path)?)
+            }
+            None => None,
+        };
 
         let mut engine = Self {
             wal: VecDeque::new(),
@@ -189,7 +188,6 @@ impl CdcEngine {
             max_wal_size: config.max_wal_size,
             active: config.auto_start,
             db,
-            persist_path: config.persist_path.clone(),
         };
 
         // Restore previously persisted state
@@ -197,7 +195,7 @@ impl CdcEngine {
             let _ = engine.load();
         }
 
-        engine
+        Ok(engine)
     }
 
     /// Record a change event
@@ -418,7 +416,7 @@ impl CdcEngine {
 
         // Restore all change events, ordered by sequence
         let mut events: Vec<(u64, ChangeEvent)> = Vec::new();
-        for result in tree.iter() {
+        for result in &tree {
             let (key_bytes, value_bytes) = result.map_err(|e| e.to_string())?;
             let mut arr = [0u8; 8];
             arr.copy_from_slice(&key_bytes);
@@ -620,7 +618,7 @@ mod tests {
         assert_eq!(config.max_wal_size, 10000);
         assert!(config.auto_start);
 
-        let engine = CdcEngine::with_config(&config);
+        let engine = CdcEngine::with_config(&config).unwrap();
         assert!(engine.is_active());
         assert_eq!(engine.len(), 0);
     }
@@ -667,7 +665,7 @@ mod tests {
         };
 
         // Create engine with persistence, record some events
-        let mut engine = CdcEngine::with_config(&config);
+        let mut engine = CdcEngine::with_config(&config).unwrap();
         engine.record_change(
             "users",
             "u1",
@@ -704,7 +702,7 @@ mod tests {
             auto_start: true,
             persist_path: Some(persist_path.clone()),
         };
-        let restored = CdcEngine::with_config(&config2);
+        let restored = CdcEngine::with_config(&config2).unwrap();
 
         assert_eq!(restored.len(), 3);
         assert_eq!(restored.latest_sequence(), 3);
@@ -740,7 +738,7 @@ mod tests {
             persist_path: Some(persist_path),
         };
 
-        let mut engine = CdcEngine::with_config(&config);
+        let mut engine = CdcEngine::with_config(&config).unwrap();
         let old_value = serde_json::json!({"name": "Alice", "age": 30});
         let new_value = serde_json::json!({"name": "Alice", "age": 31});
 
@@ -766,7 +764,7 @@ mod tests {
             auto_start: true,
             persist_path: Some(dir.path().join("cdc_fields")),
         };
-        let restored = CdcEngine::with_config(&config2);
+        let restored = CdcEngine::with_config(&config2).unwrap();
         let events = restored.events_after(0);
 
         assert_eq!(events.len(), 1);

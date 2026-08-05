@@ -1,50 +1,28 @@
 /*!
 # PrimusDB File Encryption - Data-at-Rest Security
 
-This module provides transparent file-level encryption for all storage engines,
-ensuring that data files cannot be read or modified with hexadecimal editors.
+A standalone helper for encrypting individual files (or buffers) with
+AES-256-GCM. It is not wired into the storage engines; callers invoke
+[`FileEncryptionManager`] directly when they need an encrypted on-disk
+artifact.
 
 ## Features
 
-- **Transparent Encryption**: Files are encrypted/decrypted automatically on read/write
-- **AES-256-GCM**: Military-grade authenticated encryption
-- **Per-File Keys**: Each file can have its own derived encryption key
-- **Integrity Verification**: Tamper detection with authentication tags
-- **Optional for Documents**: JSON documents can be stored encrypted or plaintext
+- **AES-256-GCM**: Authenticated encryption with tamper detection
+- **Per-File Keys**: Each file's key is derived from a master key plus a
+  random per-file salt
+- **Integrity Verification**: 16-byte authentication tag + plaintext checksum
+- **Convenience IO**: `write_encrypted_file` / `read_encrypted_file` / `is_encrypted_file`
 
 ## Architecture
 
 ```text
-File Encryption Layer
-══════════════════════════════════════════════════════════════════════
-
-┌─────────────────────────────────────────────────────────────────┐
-│                    Storage Engine Layer                           │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐            │
-│  │  Columnar   │ │   Vector    │ │  Relational │            │
-│  └──────────────┘ └──────────────┘ └──────────────┘            │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   File Encryption Layer                           │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  EncryptedFileManager                                     │   │
-│  │  • Auto-encrypt on write                                 │   │
-│  │  • Auto-decrypt on read                                 │   │
-│  │  • Key derivation per file                              │   │
-│  │  • Tamper detection                                     │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    File System                                    │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐          │
-│  │ .encbin  │ │ .encbin  │ │ .encbin  │ │ .json    │          │
-│  │ (col)    │ │ (vec)    │ │ (rel)    │ │ (doc opt)│          │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘          │
-└─────────────────────────────────────────────────────────────────┘
+FileEncryptionManager
+  ├─ new() / from_password()      master key (random or derived)
+  ├─ encrypt_file(bytes)          -> header (44 B) + ciphertext + tag
+  ├─ decrypt_file(bytes)          -> plaintext (verifies magic/tag/checksum)
+  ├─ write_encrypted_file(path, plaintext)
+  └─ read_encrypted_file(path)    (+ is_encrypted_file path probe)
 ```
 
 ## File Format
@@ -54,13 +32,13 @@ Encrypted File Format
 ══════════════════════════════════════════════════════════════════════
 
 ┌────────────────────────────────────────────────────────────────┐
-│ Header (16 bytes)                                              │
-│ ├─ Magic: "PREN" (4 bytes) - File identification             │
-│ ├─ Version: u16 (2 bytes) - Encryption format version         │
-│ ├─ Flags: u16 (2 bytes) - Encryption options                  │
-│ ├─ Key Salt: [u8; 16] (16 bytes) - For key derivation        │
-│ ├─ Nonce: [u8; 12] (12 bytes) - Encryption nonce             │
-│ └─ Reserved: [u8; 8] (8 bytes) - Future use                   │
+│ Header (44 bytes total)                                       │
+│ ├─ Magic: "PREN" (4 bytes)  - File identification             │
+│ ├─ Version: u16 (2 bytes)   - Encryption format version       │
+│ ├─ Flags: u16 (2 bytes)     - Encryption/compression flags    │
+│ ├─ Key Salt: [u8; 16]       - For key derivation              │
+│ ├─ Nonce: [u8; 12]          - Encryption nonce                │
+│ └─ Checksum: [u8; 8]        - Plaintext integrity checksum    │
 ├────────────────────────────────────────────────────────────────┤
 │ Encrypted Data (variable length)                               │
 │ ├─ Authentication Tag: 16 bytes                                │
@@ -80,16 +58,25 @@ use std::fs::File;
 use std::io::{Read, Write as IoWrite};
 use std::path::Path;
 
+/// Magic bytes identifying a PrimusDB encrypted file (`"PREN"`).
 pub const FILE_MAGIC: &[u8; 4] = b"PREN";
+/// Current encryption file format version.
 pub const FILE_VERSION: u16 = 1;
+/// Total header size in bytes (magic + version + flags + salt + nonce + checksum).
 pub const HEADER_SIZE: usize = 44;
+/// Size of the GCM nonce in bytes.
 pub const NONCE_SIZE: usize = 12;
+/// Size of the per-file key derivation salt in bytes.
 pub const SALT_SIZE: usize = 16;
+/// Size of the GCM authentication tag in bytes.
 pub const TAG_SIZE: usize = 16;
 
+/// Flags describing how a file was stored.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FileEncryptionFlags {
+    /// Whether the payload is encrypted
     pub encrypted: bool,
+    /// Whether the payload is compressed
     pub compressed: bool,
 }
 
@@ -102,22 +89,35 @@ impl Default for FileEncryptionFlags {
     }
 }
 
+/// Header stored at the start of every encrypted file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedFileHeader {
+    /// Magic bytes identifying the format
     pub magic: [u8; 4],
+    /// Encryption format version
     pub version: u16,
+    /// Encryption/compression flags
     pub flags: FileEncryptionFlags,
+    /// Salt used to derive the per-file key
     pub key_salt: [u8; SALT_SIZE],
+    /// Nonce used during encryption
     pub nonce: [u8; NONCE_SIZE],
+    /// Checksum of the plaintext (integrity verification)
     pub data_checksum: [u8; 8],
 }
 
+/// Encrypts and decrypts files on disk using AES-256-GCM with per-file keys.
+///
+/// Each file is encrypted under a key derived from the manager's master key
+/// and a random per-file salt, so files remain unreadable even if the master
+/// key is shared across the cluster.
 pub struct FileEncryptionManager {
     master_key: [u8; 32],
     rng: ring::rand::SystemRandom,
 }
 
 impl FileEncryptionManager {
+    /// Create a manager with a freshly generated random master key.
     pub fn new() -> Self {
         let mut master_key = [0u8; 32];
         let rng = ring::rand::SystemRandom::new();
@@ -125,6 +125,9 @@ impl FileEncryptionManager {
         Self { master_key, rng }
     }
 
+    /// Create a manager whose master key is deterministically derived from a
+    /// password, allowing the same files to be decrypted on any node that
+    /// knows the password.
     pub fn from_password(password: &str) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(password.as_bytes());
@@ -152,6 +155,7 @@ impl FileEncryptionManager {
         key
     }
 
+    /// Encrypt a plaintext buffer into the on-disk file format (header + ciphertext).
     pub fn encrypt_file(&self, plaintext: &[u8]) -> crate::Result<Vec<u8>> {
         let mut salt = [0u8; SALT_SIZE];
         self.rng
@@ -202,6 +206,8 @@ impl FileEncryptionManager {
         Ok(output)
     }
 
+    /// Decrypt a buffer produced by [`encrypt_file`](Self::encrypt_file),
+    /// verifying the magic, version, authentication tag and checksum.
     pub fn decrypt_file(&self, encrypted: &[u8]) -> crate::Result<Vec<u8>> {
         if encrypted.len() < HEADER_SIZE + TAG_SIZE {
             return Err(crate::Error::CryptoError(
@@ -270,6 +276,7 @@ impl FileEncryptionManager {
         Ok(plaintext)
     }
 
+    /// Encrypt plaintext and write it to the given path.
     pub fn write_encrypted_file(&self, path: &Path, plaintext: &[u8]) -> crate::Result<()> {
         let encrypted = self.encrypt_file(plaintext)?;
 
@@ -279,6 +286,7 @@ impl FileEncryptionManager {
         Ok(())
     }
 
+    /// Read and decrypt the file at the given path.
     pub fn read_encrypted_file(&self, path: &Path) -> crate::Result<Vec<u8>> {
         let mut file = File::open(path)?;
         let mut encrypted = Vec::new();
@@ -287,6 +295,7 @@ impl FileEncryptionManager {
         self.decrypt_file(&encrypted)
     }
 
+    /// Check whether a file starts with the PrimusDB encryption magic.
     pub fn is_encrypted_file(path: &Path) -> bool {
         if let Ok(mut file) = File::open(path) {
             let mut magic = [0u8; 4];

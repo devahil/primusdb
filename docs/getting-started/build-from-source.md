@@ -1,6 +1,6 @@
 # Building PrimusDB from Source
 
-This guide covers compiling PrimusDB v1.3.1-alpha from source on Linux, macOS, and Windows.
+This guide covers compiling PrimusDB v1.3.2-alpha from source on Linux, macOS, and Windows.
 
 ## Prerequisites
 
@@ -82,8 +82,6 @@ The binaries are written to `target/debug/`:
 | Binary | Path |
 |--------|------|
 | `primusdb` | `target/debug/primusdb` |
-| `primusdb-server` (legacy) | `target/debug/primusdb-server` |
-| `primusdb-cli` (legacy) | `target/debug/primusdb-cli` |
 
 ### Release Build
 

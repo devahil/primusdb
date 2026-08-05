@@ -1,220 +1,22 @@
 /*!
-# PrimusDB Cryptographic Operations - Security & Encryption
+# PrimusDB Cryptographic Operations
 
-This module provides comprehensive cryptographic functionality for PrimusDB,
-including data encryption, key management, digital signatures, and secure
-random number generation.
+Symmetric encryption, hashing and password hashing used to protect data at
+rest. All encryption is authenticated (AEAD) so ciphertext tampering is
+detectable.
 
-## Cryptographic Architecture
+## Module layout
 
 ```text
-Security Layer Architecture
-═══════════════════════════════════════════════════════════════
-
-┌─────────────────────────────────────────────────────────┐
-│                Encryption Services                      │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Data Encryption (AES-256-GCM)                  │    │
-│  │  • Symmetric encryption for data at rest        │    │
-│  │  • Authenticated encryption (AEAD)              │    │
-│  │  • Key rotation and versioning                  │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Key Management                                │    │
-│  │  • Master key hierarchy                        │    │
-│  │  • Derived encryption keys                      │    │
-│  │  • Key rotation policies                        │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Digital Signatures                            │    │
-│  │  • Transaction signing                         │    │
-│  │  • Block validation                             │    │
-│  │  • Certificate verification                     │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│            Cryptographic Primitives                     │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Hash Functions                                 │    │
-│  │  • SHA-256 for integrity checks                 │    │
-│  │  • HMAC for message authentication               │    │
-│  │  • PBKDF2 for key derivation                     │    │
-│  └─────────────────────────────────────────────────┘    │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  Random Number Generation                       │    │
-│  │  • Cryptographically secure RNG                 │    │
-│  │  • Nonce generation                             │    │
-│  │  • Salt generation                              │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+CryptoManager
+  ├─ generate_data_key   -> EncryptionKey (always AES-256-GCM)
+  ├─ encrypt / decrypt   -> EncryptedData { key_id, nonce, ciphertext, tag }
+  │                        (AES-256-GCM or ChaCha20-Poly1305 per key)
+  ├─ hash_data           -> SHA-256 | SHA3-256 | Blake3
+  ├─ create/verify data integrity checksums
+  ├─ hash_password / verify_password  -> Argon2id
+  └─ rotate_keys         -> bump rotation counter, refresh active key set
 ```
-
-## Security Features
-
-### Data Encryption
-- **AES-256-GCM**: Authenticated encryption with associated data
-- **Key Rotation**: Automatic key rotation with configurable intervals
-- **Key Hierarchy**: Master keys derive encryption keys for different purposes
-- **Secure Erasure**: Cryptographic key erasure for decommissioned data
-
-### Digital Signatures
-- **ECDSA**: Elliptic curve digital signatures for transactions
-- **Batch Verification**: Efficient verification of multiple signatures
-- **Certificate Chains**: X.509 certificate validation and chaining
-
-### Key Management
-- **Hardware Security Modules**: HSM integration for key storage
-- **Key Derivation**: PBKDF2 and Argon2 for password-based key derivation
-- **Key Backup**: Encrypted key backups with recovery procedures
-
-## Usage Examples
-
-### Data Encryption
-```ignore
-use primusdb::crypto::CryptoManager;
-
-let crypto = CryptoManager::new(&security_config)?;
-
-// Encrypt sensitive data
-let plaintext = b"Sensitive customer data";
-let encrypted = crypto.encrypt_data(plaintext, "customer_records")?;
-assert_ne!(encrypted, plaintext);
-
-// Decrypt data
-let decrypted = crypto.decrypt_data(&encrypted, "customer_records")?;
-assert_eq!(decrypted, plaintext);
-```
-
-### Key Management
-```ignore
-// Generate new encryption key
-let key_id = crypto.generate_encryption_key("AES256GCM", 86400 * 30)?; // 30 days
-
-// Rotate keys automatically
-crypto.rotate_expired_keys()?;
-
-// List active keys
-let active_keys = crypto.list_active_keys()?;
-for key in active_keys {
-    println!("Key {} expires at {}", key.id, key.expires_at);
-}
-```
-
-### Digital Signatures
-```ignore
-// Sign transaction data
-let signature = crypto.sign_data(&transaction_bytes, &private_key)?;
-
-// Verify signature
-let is_valid = crypto.verify_signature(&transaction_bytes, &signature, &public_key)?;
-assert!(is_valid);
-```
-
-### Password Hashing
-```ignore
-// Hash password for storage
-let password_hash = crypto.hash_password("user_password")?;
-
-// Verify password against hash
-let is_valid = crypto.verify_password("user_password", &password_hash)?;
-assert!(is_valid);
-```
-
-## Cryptographic Algorithms
-
-### Symmetric Encryption
-- **AES-256-GCM**: Primary encryption algorithm
-- **ChaCha20-Poly1305**: Alternative for constrained environments
-- **AES-256-CBC**: Legacy compatibility (deprecated)
-
-### Hash Functions
-- **SHA-256**: Primary hash function for integrity
-- **SHA-3**: Future-proof alternative
-- **Blake3**: High-performance hashing
-
-### Key Derivation
-- **Argon2**: Password hashing and key derivation
-- **PBKDF2**: Compatible key derivation
-- **HKDF**: Hierarchical key derivation
-
-## Security Best Practices
-
-### Key Management
-1. **Regular Rotation**: Rotate keys according to security policies
-2. **Secure Storage**: Store master keys in HSM when possible
-3. **Access Control**: Limit key access to authorized processes
-4. **Backup Security**: Encrypt key backups with separate keys
-
-### Encryption Usage
-1. **Authenticated Encryption**: Always use AEAD modes (GCM)
-2. **Unique Nonces**: Never reuse nonces for the same key
-3. **Key Separation**: Use different keys for different purposes
-4. **Secure Random**: Always use cryptographically secure RNG
-
-### Operational Security
-1. **Audit Logging**: Log all cryptographic operations
-2. **Monitoring**: Monitor for unusual cryptographic activity
-3. **Incident Response**: Have procedures for key compromise
-4. **Compliance**: Meet regulatory requirements (GDPR, HIPAA, etc.)
-
-## Performance Considerations
-
-### Encryption Overhead
-- **AES-256-GCM**: ~10-20% performance overhead
-- **Key Rotation**: Minimal impact with proper caching
-- **Batch Operations**: Significantly faster for multiple items
-
-### Memory Usage
-- **Key Cache**: ~1MB for active key cache
-- **Encryption Buffers**: Temporary buffers for data processing
-- **Signature Verification**: Minimal memory for ECDSA operations
-
-### CPU Usage
-- **Encryption**: Hardware acceleration on modern CPUs
-- **Hashing**: Optimized implementations for high throughput
-- **Key Derivation**: Configurable work factors for security/performance balance
-
-## Implementation Details
-
-### Thread Safety
-- **Immutable Keys**: Keys are immutable once created
-- **Atomic Operations**: Key rotation uses atomic operations
-- **Lock-Free Access**: Most operations don't require locks
-
-### Error Handling
-- **Detailed Errors**: Specific error types for different failure modes
-- **Secure Cleanup**: Sensitive data is securely erased on errors
-- **Logging**: Security events are logged without exposing secrets
-
-### FIPS Compliance
-- **FIPS 140-2**: Compatible with FIPS-certified modules
-- **Algorithm Selection**: Configurable for FIPS environments
-- **Audit Trails**: Complete audit logging of cryptographic operations
-
-## Future Enhancements
-
-### Post-Quantum Cryptography
-- **Lattice-based**: Kyber for key exchange
-- **Hash-based**: XMSS for digital signatures
-- **Multivariate**: Rainbow signatures
-
-### Hardware Acceleration
-- **AES-NI**: Intel AES instruction set acceleration
-- **ARM Crypto**: ARMv8 cryptographic extensions
-- **GPU Acceleration**: CUDA/OpenCL for bulk operations
-
-### Advanced Features
-- **Homomorphic Encryption**: Computations on encrypted data
-- **Zero-Knowledge Proofs**: Privacy-preserving verification
-- **Threshold Cryptography**: Distributed key operations
-
-This module provides the cryptographic foundation for PrimusDB's
-enterprise-grade security, ensuring data confidentiality, integrity,
-and authenticity across all operations.
 */
 
 use aes_gcm::aead::Aead;
@@ -227,84 +29,99 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+/// Manages encryption keys and performs authenticated encryption/decryption.
 pub struct CryptoManager {
-    #[allow(dead_code)]
-    config: crate::SecurityConfig,
-    #[allow(dead_code)]
-    master_key: Vec<u8>,
     key_rotation_counter: u64,
     active_keys: HashMap<String, EncryptionKey>,
-    #[allow(dead_code)]
     random: SystemRandom,
 }
 
+/// An encryption key with an identifier, creation/expiry timestamps and an
+/// associated algorithm.
 #[derive(Debug, Clone)]
 pub struct EncryptionKey {
+    /// Unique key identifier used to reference the key when decrypting
     pub id: String,
+    /// Raw key material (32 bytes for AES-256)
     pub key: Vec<u8>,
+    /// When the key was created
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the key expires and should no longer be used
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Symmetric algorithm the key is used with
     pub algorithm: EncryptionAlgorithm,
 }
 
+/// Supported symmetric encryption algorithms.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EncryptionAlgorithm {
+    /// AES-256 in GCM mode (authenticated encryption)
     AES256GCM,
+    /// ChaCha20-Poly1305 (authenticated encryption)
     ChaCha20Poly1305,
 }
 
+/// Authenticated ciphertext produced by [`CryptoManager`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
+    /// Id of the key that produced this ciphertext
     pub key_id: String,
+    /// Unique nonce used during encryption
     pub nonce: Vec<u8>,
+    /// Encrypted payload (without the authentication tag)
     pub ciphertext: Vec<u8>,
+    /// Authentication tag used to detect tampering
     pub tag: Vec<u8>,
+    /// Algorithm used for encryption
     pub algorithm: EncryptionAlgorithm,
 }
 
+/// Integrity metadata (checksum and hash algorithm) attached to encrypted
+/// data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataIntegrity {
+    /// Hex-encoded checksum of the data
     pub checksum: String,
+    /// Hash algorithm used to compute the checksum
     pub hash_algorithm: HashAlgorithm,
+    /// When the checksum was computed
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Supported hash algorithms for integrity checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HashAlgorithm {
+    /// SHA-256
     SHA256,
+    /// SHA-3 with a 256-bit digest
     SHA3_256,
+    /// Blake3 (high performance)
     Blake3,
 }
 
 impl CryptoManager {
+    /// Create a [`CryptoManager`], honouring the `encryption_enabled` flag.
+    ///
+    /// When encryption is disabled a no-op manager with no active keys is
+    /// returned so that callers can share a single code path.
     pub fn new(config: &crate::SecurityConfig) -> crate::Result<Self> {
         if !config.encryption_enabled {
             // Return a no-op crypto manager when encryption is disabled
             return Ok(Self {
-                config: config.clone(),
-                master_key: vec![], // Empty key when disabled
                 key_rotation_counter: 0,
                 active_keys: HashMap::new(),
                 random: SystemRandom::new(),
             });
         }
 
-        // Generate master key
-        let mut master_key = vec![0u8; 32];
-        let random = SystemRandom::new();
-        random.fill(&mut master_key).map_err(|e| {
-            crate::Error::CryptoError(format!("Failed to generate master key: {}", e))
-        })?;
-
         Ok(CryptoManager {
-            config: config.clone(),
-            master_key,
             key_rotation_counter: 0,
             active_keys: HashMap::new(),
-            random,
+            random: SystemRandom::new(),
         })
     }
 
+    /// Generate a fresh 32-byte AES-256-GCM data key and register it as active.
     pub fn generate_data_key(&mut self) -> crate::Result<EncryptionKey> {
         let mut key_bytes = vec![0u8; 32];
         self.random.fill(&mut key_bytes).map_err(|e| {
@@ -329,6 +146,7 @@ impl CryptoManager {
         Ok(encryption_key)
     }
 
+    /// Encrypt plaintext with the given key, returning authenticated ciphertext.
     pub fn encrypt(&self, plaintext: &[u8], key: &EncryptionKey) -> crate::Result<EncryptedData> {
         match key.algorithm {
             EncryptionAlgorithm::AES256GCM => self.encrypt_aes256_gcm(plaintext, key),
@@ -336,6 +154,7 @@ impl CryptoManager {
         }
     }
 
+    /// Decrypt authenticated ciphertext using the key registered under its id.
     pub fn decrypt(&self, encrypted_data: &EncryptedData) -> crate::Result<Vec<u8>> {
         let key = self
             .active_keys
@@ -470,6 +289,7 @@ impl CryptoManager {
         Ok(combined)
     }
 
+    /// Hash data using the requested hash algorithm.
     pub fn hash_data(&self, data: &[u8], algorithm: HashAlgorithm) -> crate::Result<String> {
         match algorithm {
             HashAlgorithm::SHA256 => {
@@ -492,6 +312,7 @@ impl CryptoManager {
         }
     }
 
+    /// Verify that data matches a previously created [`DataIntegrity`] record.
     pub fn verify_data_integrity(
         &self,
         data: &[u8],
@@ -501,6 +322,7 @@ impl CryptoManager {
         Ok(computed_checksum == integrity.checksum)
     }
 
+    /// Compute a [`DataIntegrity`] record for data (Blake3 checksum).
     pub fn create_data_integrity(&self, data: &[u8]) -> crate::Result<DataIntegrity> {
         let checksum = self.hash_data(data, HashAlgorithm::Blake3)?;
         Ok(DataIntegrity {
@@ -510,6 +332,7 @@ impl CryptoManager {
         })
     }
 
+    /// Hash a password with Argon2, returning the PHC string for storage.
     pub fn hash_password(&self, password: &str) -> crate::Result<String> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
@@ -521,6 +344,7 @@ impl CryptoManager {
         Ok(password_hash.to_string())
     }
 
+    /// Verify a password against a stored Argon2 PHC hash.
     pub fn verify_password(&self, password: &str, hash: &str) -> crate::Result<bool> {
         let parsed_hash = PasswordHash::new(hash)
             .map_err(|e| crate::Error::CryptoError(format!("Invalid password hash: {}", e)))?;
@@ -537,6 +361,7 @@ impl CryptoManager {
         }
     }
 
+    /// Rotate all active keys, expiring the current set and generating a fresh key.
     pub fn rotate_keys(&mut self) -> crate::Result<()> {
         println!("Rotating encryption keys");
 
@@ -553,6 +378,7 @@ impl CryptoManager {
         Ok(())
     }
 
+    /// Report the health status of every registered key.
     pub fn get_key_status(&self) -> HashMap<String, KeyStatus> {
         let mut status = HashMap::new();
         let now = chrono::Utc::now();
@@ -573,10 +399,14 @@ impl CryptoManager {
     }
 }
 
+/// Lifecycle health status of an encryption key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyStatus {
+    /// Key is valid and in use
     Active,
+    /// Key expires within the configured rotation window
     ExpiringSoon,
+    /// Key has passed its expiry time
     Expired,
 }
 
@@ -595,6 +425,7 @@ mod tests {
             encryption_enabled: true,
             key_rotation_interval: 86400,
             auth_required: false,
+            mfa_enabled: false,
         }
     }
 
@@ -603,6 +434,7 @@ mod tests {
             encryption_enabled: false,
             key_rotation_interval: 86400,
             auth_required: false,
+            mfa_enabled: false,
         }
     }
 

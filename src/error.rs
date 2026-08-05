@@ -133,6 +133,10 @@ pub enum Error {
     #[error("Data corruption detected: {0}")]
     DataCorruption(String),
 
+    /// Database integrity subsystem failure (genesis, records, checkpoints).
+    #[error("Integrity error: {0}")]
+    IntegrityError(#[from] crate::integrity::IntegrityError),
+
     /// Network communication failure
     /// Includes connection timeouts, DNS failures, and protocol errors
     /// Recovery: Check network configuration and retry with backoff
